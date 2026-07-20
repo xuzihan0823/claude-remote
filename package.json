@@ -1,0 +1,31 @@
+{
+  "name": "claude-remote",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "//": "engines.node >=22.5：interactions 使用 node:sqlite（DatabaseSync 自 Node 22.5 起提供）",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "dev": "tsx packages/daemon/src/index.ts",
+    "test": "pnpm -r --if-present test",
+    "typecheck:packages": "pnpm -r --if-present typecheck",
+    "typecheck:root": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "pnpm run typecheck:packages && pnpm run typecheck:root"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.4.2",
+    "@capacitor/core": "^8.4.2",
+    "@capacitor/ios": "^8.4.2",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
