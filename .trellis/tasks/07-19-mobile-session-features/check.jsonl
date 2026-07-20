@@ -1,0 +1,5 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check API, event, persistence, and UI round-trip consistency."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Review for duplicated model/config validation and state transitions."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Review invalid input, busy, abort, and unknown session responses."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Review responsive layout, accessibility labels, and no-overlap behavior."}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Review shared payload typing and boundary validation."}

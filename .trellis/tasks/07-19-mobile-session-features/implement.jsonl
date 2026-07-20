@@ -1,0 +1,6 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Map daemon, SDK, Web, and iOS payload boundaries before implementation."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Reuse the existing Runner, composer, route, and icon generation patterns."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Preserve the existing structured API error response shape."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Apply project backend testing and lifecycle expectations."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Keep model/cwd/run state aligned with existing Preact bus and server state patterns."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Apply existing frontend validation and UI quality expectations."}
