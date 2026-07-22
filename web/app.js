@@ -89,8 +89,17 @@ function toast(text, kind = 'info') { bus.emit('toast', { id: Math.random().toSt
 
 const TOKEN_KEY = 'bridge_token';
 const BASE_KEY = 'bridge_base';
+const BASES_KEY = 'bridge_bases'; // 候选地址表（JSON 数组，扫码配对写入，连接时顺序探测）
 let token = localStorage.getItem(TOKEN_KEY) || '';
 let baseUrl = (localStorage.getItem(BASE_KEY) || '').trim().replace(/\/+$/, '');
+
+function loadBases() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(BASES_KEY) || '[]');
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string' && x.trim()) : [];
+  } catch { return []; }
+}
+function saveBases(bases) { localStorage.setItem(BASES_KEY, JSON.stringify(bases)); }
 
 function normalizeBase(raw) {
   let s = String(raw || '').trim().replace(/\/+$/, '');
@@ -123,11 +132,20 @@ function wsEndpoint() {
 class ApiError extends Error {
   constructor(status, code, data) { super(code); this.status = status; this.code = code; this.data = data || {}; }
 }
+// 各类请求的超时：健康检查 8s、普通 20s、上传 60s（黑洞地址不再无限挂起）
+function apiTimeoutMs(path) {
+  if (path.startsWith('/api/health')) return 8_000;
+  if (path.includes('/upload')) return 60_000;
+  return 20_000;
+}
 async function api(path, opts = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? apiTimeoutMs(path));
   let res;
   try {
     res = await fetch(`${baseUrl}${path}`, {
       ...opts,
+      signal: ctrl.signal,
       headers: {
         Authorization: `Bearer ${token}`,
         ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
@@ -135,18 +153,47 @@ async function api(path, opts = {}) {
       },
     });
   } catch (e) {
-    throw new ApiError(0, 'network_error');
-  }
+    throw new ApiError(0, ctrl.signal.aborted ? 'network_timeout' : 'network_error');
+  } finally { clearTimeout(timer); }
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) { bus.emit('unauthorized'); throw new ApiError(401, 'unauthorized'); }
   if (!res.ok) throw new ApiError(res.status, data.error || `http_${res.status}`, data);
   return data;
 }
 
+// ---- 多候选地址探测：逐个 GET /api/health（各带 8s 超时），返回首个成功的 base。
+// token 错误立即抛出（换地址也救不了）；否则记住最后一次网络错误。
+async function probeBase(base, tok) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8_000);
+  try {
+    const res = await fetch(`${base}/api/health`, { headers: { Authorization: `Bearer ${tok}` }, signal: ctrl.signal });
+    if (res.status === 401) throw new ApiError(401, 'unauthorized');
+    if (!res.ok) throw new ApiError(res.status, `http_${res.status}`);
+  } catch (e) {
+    if (e instanceof ApiError) throw e;
+    throw new ApiError(0, ctrl.signal.aborted ? 'network_timeout' : 'network_error');
+  } finally { clearTimeout(timer); }
+}
+async function probeBases(bases, tok) {
+  let lastErr = new ApiError(0, 'network_error');
+  for (const raw of bases) {
+    const base = normalizeBase(raw);
+    if (!base) continue;
+    try { await probeBase(base, tok); return base; }
+    catch (e) { if (e.code === 'unauthorized') throw e; lastErr = e; }
+  }
+  throw lastErr;
+}
+function connErrMsg(e) {
+  if (e.code === 'unauthorized') return 'token 不正确';
+  if (e.code === 'network_timeout') return '连接超时（Mac 不可达）：检查 Mac 上 daemon 是否在跑、Tailscale 是否开启';
+  return '无法连接 daemon（地址或网络错误）';
+}
+
 // 会话元信息缓存（标题/状态，聊天页与审批卡共用）
 const sessionCache = new Map();
 const pendingSessionMessages = new Map();
-const pendingSessionFiles = new Map();
 let modelCache = { models: [], defaultModel: '' };
 function cacheSessions(list) { for (const s of list) sessionCache.set(s.sessionId, s); }
 async function fetchSessions(limit = 100) {
@@ -178,27 +225,6 @@ function resolveDefaultName(catalog) {
   if (!defaultModel) return '';
   const m = findModel(models, defaultModel);
   return m ? modelMainName(m) : defaultModel;
-}
-
-async function flushPendingSessionFiles(sessionId) {
-  const files = pendingSessionFiles.get(sessionId);
-  if (!files?.length) return;
-  pendingSessionFiles.delete(sessionId);
-  try {
-    const uploaded = [];
-    for (const file of files) {
-      const result = await api(`/api/sessions/${encodeURIComponent(sessionId)}/upload?filename=${encodeURIComponent(file.name)}`, {
-        method: 'POST', body: file, headers: { 'Content-Type': 'application/octet-stream' },
-      });
-      uploaded.push(result.path);
-    }
-    const text = `请查看我在手机端上传的附件：\n${uploaded.map((path) => `- ${path}`).join('\n')}`;
-    await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', body: JSON.stringify({ text }) });
-    toast('附件已发送给 Claude', 'info');
-  } catch (error) {
-    pendingSessionFiles.set(sessionId, files);
-    if (error.code !== 'unauthorized') toast(`附件发送失败：${error.code}`, 'error');
-  }
 }
 
 // ================================================================ WebSocket 连接层
@@ -309,6 +335,7 @@ function parseHash() {
   const m = h.match(/^#\/s\/(.+)$/);
   if (m) return { view: 'chat', sessionId: decodeURIComponent(m[1]) };
   if (h === '#/settings') return { view: 'settings' };
+  if (h === '#/pair') return { view: 'pair' };
   return { view: 'list' };
 }
 const goChat = (id) => { location.hash = `#/s/${encodeURIComponent(id)}`; };
@@ -463,6 +490,7 @@ function SetupGate({ error, busy, onSubmit }) {
         <p class="gate-sub">连接你 Mac 上的 Claude Code</p>
         <${ConnForm} initBase=${baseUrl} initToken="" busy=${busy} submitLabel="连接" onSubmit=${onSubmit} />
         ${error && html`<p class="err">${error}</p>`}
+        <p class="gate-help">Mac 端打开配对页，用相机扫码即可</p>
         <p class="gate-help">Mac 端：<code>cd claude-remote && pnpm dev</code> 启动 daemon，手机与 Mac 同一 Tailscale 网络</p>
       </div>
     </div>`;
@@ -512,6 +540,60 @@ function SettingsPage({ onReconnect }) {
             </ol>
           </section>
           <button class="btn ghost wide danger" onClick=${() => bus.emit('logout')}>断开并清除本机凭据</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ================================================================ 配对页（#/pair，Mac 本机浏览器打开）
+
+function PairPage() {
+  const [info, setInfo] = useState(null);
+  const [failed, setFailed] = useState(false);
+  const [showTok, setShowTok] = useState(false);
+  useEffect(() => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8_000);
+    // pair-info 仅限 loopback，无需 Bearer；403/超时/网络错误统一按「非本机打开」提示
+    fetch(`${baseUrl}/api/pair-info`, { signal: ctrl.signal })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`http_${res.status}`))))
+      .then((d) => setInfo({ bases: Array.isArray(d.bases) ? d.bases : [], token: d.token || '' }))
+      .catch(() => setFailed(true))
+      .finally(() => clearTimeout(timer));
+    return () => { clearTimeout(timer); ctrl.abort(); };
+  }, []);
+
+  return html`
+    <div class="page pair-page">
+      <header class="topbar">
+        <button class="icon-btn back" onClick=${goList} aria-label="返回">‹</button>
+        <div class="topbar-title serif">扫码配对</div>
+      </header>
+      <div class="scroll">
+        <div class="pair-body">
+          ${failed && html`
+            <section class="settings-card">
+              <p class="err">配对信息不可用：此页仅限 Mac 本机打开（<code>http://127.0.0.1:8788/#/pair</code>）。</p>
+            </section>`}
+          ${!failed && html`
+            <section class="settings-card pair-qr-card">
+              <img class="pair-qr" src="${baseUrl}/api/pair-qr.svg" alt="配对二维码" />
+              <p class="pair-hint">用 iPhone 相机扫码，点「在 Claude Remote 中打开」即可自动配对</p>
+            </section>
+            <section class="settings-card">
+              <h2>候选地址</h2>
+              ${info
+                ? html`<ul class="pair-bases">${info.bases.map((b) => html`<li key=${b} class="mono">${b}</li>`)}</ul>`
+                : html`<div class="empty">加载中…</div>`}
+            </section>
+            <section class="settings-card">
+              <h2>访问令牌</h2>
+              <div class="pair-token-row">
+                <span class="mono ellip">${info ? (showTok ? info.token : '••••••••••••') : '…'}</span>
+                <button class="btn" type="button" disabled=${!info} onClick=${() => setShowTok((x) => !x)}>${showTok ? '隐藏' : '显示'}</button>
+              </div>
+              <p class="pair-hint">二维码即凭据，请勿截图外传；此页仅限 Mac 本机打开。</p>
+            </section>`}
         </div>
       </div>
     </div>`;
@@ -618,17 +700,29 @@ function NewChatComposer({ projects, catalog, onCreated }) {
 
   const removeFile = (idx) => setFiles((xs) => xs.filter((_, i) => i !== idx));
   const create = useCallback(async () => {
-    const text = draft.trim();
+    let text = draft.trim();
     if (!text || !cwd || busy) return;
     setBusy(true);
     try {
+      // 先传附件（会话还不存在，走全局 /api/upload），路径随首条消息一起发，避免 Claude 先答后收图
+      if (files.length) {
+        const uploaded = [];
+        for (const f of files) {
+          const r = await api(`/api/upload?filename=${encodeURIComponent(f.name)}`, {
+            method: 'POST', body: f, headers: { 'Content-Type': 'application/octet-stream' },
+          });
+          uploaded.push(r.path);
+        }
+        text = `${text}\n\n[手机端上传的附件，已保存在本机，可直接读取]\n${uploaded.map((p) => `- ${p}`).join('\n')}`;
+      }
       const body = { cwd, text, ...(model ? { model } : {}) };
       const result = await api('/api/sessions', { method: 'POST', body: JSON.stringify(body) });
-      onCreated(result, body, files);
+      onCreated(result, body);
       setDraft('');
       setFiles([]);
     } catch (e) {
       if (e.status === 409) toast('所选项目当前不可创建新会话', 'error');
+      else if (e.status === 413) toast('附件过大（上限 25MB）', 'error');
       else if (e.code === 'unknown_model') toast('该模型已不可用，请重新选择', 'error');
       else if (e.code === 'unknown_cwd') toast('该项目已不可用，请刷新后重试', 'error');
       else if (e.code !== 'unauthorized') toast(`新建失败：${e.code}`, 'error');
@@ -671,7 +765,7 @@ function NewChatComposer({ projects, catalog, onCreated }) {
           </button>
         </div>
       </div>
-      ${files.length > 0 && html`<div class="new-attach-note">附件会保留到新会话中，本轮完成后即可发送。</div>`}
+      ${files.length > 0 && html`<div class="new-attach-note">附件将随首条消息一起发送。</div>`}
     </div>`;
 }
 
@@ -698,7 +792,7 @@ function StartScreen() {
 
   const sessions = useMemo(() => [...data.sessions].sort((a, b) => b.lastActiveAt - a.lastActiveAt), [data]);
   const projects = useMemo(() => [...new Set(sessions.map((s) => s.cwd).filter(Boolean))], [sessions]);
-  const created = useCallback((result, body, files) => {
+  const created = useCallback((result, body) => {
     const summary = {
       sessionId: result.sessionId,
       cwd: body.cwd,
@@ -710,10 +804,6 @@ function StartScreen() {
     };
     cacheSessions([summary]);
     pendingSessionMessages.set(result.sessionId, body.text);
-    if (files.length) {
-      pendingSessionFiles.set(result.sessionId, files);
-      toast('会话已创建，附件将在本轮结束后等待发送', 'info');
-    }
     ws.subscribe(result.sessionId);
     goChat(result.sessionId);
   }, []);
@@ -1306,6 +1396,50 @@ function useVVH() {
   }, []);
 }
 
+// ================================================================ 扫码配对深链（claude-remote://setup）
+
+// 解析 claude-remote://setup?v=1&token=...&bases=<enc(url1)>,<enc(url2)>
+// bases 里的 URL 各自 encodeURIComponent 后用逗号连接，故先按逗号切再逐个解码。
+function parseSetupLink(url) {
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (u.protocol !== 'claude-remote:') return null;
+  const where = (u.host || u.pathname.replace(/^\/+/, '')).replace(/\/+$/, '');
+  if (where !== 'setup') return null;
+  const params = {};
+  for (const kv of (u.search.startsWith('?') ? u.search.slice(1) : u.search).split('&')) {
+    const i = kv.indexOf('=');
+    if (i > 0) params[kv.slice(0, i)] = kv.slice(i + 1);
+  }
+  let tok = '';
+  let bases = [];
+  try {
+    tok = decodeURIComponent(params.token || '');
+    bases = (params.bases || '').split(',').filter(Boolean)
+      .map((s) => normalizeBase(decodeURIComponent(s))).filter(Boolean);
+  } catch { return null; }
+  if (!tok || bases.length === 0) return null;
+  return { token: tok, bases };
+}
+
+// 确认卡：展示目标地址列表；覆盖已有配置前必须用户确认（防恶意二维码静默换 token）
+function PairConfirm({ req, busy, onConfirm, onCancel }) {
+  const hasExisting = !!(token || baseUrl);
+  return html`
+    <div class="pair-overlay">
+      <div class="gate-card pair-confirm">
+        <h1 class="serif">扫码配对</h1>
+        <p class="gate-sub">将连接以下 Mac 地址（按顺序探测）：</p>
+        <ul class="pair-bases">${req.bases.map((b) => html`<li key=${b} class="mono">${b}</li>`)}</ul>
+        ${hasExisting && html`<p class="err">注意：确认后将覆盖当前已保存的连接配置。</p>`}
+        <div class="ap-actions">
+          <button class="btn deny" disabled=${busy} onClick=${onCancel}>取消</button>
+          <button class="btn allow" disabled=${busy} onClick=${onConfirm}>${busy ? '连接中…' : '确认连接'}</button>
+        </div>
+      </div>
+    </div>`;
+}
+
 // ================================================================ App
 
 function App() {
@@ -1338,11 +1472,6 @@ function App() {
     setAuth('need');
     setAuthErr('');
   }, []);
-  useBus('ws:run', (event) => {
-    if (event.state === 'done' && event.sessionId && pendingSessionFiles.has(event.sessionId)) {
-      setTimeout(() => flushPendingSessionFiles(event.sessionId), 400);
-    }
-  }, []);
 
   // 保存新配置并验证；成功返回 true（设置页复用）
   const tryConnect = useCallback(async (base, tok) => {
@@ -1359,18 +1488,79 @@ function App() {
       return true;
     } catch (e) {
       saveConn(prevBase, prevToken);
-      const msg = e.code === 'unauthorized' ? 'token 不正确' : '无法连接 daemon（地址或网络错误）';
+      const msg = connErrMsg(e);
       if (auth !== 'ok') { setAuth('need'); setAuthErr(msg); }
       toast(msg, 'error');
       return false;
     }
   }, [auth]);
 
-  useEffect(() => { if (token) tryConnect(baseUrl, token); }, []); // 首次进入校验已存凭据
+  // 多候选连接：顺序探测 bases，首个成功者设为当前 bridge_base，完整候选表存 bridge_bases
+  const tryConnectBases = useCallback(async (bases, tok) => {
+    setAuth((a) => (a === 'ok' ? 'ok' : 'checking'));
+    setAuthErr('');
+    try {
+      const base = await probeBases(bases, tok);
+      saveBases(bases);
+      saveConn(base, tok);
+      setAuth('ok');
+      ws.stop();
+      ws.start();
+      return true;
+    } catch (e) {
+      const msg = connErrMsg(e);
+      if (auth !== 'ok') { setAuth('need'); setAuthErr(msg); }
+      toast(msg, 'error');
+      return false;
+    }
+  }, [auth]);
 
+  // 深链配对：非 Capacitor 壳环境无 App 插件，安全降级为不监听
+  const [pairReq, setPairReq] = useState(null);
+  const [pairBusy, setPairBusy] = useState(false);
+  useEffect(() => {
+    const AppPlugin = window.Capacitor?.Plugins?.App;
+    if (!AppPlugin?.addListener) return;
+    let sub;
+    try {
+      sub = AppPlugin.addListener('appUrlOpen', ({ url }) => {
+        const req = parseSetupLink(url);
+        if (req) setPairReq(req);
+        else toast('无法识别的配对链接', 'error');
+      });
+    } catch { return; }
+    return () => { Promise.resolve(sub).then((h) => h?.remove?.()).catch(() => { /* noop */ }); };
+  }, []);
+  const confirmPair = useCallback(async () => {
+    if (!pairReq || pairBusy) return;
+    setPairBusy(true);
+    const ok = await tryConnectBases(pairReq.bases, pairReq.token);
+    setPairBusy(false);
+    if (ok) { setPairReq(null); toast(`已连接 ${connHost()}`, 'info'); }
+  }, [pairReq, pairBusy, tryConnectBases]);
+
+  // 首次进入校验已存凭据：有候选表则顺序探测，否则按单地址直连
+  useEffect(() => {
+    if (!token) return;
+    const bases = loadBases();
+    if (bases.length > 0) tryConnectBases(bases, token);
+    else tryConnect(baseUrl, token);
+  }, []);
+
+  const pairOverlay = pairReq && html`
+    <${PairConfirm} req=${pairReq} busy=${pairBusy} onConfirm=${confirmPair} onCancel=${() => setPairReq(null)} />`;
+
+  // #/pair 仅限 Mac 本机浏览器使用，不要求已配置连接
+  if (route.view === 'pair') {
+    return html`
+      <${PairPage} />
+      ${pairOverlay}
+      <${ToastLayer} />`;
+  }
   if (auth !== 'ok') {
     return html`
       <${SetupGate} busy=${auth === 'checking'} error=${authErr} onSubmit=${tryConnect} />
+      ${pairOverlay}
       <${ToastLayer} />`;
   }
   return html`
@@ -1384,6 +1574,7 @@ function App() {
       </main>
     </div>
     <${ApprovalLayer} />
+    ${pairOverlay}
     <${ToastLayer} />`;
 }
 

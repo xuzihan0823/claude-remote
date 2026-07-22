@@ -14,8 +14,10 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { InteractionManager, InteractionStore } from "@claude-remote/interactions";
+import QRCode from "qrcode";
 
 import { ConfigError, loadConfig } from "./config.js";
+import { pairPayload } from "./pair.js";
 import { ApprovalBridge, TurnRunner, createNotifier, type ActivityGate, type ApprovalEvent } from "./run/index.js";
 import { DaemonServer } from "./server.js";
 import { ActivityTracker } from "./watch/activity.js";
@@ -91,6 +93,18 @@ async function main(): Promise<void> {
   await server.listen();
   const { host, port } = server.address();
   console.log(`${pkg.name} ${pkg.version} listening on http://${host}:${port} (projects: ${config.projectsDir})`);
+
+  // 配对引导：候选地址 + 终端二维码（iPhone 相机扫码即可配对，见 docs/pairing-plan.md §3.4）
+  const pairInfo = server.pairInfo;
+  console.log("\n配对候选地址:");
+  for (const base of pairInfo.bases) console.log(`  ${base}`);
+  try {
+    const qr = await QRCode.toString(pairPayload(pairInfo), { type: "terminal", small: true });
+    console.log(`\n${qr}`);
+  } catch (error) {
+    console.warn("terminal QR render failed:", error);
+  }
+  console.log(`或浏览器打开 http://127.0.0.1:${port}/#/pair\n`);
 
   let shuttingDown = false;
   const shutdown = (signal: string): void => {

@@ -113,3 +113,39 @@ agent team 模式:fable 规划,coder-glm 实施(coder-gpt 因模型不可用失�
 - 大文件读取走尾部块读 + 懒加载，不全量 parse。
 - 消息渲染按 parentUuid 从最后一条回溯出活跃链，链外行默认隐藏。
 - 驾驶互斥：idle / terminal-driving / daemon-driving 三态，外部写入判 terminal-driving，静默 120s 回 idle。
+
+## 2026-07-21 配对方案实施（docs/pairing-plan.md §4 代码侧全部完成）
+
+三路并行完成，主窗口已 review + 全量验证：
+
+1. **iOS 壳**：`@capacitor/keyboard` + `@capacitor/app` 已装并被识别；`capacitor.config.ts` 加 `Keyboard.resize:'native'`；`Info.plist` 注册 `claude-remote` scheme（plutil OK）；`npx cap sync ios` 已执行。
+2. **daemon**（新增 `src/pair.ts`）：`GET /api/pair-info` 与 `GET /api/pair-qr.svg` loopback-only（127.0.0.1/::1/::ffff:127.0.0.1，否则 403），在 Bearer 校验前显式放行；地址枚举 Tailscale(100.64/10)→en0→hostname.local；启动终端打印候选地址+ASCII 二维码+`#/pair` 提示。
+3. **前端 web/app.js**：api() AbortController 超时（health 8s/普通 20s/上传 60s，`network_timeout`）；错误文案区分超时 vs token 错；`bridge_bases` 多候选顺序探测（401 立即终态）；`appUrlOpen` 深链→确认卡（覆盖警告）→探测连接；`#/pair` 页（鉴权前独立渲染）；SetupGate 扫码引导。
+
+**验证**：typecheck 全绿、`node --check` 通过、daemon 实跑冒烟通过（loopback pair-info 200 / LAN 访问 403 loopback_only / 错 token 401 / SVG 正常 / 终端二维码正常）。daemon 已在 8788 用新代码重启。
+
+**待办（需真机/Xcode，用户执行）**：Xcode 重建装机 → §1 键盘验收 → §3.3.4 相机扫码横幅验证（决定主案/B 案）→ §4.6 全链路验收（含关 Tailscale 走局域网自动切换）。改动未 commit。
+
+## 2026-07-21 追加
+
+- 扫码配对真机实测连通（scheme 主案成立，无需 B 案落地页）。
+- 修复附件时序 bug：daemon 新增 `POST /api/upload`（Bearer，落盘 uploads/new/），新建会话改为先传附件、路径并入首条消息；删除「本轮结束后补发」排队逻辑。typecheck/冒烟通过，cap sync 已跑，待 Xcode 重建生效。
+- Mac 端阶段 B 规划定稿 → **docs/mac-app-plan.md**（产品定位：iOS 收费 + Mac 免费菜单栏助手 DMG 分发、双仓库发布结构、消费级化三件事、实施顺序）。下次做 Mac 端从该文档开始。
+
+## 2026-07-21 晚·Mac 端阶段 B 启动（mac-app-plan §5.1+§5.2+§5.3 完成）
+
+agent team：coder-gpt 完成 SwiftUI 壳；coder-glm 领 CLAUDE_BIN 小改但 API 超时失败，按规则未重试，主模型直接实现；主窗口逐文件复核 + 修一处退出竞态 + 全量验证。
+
+1. **daemon 支持 CLAUDE_BIN**（`packages/agent-bridge/src/sdk-bridge.ts`）：`process.env.CLAUDE_BIN` 非空时向 SDK 注入 `pathToClaudeCodeExecutable`（字段名已对照 sdk.d.ts:1691 确认），未设时行为不变。新增测试 1 例（设/不设两分支，env 清理），`.env.example` 加可选说明。
+2. **SwiftUI 菜单栏壳**（全新 `mac/` 目录，Swift Package 可执行，macOS 14+，`swift build` 通过）：MenuBarExtra + 状态灯（轮询 /api/health 校验 `ok:true`，区分运行/停止/端口冲突）；daemon 子进程守护（zsh -lc exec + setpgid 独立进程组，SIGTERM 8s→SIGKILL，崩溃指数退避 1..60s 上限）；二维码窗口（WKWebView 加载 `#/pair`）；浏览器打开入口；BRIDGE_TOKEN 首启生成 32 字节 hex 存 Keychain（service "claude-remote"）注入子进程；claude 按 `~/.local/bin`→`/opt/homebrew/bin`→`/usr/local/bin` 探测、缺失时 NSOpenPanel 手选存 UserDefaults、注入 CLAUDE_BIN；开机自启（SMAppService，失败仅提示）；启动命令/端口 UserDefaults 可配（默认 pnpm dev）。
+3. **主窗口修复退出竞态**：原 quit 走异步 stop()，app 可能先退导致 daemon 孤儿；新增同步 `stopSynchronouslyForTermination()`（SIGTERM→3s→SIGKILL），`applicationShouldTerminate` 内 MainActor.assumeIsolated 调用。
+
+验证：全仓 typecheck 绿；agent-bridge 11 测试全过（含新用例）；`swift build` 通过（含修改后复建）。
+
+遗留（下一步）：GUI 实跑验收（swift run 图形会话：菜单/二维码窗/daemon 生命周期）；SMAppService 需打成 .app 才能真正注册；§5.4 Node 运行时打包（SEA/bun 调研 node:sqlite）；§5.5 签名/公证/DMG + releases 仓库 + Sparkle。改动未 commit。
+
+## 2026-07-22 凌晨·Mac 壳实跑调试五连修 + iOS UI 重构规划定稿
+
+Mac 菜单栏 app 实跑暴露并修复：①setpgid 需子进程 exec 前自调（改 perl trampoline `setpgrp+exec`），父进程调用必 EACCES；②默认启动命令改根目录 `pnpm --dir <repo> dev`（--filter daemon 无 dev 脚本）；③StateObject 装载前取 wrappedValue 得孤儿副本,健康轮询跑在假实例上——引导逻辑必须用局部实例；④裸 SPM 可执行 + MenuBarExtra 下 SwiftUI Window/SettingsLink scene 路由全部静默失效——二维码改内嵌面板（.window 样式 + /api/pair-info + CIQRCodeGenerator 本地生成,开面板自刷新）,设置页整个移除;⑤停止/重启支持外部 daemon（lsof 按端口找 pid 发 SIGTERM）;开机自启在非 .app 形态隐藏。健康检查带 Bearer,401 视为「存活的外部实例」并接管不撞端口。实测:面板/二维码/浏览器入口/退出全部正常。
+
+iOS UI 重构规划定稿 → **docs/ios-ui-redesign.md**（参照官方 app 截图;前提:Capacitor 不动+状态/视图分层为 RN 迁移留路;含权限模式选择新功能全链路与 T1-T5 任务卡草案）。下一步:确认后生成 task/ 任务卡,从 T1 状态层抽离开始。
