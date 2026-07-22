@@ -79,3 +79,25 @@ test("env overrides CLAUDE_CODE_ENTRYPOINT to claude-remote while inheriting pro
   assert.ok(typeof env.PATH === "string" && env.PATH.length > 0, "PATH should be inherited from process.env");
   handle.close();
 });
+
+test("CLAUDE_BIN set injects pathToClaudeCodeExecutable; unset omits it", () => {
+  const previous = process.env.CLAUDE_BIN;
+  try {
+    process.env.CLAUDE_BIN = "/opt/homebrew/bin/claude";
+    const withBin = fakeQuery();
+    const h1 = options(withBin.factory, {});
+    const opts1 = withBin.params()?.options as Record<string, unknown>;
+    assert.equal(opts1.pathToClaudeCodeExecutable, "/opt/homebrew/bin/claude");
+    h1.close();
+
+    delete process.env.CLAUDE_BIN;
+    const withoutBin = fakeQuery();
+    const h2 = options(withoutBin.factory, {});
+    const opts2 = withoutBin.params()?.options as Record<string, unknown>;
+    assert.equal(Object.hasOwn(opts2, "pathToClaudeCodeExecutable"), false);
+    h2.close();
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = previous;
+  }
+});

@@ -575,3 +575,27 @@ input, textarea { font: inherit; color: var(--ink-strong); }
 .q-opt.on { border-color: var(--accent); background: #faeee8; }
 .q-opt-label { display: block; font-size: 13.5px; color: var(--ink-strong); font-weight: 500; }
 .q-opt-desc { display: block; font-size: 12px; color: var(--ink-2); margin-top: 1px; }
+
+/* ============================================================ 扫码配对（#/pair + 深链确认卡） */
+
+.pair-body { max-width: 560px; margin: 0 auto; padding: 16px 16px 30px; display: flex; flex-direction: column; gap: 14px; }
+.pair-qr-card { text-align: center; }
+.pair-qr {
+  display: block; width: 100%; max-width: 300px; margin: 0 auto;
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 10px;
+}
+.pair-hint { color: var(--ink-2); font-size: 12.5px; margin: 10px 0 0; line-height: 1.7; }
+.pair-bases { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; text-align: left; }
+.pair-bases li {
+  background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 10px; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pair-token-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pair-token-row .mono { font-size: 13px; }
+.pair-overlay {
+  position: fixed; inset: 0; z-index: 55;
+  background: rgb(38 35 29 / .4);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.pair-confirm .pair-bases { margin: 4px 0 6px; }
+.pair-confirm .ap-actions { display: flex; gap: 10px; margin-top: 16px; }

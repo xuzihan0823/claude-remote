@@ -15,9 +15,11 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { basename, extname, join, normalize, resolve, sep } from "node:path";
+import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
 import type { DaemonConfig } from "./config.js";
+import { enumeratePairBases, isLoopbackAddress, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
 import { readSessionCwd, resolveSessionFile } from "./session-files.js";
 import { NotIdleError, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
@@ -76,6 +78,7 @@ function isEnoent(error: unknown): boolean {
 
 export class DaemonServer {
   readonly #options: DaemonServerOptions;
+  #pairInfo: PairInfo;
   readonly #tokenHash: Buffer;
   readonly #http: Server;
   readonly #wss: WebSocketServer;
@@ -90,6 +93,7 @@ export class DaemonServer {
 
   constructor(options: DaemonServerOptions) {
     this.#options = options;
+    this.#pairInfo = { bases: enumeratePairBases(options.config.port), token: options.config.token };
     this.#tokenHash = sha256(options.config.token);
     this.#http = createServer((req, res) => {
       void this.#handleRequest(req, res).catch((error) => {
@@ -110,11 +114,17 @@ export class DaemonServer {
       this.#http.once("error", rejectPromise);
       this.#http.listen(port, host, () => {
         this.#http.off("error", rejectPromise);
+        this.#pairInfo = { bases: enumeratePairBases(this.address().port), token: this.#options.config.token };
         this.#heartbeat = setInterval(() => this.#pingClients(), WS_HEARTBEAT_MS);
         this.#heartbeat.unref();
         resolvePromise();
       });
     });
+  }
+
+  /** 配对信息（候选地址 + token），listen() 后按实际端口刷新。 */
+  get pairInfo(): PairInfo {
+    return this.#pairInfo;
   }
 
   /** 实际监听地址（测试用 port 0）。 */
@@ -180,6 +190,11 @@ export class DaemonServer {
         res.end();
         return;
       }
+      // 配对路由不走 Bearer：token 本身就是它要下发的内容，改用 loopback-only 门禁。
+      if (path === "/api/pair-info" || path === "/api/pair-qr.svg") {
+        await this.#handlePair(req, res, path);
+        return;
+      }
       if (!this.#bearerOk(req)) {
         this.#json(res, 401, { error: "unauthorized" });
         return;
@@ -241,6 +256,11 @@ export class DaemonServer {
       }
     }
 
+    if (method === "POST" && path === "/api/upload") {
+      // 会话尚未创建时的附件上传（新建会话先传附件、路径随首条消息一起发）
+      await this.#saveUpload(req, res, url, "new");
+      return;
+    }
     const uploadMatch = /^\/api\/sessions\/([^/]+)\/upload$/.exec(path);
     if (uploadMatch !== null && method === "POST") {
       await this.#handleUpload(req, res, url, decodeURIComponent(uploadMatch[1] ?? ""));
@@ -254,6 +274,25 @@ export class DaemonServer {
     }
 
     this.#json(res, 404, { error: "not_found" });
+  }
+
+  /** loopback-only 配对端点：pair-info 返回候选地址与 token，pair-qr.svg 返回二维码。 */
+  async #handlePair(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      this.#json(res, 403, { error: "loopback_only" });
+      return;
+    }
+    if (req.method !== "GET") {
+      this.#json(res, 404, { error: "not_found" });
+      return;
+    }
+    if (path === "/api/pair-info") {
+      this.#json(res, 200, this.#pairInfo);
+      return;
+    }
+    const svg = await QRCode.toString(pairPayload(this.#pairInfo), { type: "svg" });
+    res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "no-store" });
+    res.end(svg);
   }
 
   async #handleListSessions(res: ServerResponse, url: URL): Promise<void> {
@@ -472,6 +511,11 @@ export class DaemonServer {
       }
       throw error;
     }
+    await this.#saveUpload(req, res, url, sessionId);
+  }
+
+  /** 附件落盘公共逻辑：raw body + ?filename=，存入 uploadsDir/<subdir>/，返回绝对路径。 */
+  async #saveUpload(req: IncomingMessage, res: ServerResponse, url: URL, subdir: string): Promise<void> {
     // 文件名只取 basename 并过滤路径分隔符/控制字符，防目录穿越
     const rawName = url.searchParams.get("filename") ?? "";
     const safeName = (basename(rawName).replace(/[\/\\]/g, "_").replace(/[^\P{C}]/gu, "").trim() || "file");
@@ -489,7 +533,7 @@ export class DaemonServer {
       this.#json(res, 400, { error: "empty_file" });
       return;
     }
-    const dir = join(this.#options.config.uploadsDir, sessionId);
+    const dir = join(this.#options.config.uploadsDir, subdir);
     await mkdir(dir, { recursive: true });
     const file = join(dir, `${Date.now()}-${safeName}`);
     await writeFile(file, Buffer.concat(chunks));

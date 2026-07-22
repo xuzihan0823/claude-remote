@@ -67,6 +67,8 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
     // keeps the session visible in the Mac terminal's /resume list (CLI hides
     // sessions whose entrypoint ∈ {sdk-cli, sdk-ts, sdk-py}).
     env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: "claude-remote" } as Record<string, string>,
+    // CLAUDE_BIN：GUI 壳 app 的子进程没有 shell PATH，由壳注入显式 claude 路径（docs/mac-app-plan.md §2.2）
+    ...(process.env.CLAUDE_BIN ? { pathToClaudeCodeExecutable: process.env.CLAUDE_BIN } : {}),
     ...(options.resume === undefined ? {} : { resume: options.resume }),
     ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
     ...(options.model === undefined ? {} : { model: options.model }),

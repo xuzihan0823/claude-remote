@@ -5,6 +5,7 @@ const config: CapacitorConfig = {
   appName: 'Claude Remote',
   webDir: 'web',
   ios: { scrollEnabled: false, contentInset: 'never' },
+  plugins: { Keyboard: { resize: 'native' } },
 };
 
 export default config;
