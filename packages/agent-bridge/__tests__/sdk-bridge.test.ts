@@ -20,7 +20,7 @@ function fakeQuery(): { factory: QueryFactory; params: () => QueryParams | undef
   return { factory, params: () => captured };
 }
 
-function options(factory: QueryFactory, extra: { resume?: string; sessionId?: string; model?: string } = {}) {
+function options(factory: QueryFactory, extra: { resume?: string; sessionId?: string; model?: string; permissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions" } = {}) {
   const handle = startSdkQuery({
     cwd: "/tmp/project",
     prompt: "hello",
@@ -56,6 +56,22 @@ test("omitted model remains omitted so SDK follows the Mac default", () => {
   const handle = options(fake.factory, { resume: "33333333-3333-4333-8333-333333333333" });
   const sdkOptions = fake.params()?.options as Record<string, unknown>;
   assert.equal(Object.hasOwn(sdkOptions, "model"), false);
+  handle.close();
+});
+
+test("permissionMode override is forwarded as the sdkOptions value", () => {
+  const fake = fakeQuery();
+  const handle = options(fake.factory, { resume: "77777777-7777-4777-8777-777777777777", permissionMode: "acceptEdits" });
+  const sdkOptions = fake.params()?.options as Record<string, unknown>;
+  assert.equal(sdkOptions.permissionMode, "acceptEdits");
+  handle.close();
+});
+
+test("omitted permissionMode defaults to \"default\"", () => {
+  const fake = fakeQuery();
+  const handle = options(fake.factory, { resume: "88888888-8888-4888-8888-888888888888" });
+  const sdkOptions = fake.params()?.options as Record<string, unknown>;
+  assert.equal(sdkOptions.permissionMode, "default");
   handle.close();
 });
 

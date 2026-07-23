@@ -4,10 +4,12 @@
 |---|---|---|---|---|
 | [01](01-skeleton-migration.md) | 仓库骨架 + 复用代码迁移 | 无 | 先行（阻塞全部） | ✅ 完成（reports/01） |
 | [02](02-transcript.md) | 会话索引器 + JSONL 解析/渲染链 | 01 | A | ✅ 完成（reports/02） |
-| [03](03-watch.md) | 实时 watcher + 驾驶状态机 | 01, 02 | 02 完成后串行（建议同窗口接续） | 待分发 |
-| [04](04-run.md) | SDK resume Runner + 审批桥 + 推送 | 01 | A | 待分发 |
+| [03](03-watch.md) | 实时 watcher + 驾驶状态机 | 01, 02 | 02 完成后串行（建议同窗口接续） | ✅ 完成 |
+| [04](04-run.md) | SDK resume Runner + 审批桥 + 推送 | 01 | A | ✅ 完成 |
 | [05](05-web.md) | Web UI（对 mock 开发） | 01 | A | ✅ 完成（reports/05） |
-| [06](06-integration.md) | 集成、真机验收（主窗口执行，不分发） | 02–05 | — | 待执行 |
+| [06](06-integration.md) | 集成、真机验收（主窗口执行，不分发） | 02–05 | — | ✅ 完成（reports/06） |
+| [07](07-state-layer-extraction.md) | iOS UI 重构 T1：状态层抽离 | 06 | 先行（阻塞 T2–T4 前端） | ✅ 完成（2026-07-22） |
+| [08](08-permission-mode-frontend.md) | 权限模式·前端全链路（T4） | 07 | 与视觉收尾并行（文件不重叠） | ✅ 完成（reports/08，主窗口代实施） |
 
 ## 依赖图
 
