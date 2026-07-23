@@ -25,6 +25,8 @@ struct ClaudeRemoteMacApp: App {
         Task { @MainActor in
             guard !Bootstrap.didStart else { return }
             Bootstrap.didStart = true
+            // 裸 SPM 可执行默认 .regular：后台/nohup 启动时 MenuBarExtra 状态项不渲染，必须显式降为菜单栏助手形态。
+            NSApp.setActivationPolicy(.accessory)
             delegate.manager = daemon
             NSApp.delegate = delegate
             monitor.start()
@@ -53,8 +55,8 @@ struct ClaudeRemoteMacApp: App {
 
     private var menuIcon: String {
         switch healthMonitor.health {
-        case .healthy: return "circle.fill"
-        case .portConflict: return "exclamationmark.circle.fill"
+        case .healthy: return "sparkle"
+        case .portConflict: return "exclamationmark.triangle.fill"
         case .unknown, .unavailable: return "circle.dotted"
         }
     }

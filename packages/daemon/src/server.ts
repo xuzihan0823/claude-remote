@@ -47,6 +47,9 @@ const MESSAGES_LIMIT_DEFAULT = 100;
 const MESSAGES_LIMIT_MAX = 500;
 const WS_HEARTBEAT_MS = 30_000;
 
+const VALID_PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "bypassPermissions"]);
+type PermissionMode = "default" | "acceptEdits" | "plan" | "bypassPermissions";
+
 export interface DaemonServerOptions {
   config: DaemonConfig;
   /** web/ 静态目录绝对路径。 */
@@ -78,7 +81,7 @@ function isEnoent(error: unknown): boolean {
 
 export class DaemonServer {
   readonly #options: DaemonServerOptions;
-  #pairInfo: PairInfo;
+  #pairPort: number;
   readonly #tokenHash: Buffer;
   readonly #http: Server;
   readonly #wss: WebSocketServer;
@@ -93,7 +96,7 @@ export class DaemonServer {
 
   constructor(options: DaemonServerOptions) {
     this.#options = options;
-    this.#pairInfo = { bases: enumeratePairBases(options.config.port), token: options.config.token };
+    this.#pairPort = options.config.port;
     this.#tokenHash = sha256(options.config.token);
     this.#http = createServer((req, res) => {
       void this.#handleRequest(req, res).catch((error) => {
@@ -114,7 +117,7 @@ export class DaemonServer {
       this.#http.once("error", rejectPromise);
       this.#http.listen(port, host, () => {
         this.#http.off("error", rejectPromise);
-        this.#pairInfo = { bases: enumeratePairBases(this.address().port), token: this.#options.config.token };
+        this.#pairPort = this.address().port;
         this.#heartbeat = setInterval(() => this.#pingClients(), WS_HEARTBEAT_MS);
         this.#heartbeat.unref();
         resolvePromise();
@@ -122,9 +125,9 @@ export class DaemonServer {
     });
   }
 
-  /** 配对信息（候选地址 + token），listen() 后按实际端口刷新。 */
+  /** 配对信息（候选地址每次现查——Tailscale 可能在 daemon 启动后才拉起）；listen() 后用实际端口。 */
   get pairInfo(): PairInfo {
-    return this.#pairInfo;
+    return { bases: enumeratePairBases(this.#pairPort), token: this.#options.config.token };
   }
 
   /** 实际监听地址（测试用 port 0）。 */
@@ -287,10 +290,10 @@ export class DaemonServer {
       return;
     }
     if (path === "/api/pair-info") {
-      this.#json(res, 200, this.#pairInfo);
+      this.#json(res, 200, this.pairInfo);
       return;
     }
-    const svg = await QRCode.toString(pairPayload(this.#pairInfo), { type: "svg" });
+    const svg = await QRCode.toString(pairPayload(this.pairInfo), { type: "svg" });
     res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "no-store" });
     res.end(svg);
   }
@@ -332,10 +335,20 @@ export class DaemonServer {
     return model;
   }
 
+  /** 校验 permissionMode 白名单；省略 -> undefined，非法 -> 400 false。 */
+  #validatePermissionMode(res: ServerResponse, value: unknown): PermissionMode | undefined | false {
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || !VALID_PERMISSION_MODES.has(value)) {
+      this.#json(res, 400, { error: "invalid_permission_mode" });
+      return false;
+    }
+    return value as PermissionMode;
+  }
+
   async #handleCreateSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await this.#readJsonBody(req, res);
     if (body === undefined) return;
-    const { cwd: cwdValue, text: textValue, model: modelValue } = body as Record<string, unknown>;
+    const { cwd: cwdValue, text: textValue, model: modelValue, permissionMode: permModeValue } = body as Record<string, unknown>;
     if (typeof cwdValue !== "string" || cwdValue.trim() === "") {
       this.#json(res, 400, { error: "invalid_cwd" });
       return;
@@ -351,6 +364,8 @@ export class DaemonServer {
     }
     const model = await this.#validateModel(res, modelValue);
     if (model === false) return;
+    const permissionMode = this.#validatePermissionMode(res, permModeValue);
+    if (permissionMode === false) return;
 
     const sessionId = randomUUID();
     let handle: TurnHandle;
@@ -361,6 +376,7 @@ export class DaemonServer {
         text: textValue,
         newSession: true,
         ...(model === undefined ? {} : { model }),
+        ...(permissionMode === undefined ? {} : { permissionMode }),
       });
     } catch (error) {
       if (error instanceof NotIdleError) {
@@ -433,6 +449,8 @@ export class DaemonServer {
     }
     const model = await this.#validateModel(res, (body as { model?: unknown }).model);
     if (model === false) return;
+    const permissionMode = this.#validatePermissionMode(res, (body as { permissionMode?: unknown }).permissionMode);
+    if (permissionMode === false) return;
     let file: string;
     try {
       file = await resolveSessionFile(this.#options.config.projectsDir, sessionId);
@@ -451,6 +469,7 @@ export class DaemonServer {
         cwd,
         text,
         ...(model === undefined ? {} : { model }),
+        ...(permissionMode === undefined ? {} : { permissionMode }),
       });
     } catch (error) {
       if (error instanceof NotIdleError) {
@@ -485,6 +504,7 @@ export class DaemonServer {
           state: event.state,
         };
         if (event.error !== undefined) frame.error = event.error;
+        if (event.permissionMode !== undefined) frame.permissionMode = event.permissionMode;
         this.#broadcastToSubscribers(sessionId, frame);
         if (event.state === "done") {
           void this.#options.notifier("Claude 已完成", snippet(text));

@@ -34,7 +34,7 @@ export class NotIdleError extends Error {}
 
 /** 事件流元素：`run` 为轮次生命周期（对应 WS run 帧），`worker` 为 SDK 消息展平。 */
 export type RunEvent =
-  | { type: "run"; runId: string; sessionId: string; state: "started" | "done" | "error"; error?: string }
+  | { type: "run"; runId: string; sessionId: string; state: "started" | "done" | "error"; error?: string; permissionMode?: string }
   | { type: "worker"; runId: string; sessionId: string; event: WorkerEvent };
 
 export type RunOutcome = { state: "done" } | { state: "error"; error: string };
@@ -47,6 +47,8 @@ export interface StartTurnOptions {
   model?: string;
   /** Start a new persisted SDK session with sessionId instead of resuming it. */
   newSession?: boolean;
+  /** 权限模式覆盖；省略时由 SDK 走 "default"。 */
+  permissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions";
 }
 
 export interface TurnHandle {
@@ -122,7 +124,7 @@ export class TurnRunner {
   }
 
   startTurn(options: StartTurnOptions): TurnHandle {
-    const { sessionId, cwd, text, model, newSession = false } = options;
+    const { sessionId, cwd, text, model, newSession = false, permissionMode } = options;
     if (typeof text !== "string" || text.trim() === "") {
       throw new TypeError("text must be a non-empty string");
     }
@@ -153,6 +155,7 @@ export class TurnRunner {
           signal: controller.signal,
           ...(newSession ? { sessionId } : { resume: sessionId }),
           ...(model === undefined ? {} : { model }),
+          ...(permissionMode === undefined ? {} : { permissionMode }),
         },
         this.#queryFactory,
       );
@@ -167,7 +170,7 @@ export class TurnRunner {
     this.#sessionRuns.set(sessionId, runId);
 
     const queue = new EventQueue<RunEvent>();
-    queue.push({ type: "run", runId, sessionId, state: "started" });
+    queue.push({ type: "run", runId, sessionId, state: "started", ...(permissionMode === undefined ? {} : { permissionMode }) });
     const completion = this.#consume(runId, run, sdk, queue);
     return { runId, events: queue, completion };
   }

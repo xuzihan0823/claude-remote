@@ -149,3 +149,53 @@ agent team：coder-gpt 完成 SwiftUI 壳；coder-glm 领 CLAUDE_BIN 小改但 A
 Mac 菜单栏 app 实跑暴露并修复：①setpgid 需子进程 exec 前自调（改 perl trampoline `setpgrp+exec`），父进程调用必 EACCES；②默认启动命令改根目录 `pnpm --dir <repo> dev`（--filter daemon 无 dev 脚本）；③StateObject 装载前取 wrappedValue 得孤儿副本,健康轮询跑在假实例上——引导逻辑必须用局部实例；④裸 SPM 可执行 + MenuBarExtra 下 SwiftUI Window/SettingsLink scene 路由全部静默失效——二维码改内嵌面板（.window 样式 + /api/pair-info + CIQRCodeGenerator 本地生成,开面板自刷新）,设置页整个移除;⑤停止/重启支持外部 daemon（lsof 按端口找 pid 发 SIGTERM）;开机自启在非 .app 形态隐藏。健康检查带 Bearer,401 视为「存活的外部实例」并接管不撞端口。实测:面板/二维码/浏览器入口/退出全部正常。
 
 iOS UI 重构规划定稿 → **docs/ios-ui-redesign.md**（参照官方 app 截图;前提:Capacitor 不动+状态/视图分层为 RN 迁移留路;含权限模式选择新功能全链路与 T1-T5 任务卡草案）。下一步:确认后生成 task/ 任务卡,从 T1 状态层抽离开始。
+
+## 2026-07-22 下午·iOS UI 重构 T1–T5 收尾 + 权限模式全链路完成
+
+agent team：explorer-opus47 审计完成度正常；**coder-glm（glm-5.2[1m]）与 coder-gpt（gpt-5.6-sol[1M]）先后因模型 API 不可访问开工即死**（gpt 死前仅留下合规的 core/modes.js，保留），按路由规则主窗口接管实施。
+
+**接手时状态**（上一段会话已完成、未记录）：T1 状态层抽离全部完成（app.js→1 行 shim，core/ 五文件 + ui/ 屏幕组件全拆）；T4 后端透传+白名单+测试完成；T5 全屏套新 token 完成；style.css 已有完整 design tokens 明暗两套。
+
+**本次补齐**：
+1. **T4 后端广播**（runner.ts/server.ts）：started 事件携带 permissionMode（显式指定才带，缺席≠default），server 转发进 WS run 帧；新增 runner 测试 1 例。
+2. **T4 前端全链路**（modes.js/mode-sheet.js/composer.js/chat.js，即 task/08 卡）：四模式可选、每会话记忆（localStorage `session_mode:<id>`）+ 新会话记忆上次选择（`session_mode`）、POST 新建/继续均带 permissionMode（default 省略，兼容旧 daemon）、bypass 二次确认（红色警示、已 bypass 不重复确认）、聊天页顶部 bypass 常驻徽标、ws:run 跨端同步。
+3. **视觉补齐**（style.css/home.js，主窗口自做避免与 coder 撞文件）：composer/sheet 圆角 24px（对齐文档）；消息块 fade-in 150ms + 工具卡展开动画（opacity/translate 近似，WKWebView 安全）；**Home 改官方版式**——问候语垂直居中、composer 底部浮岛停靠（flex 布局，键盘跟随沿用 Keyboard resize native）；bypass 徽标/确认弹窗样式（z-index 80/81 叠 sheet 之上）。
+4. **明确不做**：chat 内联 composer 与 NewChatComposer 合并复用（两者逻辑差异大，无构建器下抽象成本>收益，视觉一致性已由共享 CSS 类保证）——文档 §5.2 的偏离，记录在案。
+
+**验证**：typecheck 全绿；101 测试全过（daemon 81 含新用例 + agent-bridge 13 + interactions 7）；node --check 全过；daemon 重启后 E2E 实证非法 permissionMode → 400 invalid_permission_mode；Chrome 430px 深色目检：home 新版式（居中问候+底部浮岛）、模式 sheet 四选项、bypass 确认弹窗全部正常；cap sync ios 后 bundle 已含新代码（permissionMode×2 文件、confirm-card/home-dock 样式命中）。
+
+**daemon 运行方式变更**：旧 pnpm dev 进程已被替换，现为 nohup 后台进程（日志 `/tmp/claude-remote-daemon.log`），端口 8788。如需自己终端管理：`lsof -ti :8788 | xargs kill` 后重新 `pnpm dev`。
+
+**待办（用户执行）**：Xcode 重建装机（web 改动已 cap sync，无原生变更，直接 build）→ 真机验收：① home 新版式与键盘跟随 ② 四模式选择/记忆 ③ bypass 确认+徽标 ④ 浅色模式无破相 ⑤ 现有功能回归（扫码/附件/审批/模型/中断）。
+
+## 2026-07-22 晚·菜单栏 App 启动 + pair 候选地址修复
+
+1. **菜单栏 App 已启动**（`mac/.build/debug/ClaudeRemoteMac`，nohup 后台，日志 /tmp/claude-remote-menubar.log）：正确识别外部 daemon 不撞端口，二维码面板每次打开现拉 pair-info。
+2. **发现 Tailscale 又停了**（复发，`Tailscale up` 已拉起；手机端 iphone183 10h 前离线，打开手机 Tailscale 即回）。**强烈建议把 Mac 端 Tailscale 设为登录自启**。
+3. **修复 pair 候选地址启动时缓存 bug**（server.ts）：原 `#pairInfo` 在构造/listen 时算一次就缓存——daemon 比 Tailscale 先起就永远缺 Tailscale 地址（本次实测踩中）。改为 `get pairInfo()` 每次现查（`#pairPort` 只记端口），/api/pair-info、/api/pair-qr.svg、终端二维码全部受益。typecheck + 81 测试全绿。
+4. daemon 已再次重启生效，pair-info 实测返回三候选：Tailscale 100.64.0.10 / LAN 192.168.1.3（注意 LAN IP 从 .5 漂到 .3，旧扫码存的地址已过期，**建议重扫一次二维码**）/ mac.local。
+
+## 2026-07-23 上午·菜单栏图标不显示根治
+
+现象：App 进程活着但菜单栏无图标。根因（AX 取证）：**裸 SPM 可执行以 nohup/后台方式启动时 activation policy 落在 .regular**——注册了一套 0 尺寸的常规 App 菜单（Apple/Edit/View/Window/Help），MenuBarExtra 状态项不渲染；此前 swift run 前台启动碰巧正常，属于启动方式依赖的隐性 bug。
+
+修复（ClaudeRemoteMacApp.swift）：① bootstrap 里显式 `NSApp.setActivationPolicy(.accessory)`（菜单栏助手形态，任何启动方式都稳定渲染状态项）；② 图标从无辨识度的 `circle.fill` 白点换成品牌一致的 `sparkle`（✳）；conflict=exclamationmark.triangle.fill、停止=circle.dotted 不变。AX 验证状态项注册（981,4 / 34×24），全屏截图确认 ✳ 可见于状态图标区最左。
+
+运行状态：菜单栏 App nohup 后台（日志 /tmp/claude-remote-menubar.log）；daemon 8788 健康；Tailscale up。另观察到用户 VS Code 里 MSD 项目对 panel.example.com 的 gpt-5.6-terra 连续 504——与昨日 coder-glm/coder-gpt subagent 模型不可访问同源，网关上游过载嫌疑。
+
+## 2026-07-23·键盘跟手 Plan B 落地（resize:none + --kb 提前驱动）
+
+用户反馈壳内键盘适配不跟手。根因：`Keyboard resize:'native'` 是系统键盘动画**结束后** WKWebView 才一步缩高 → --vvh 再变 → composer 慢一拍且有跳变。落地 2026-07-20 预留的 Plan B：
+
+1. `capacitor.config.ts`：Keyboard resize `native`→`none`（webview 恒定全高，键盘只是覆盖层）。
+2. `ui/hooks.js` useVVH 改造：壳内（检测到 Keyboard 插件）走 `keyboardWillShow/Hide`——willShow 在系统动画开始**前**携带键盘高度，立即写 `--kb` + `kb-open`/`kb-native` 类 + bus `kb-change`；浏览器分支维持 visualViewport 跟踪（--vvh），互不干扰。
+3. `style.css`：`#app{height:calc(var(--vvh) - var(--kb))}` + kb-native 下 250ms `var(--spring)` 高度过渡（与 iOS 键盘 ~0.25s 同步）；fixed-bottom 层全部骑上键盘：`.sheet-panel`/`.approval-layer` bottom:var(--kb)（带过渡）、`.toasts` bottom 加 --kb、`.confirm-card` 居中点上移 --kb/2；`kb-open` 时 composer/home-dock/approval 的 safe-area 底垫收为固定 10/12px（键盘已盖住 home indicator 区）。
+4. `chat.js`：kb-change 后 350ms rAF 逐帧贴底（覆盖高度过渡全程），visualViewport 分支保留给浏览器。
+
+验证：node --check/typecheck 全绿；cap sync 后 ios capacitor.config.json 确认 `"resize":"none"`；Chrome 回归（--kb=0 路径）#app 高度=视口、无 console 错误、kb-native 未误触发。**待真机**：输入框聚焦上浮同步性、收键盘回落、键盘开着时打开模式 sheet/审批卡（应浮在键盘上方）、home 屏输入。
+
+架构结论（对用户"要不要换架构"的回答）：本次是 webview 键盘适配的正解姿势（提前信号+自绘过渡），先真机验收；仍不满意再启动 RN 迁移——core/ 状态层已按可整体搬迁设计，daemon API 零改动，重写仅视图层。
+
+## 2026-07-23·架构决策变更：启动 RN 迁移
+
+用户真机验证 Plan B 键盘方案后仍不满意，拍板放弃 Capacitor 壳、迁移 React Native。**规划定稿 → `docs/rn-migration-plan.md`**（取代 ios-ui-redesign §0 的「架构不动」；视觉/权限模式规格继续有效）。要点：Expo prebuild + react-native-keyboard-controller（逐帧键盘同步=迁移主因）；`web/core/` 状态层经审计仅需 location guard + MMKV localStorage shim 即可整体复用；daemon/API/web/Mac 壳全不动；P0 脚手架→P1 只读流→P2 交互→P3 键盘收尾，任务卡待新会话确认后从 09 起生成。旧 Capacitor ios/ 目录保留至 RN 真机验收通过。**下一步：新会话按该文档 §8 开工。**

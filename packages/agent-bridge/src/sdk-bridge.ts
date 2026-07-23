@@ -11,6 +11,8 @@ export interface StartQueryOptions {
   model?: string;
   /** Explicit session id for a new session. Mutually exclusive with resume. */
   sessionId?: string;
+  /** 权限模式覆盖；省略时由 SDK 走 "default"。 */
+  permissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions";
   signal: AbortSignal;
 }
 
@@ -59,7 +61,7 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
   const sdkOptions = {
     cwd: options.cwd,
     canUseTool: options.canUseTool,
-    permissionMode: "default" as const,
+    permissionMode: (options.permissionMode ?? "default") as "default" | "acceptEdits" | "plan" | "bypassPermissions",
     includePartialMessages: true,
     persistSession: true,
     // SDK options.env replaces the subprocess env entirely, so we must spread

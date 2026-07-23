@@ -133,6 +133,30 @@ test("new session uses explicit sessionId and model instead of resume", async ()
   assert.throws(() => runner.startTurn({ sessionId: "not-a-uuid", cwd: "/tmp", text: "x", newSession: true }), TypeError);
 });
 
+test("permissionMode 透传 sdkOptions 且随 started 事件广播；省略时事件不带该字段", async () => {
+  const { factory, state } = fakeFactory(async function* () {
+    yield resultMessage("完成", "r1", "sess-pm");
+  });
+  const { gate } = stubGate();
+  const runner = new TurnRunner({ gate, permissions: denyAll, queryFactory: factory });
+  const handle = runner.startTurn({ sessionId: "sess-pm", cwd: "/tmp", text: "继续", permissionMode: "acceptEdits" });
+
+  const events = await collect(handle.events);
+  assert.deepEqual(events[0], {
+    type: "run", runId: handle.runId, sessionId: "sess-pm", state: "started", permissionMode: "acceptEdits",
+  });
+  assert.equal(state.params?.options?.permissionMode, "acceptEdits");
+
+  // 省略 permissionMode：started 事件不带字段（前端按本地记忆展示）
+  const second = fakeFactory(async function* () {
+    yield resultMessage("完成", "r2", "sess-pm2");
+  });
+  const runner2 = new TurnRunner({ gate: stubGate().gate, permissions: denyAll, queryFactory: second.factory });
+  const handle2 = runner2.startTurn({ sessionId: "sess-pm2", cwd: "/tmp", text: "继续" });
+  const events2 = await collect(handle2.events);
+  assert.deepEqual(events2[0], { type: "run", runId: handle2.runId, sessionId: "sess-pm2", state: "started" });
+});
+
 test("gate 非 idle：抛 NotIdleError 且不 beginRun、不建 SDK query", () => {
   const { gate, begun } = stubGate(() => false);
   const factory = ((): SdkQuery => {
