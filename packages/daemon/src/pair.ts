@@ -1,4 +1,5 @@
 import { networkInterfaces, hostname } from "node:os";
+import type { IncomingHttpHeaders } from "node:http";
 
 export interface PairInfo {
   bases: string[];
@@ -7,6 +8,26 @@ export interface PairInfo {
 
 export function isLoopbackAddress(address: string | undefined): boolean {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+/**
+ * 配对端点仅能由本机直接访问。运行在本机的隧道或反向代理也会以 loopback
+ * 地址连接，因而必须拒绝其注入的代理头，防止配对 token 被转发到网络外。
+ */
+export function looksProxied(headers: IncomingHttpHeaders): boolean {
+  const markers = [
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-real-ip",
+    "forwarded",
+    "cf-connecting-ip",
+    "cf-ray",
+    "cf-ipcountry",
+    "cf-visitor",
+    "ngrok-trace-id",
+  ];
+  return markers.some((name) => headers[name] !== undefined);
 }
 
 function isIpv4(address: string): boolean {

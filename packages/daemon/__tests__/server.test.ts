@@ -255,6 +255,21 @@ test("CORS：/api 预检 204 无需鉴权；普通响应带 Allow-Origin", async
   assert.equal(normal.headers.get("access-control-allow-origin"), "*");
 });
 
+test("配对端点：仅本机直连可读，代理特征头一律拒绝", async () => {
+  const direct = await fetch(`${harness.base}/api/pair-info`);
+  assert.equal(direct.status, 200);
+  assert.equal((await direct.json()).token, TOKEN);
+
+  for (const header of ["x-forwarded-for", "cf-connecting-ip", "cf-ray", "x-real-ip", "forwarded", "ngrok-trace-id"]) {
+    const proxied = await fetch(`${harness.base}/api/pair-info`, { headers: { [header]: "1.2.3.4" } });
+    assert.equal(proxied.status, 403, `${header} should be rejected`);
+    assert.deepEqual(await proxied.json(), { error: "loopback_only" });
+  }
+
+  const qr = await fetch(`${harness.base}/api/pair-qr.svg`, { headers: { "x-forwarded-for": "1.2.3.4" } });
+  assert.equal(qr.status, 403);
+});
+
 test("POST upload：落盘到 uploadsDir/sessionId、文件名消毒；空体 400；未知会话 404", async () => {
   const res = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/upload?filename=${encodeURIComponent("../evil/no te.txt")}`, authed({
     method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: "hello upload",
