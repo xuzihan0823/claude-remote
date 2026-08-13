@@ -26,13 +26,15 @@ export function saveConn(base, tok) {
   localStorage.setItem(TOKEN_KEY, token);
 }
 export function clearToken() { token = ''; }
+// location 仅浏览器同源部署（baseUrl 为空）时用到；RN 端无 location 但恒有显式 baseUrl
 export function connHost() {
   if (baseUrl) { try { return new URL(baseUrl).host; } catch { return baseUrl; } }
-  return location.host;
+  return typeof location === 'undefined' ? '' : location.host;
 }
 export function wsEndpoint() {
-  let host = location.host;
-  let secure = location.protocol === 'https:';
+  const hasLoc = typeof location !== 'undefined';
+  let host = hasLoc ? location.host : '';
+  let secure = hasLoc && location.protocol === 'https:';
   if (baseUrl) {
     try {
       const u = new URL(baseUrl);

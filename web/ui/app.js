@@ -52,6 +52,17 @@ export function parseSetupLink(url) {
 
 export function App() {
   useVVH();
+  // 点空白处收起键盘：焦点在输入框且触摸目标不是交互元素时 blur（浏览器/壳内通用）
+  useEffect(() => {
+    const h = (e) => {
+      const ae = document.activeElement;
+      if (!ae || (ae.tagName !== 'TEXTAREA' && ae.tagName !== 'INPUT')) return;
+      if (e.target.closest('input, textarea, select, button, a, label, [contenteditable]')) return;
+      ae.blur();
+    };
+    document.addEventListener('touchstart', h, { passive: true });
+    return () => document.removeEventListener('touchstart', h);
+  }, []);
   const [auth, setAuth] = useState(token ? 'checking' : 'need');
   const [authErr, setAuthErr] = useState('');
   const [route, setRoute] = useState(parseHash());
