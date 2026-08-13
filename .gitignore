@@ -7,3 +7,6 @@ node_modules/
 dist/
 output/
 .playwright-cli/
+
+# Swift Package build artifacts
+mac/.build/
