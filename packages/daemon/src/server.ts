@@ -19,7 +19,7 @@ import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
 import type { DaemonConfig } from "./config.js";
-import { enumeratePairBases, isLoopbackAddress, pairPayload, type PairInfo } from "./pair.js";
+import { enumeratePairBases, isLoopbackAddress, looksProxied, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
 import { readSessionCwd, resolveSessionFile } from "./session-files.js";
 import { NotIdleError, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
@@ -281,7 +281,7 @@ export class DaemonServer {
 
   /** loopback-only 配对端点：pair-info 返回候选地址与 token，pair-qr.svg 返回二维码。 */
   async #handlePair(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
-    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+    if (!isLoopbackAddress(req.socket.remoteAddress) || looksProxied(req.headers)) {
       this.#json(res, 403, { error: "loopback_only" });
       return;
     }

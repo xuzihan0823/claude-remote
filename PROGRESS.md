@@ -199,3 +199,93 @@ agent team：explorer-opus47 审计完成度正常；**coder-glm（glm-5.2[1m]�
 ## 2026-07-23·架构决策变更：启动 RN 迁移
 
 用户真机验证 Plan B 键盘方案后仍不满意，拍板放弃 Capacitor 壳、迁移 React Native。**规划定稿 → `docs/rn-migration-plan.md`**（取代 ios-ui-redesign §0 的「架构不动」；视觉/权限模式规格继续有效）。要点：Expo prebuild + react-native-keyboard-controller（逐帧键盘同步=迁移主因）；`web/core/` 状态层经审计仅需 location guard + MMKV localStorage shim 即可整体复用；daemon/API/web/Mac 壳全不动；P0 脚手架→P1 只读流→P2 交互→P3 键盘收尾，任务卡待新会话确认后从 09 起生成。旧 Capacitor ios/ 目录保留至 RN 真机验收通过。**下一步：新会话按该文档 §8 开工。**
+
+## 2026-07-23·RN 迁移 P0–P2 代码落地 + 模拟器启动通过（agent team）
+
+按 `docs/rn-migration-plan.md` 执行，任务卡 `task/09–15`。agent team：主窗口做脚手架/集成/最微妙的 Chat 只读流；coder-glm 三波并行认领无文件重叠的组件（P1-A Markdown/Spark、P1-B 连接/设置、P1-C 抽屉；P2-E Composer、P2-F 审批/Toast）。coder-glm 本轮全程可用（与昨日不同），5 张卡全部交付。
+
+**已完成**：
+- `app/` Expo SDK 57 / RN 0.86 / React 19.2.3 工程（独立 npm，不进 pnpm workspace）；prebuild 出 ios/ 原生工程。
+- metro watchFolders 指向 `../web`，直接 import `web/core/*` 与 `web/vendor/marked`；`resolveRequest` 把 vendor preact 重定向到 `src/shims/preact-htm.js`（bus.js 的 useBus 需要 useEffect，RN 由 react 提供）。
+- **core 复用仅两处小改**：`web/core/api.js` connHost/wsEndpoint 加 `typeof location` guard（web 回归无碍）；MMKV localStorage shim（`app/src/lib/storage.js`，index.js 第一行 import）。
+- 全屏：ConnectScreen/HomeScreen/ChatScreen/SettingsScreen + Drawer；Composer（Chat/New 两版）、模型/模式 bottom-sheet、bypass 确认、审批浮层、Toast、MarkdownView、Spark 全部落地，行为逐行对照 web。
+- 导航：Drawer(自定义内容)+native-stack；AppState 回前台 reconnectNow；expo-linking 接 `claude-remote://` 深链→PairConfirm。theme.js 移植 style.css 明暗两套 token。
+
+**验证**：全量 production bundle 编译通过（整模块图无 import/语法错）；iOS 模拟器 xcodebuild BUILD SUCCEEDED；app 启动到连接页正常渲染（芒星+衬线标题+表单）。**修掉一个运行时崩溃**：mmkv v4 废弃 `new MMKV()`，改用 `createMMKV()` 工厂 + `remove()`（原 `delete()` 也已改名）。
+
+**坑记**：① CocoaPods 机器没装，`brew install cocoapods` 走 ghcr bottle 镜像 SSL 失败 → `env -u HOMEBREW_BOTTLE_DOMAIN` 绕过装成 1.17.0；② `pod install` 拉 cdn.cocoapods.org 同样 SSL EOF → 走系统代理 `https_proxy=http://127.0.0.1:1082 pod install` 成功；③ bundleId 用 `cc.anyyu.clauderemote.rn`（.rn 后缀与旧 Capacitor 壳区分，可并存对比）。
+
+**当前运行态**：metro 在 8081（nohup，日志 /tmp/rn-metro.log）；daemon 8788；app 装在 iPhone 17 Pro 模拟器（<SIM_UDID>…）。RN 全部改动**未 commit**（基线 82773cd）。
+
+**剩余（P3，未做）**：keyboard-controller 交互式拖拽收起的真机跟手验收（=迁移主因，硬门槛见迁移计划 §6）、暗色真机回归、图标/启动屏换芒星、TestFlight/签名；以及用户模拟器点测后反馈的观感微调。
+
+## 2026-07-30·P3 启动：真机装机前置打通 + 键盘安全区缺陷修复
+
+**环境复原**（三项全停）：Tailscale 又停了（第三次复发，`Tailscale up` 已拉起，**仍强烈建议设为登录自启**）；daemon 重启于 8788（`pnpm dev`，日志 /tmp/claude-remote-daemon.log，health 带 Bearer 返回 ok:true，claudeCliVersion 2.1.209）；metro 重启于 8081（日志 /tmp/rn-metro.log）。**LAN IP 又漂了：192.168.1.3 → 192.168.1.8**，旧二维码再次失效；pair-info 现返回 Tailscale 100.64.0.10 / LAN 192.168.1.8 / mac.local 三候选。
+
+**发现 7-24 存在未记录的改动**：图标/启动屏换芒星**已完成**（assets/icon.png 深底赤陶芒星 + splash-icon.png，ios/ 已 prebuild 出对应 Images.xcassets）——即 P3 第③项已做完，此前 PROGRESS 漏记。
+
+**修复 composer 底部安全区被清零的缺陷**（ChatComposer.js / NewChatComposer.js）：
+
+- 根因（读 keyboard-controller 1.21.9 源码取证）：`KeyboardAvoidingView` 的 `combinedStyles = [style, animatedStyle]`，animatedStyle 排在后面，`behavior="padding"` 时返回 `{paddingBottom: bottom}` 会**整体覆盖**使用者写在 `style` 上的 `paddingBottom`。键盘收起时 `progress=0 → bottom=0`，于是 `Math.max(insets.bottom, 8)` 被清零，输入框直接贴住 home indicator。
+- 修法：安全区间距移到 KAV 的**子层 View**；KAV 加 `keyboardVerticalOffset={-padBottom}`。依据源码 `relativeKeyboardHeight = kbHeight + keyboardVerticalOffset`，键盘打开时 KAV padding = kbHeight − padBottom，叠加子层 padBottom 后总间距恰为 kbHeight（输入框贴键盘顶）；收起时 KAV padding = 0，子层 padBottom 保留安全区。
+- ModeSheet 是 `BottomSheetModal`（portal 渲染），不受父级 padding 影响，故留在包裹 View 之外。
+
+**打通真机装机前置**（此前无法构建）：
+1. **`ios/` 缺 Pods**：7-24 那次为换图标重新 prebuild，重建了 ios/ 但**没跑 pod install**——没有 `Pods/`、`.xcworkspace`、`Podfile.lock`，工程根本不可构建。已用 `https_proxy=http://127.0.0.1:1082 pod install` 补上（cdn.cocoapods.org 仍需走代理，同 7-23 坑记）。
+2. **签名 team 首次配置**：keychain 仅一个身份 `Apple Development: xuzihan923@icloud.com (5PX32Z7M2V)`，从证书 OU 提取 **Team ID = Z25WB9W2X5**（证书有效期至 2027-07-19）。已写进 `ios/ClaudeRemote.xcodeproj/project.pbxproj` 的 Debug/Release 两段 buildSettings（`DEVELOPMENT_TEAM` + `CODE_SIGN_STYLE = Automatic`，plutil -lint 通过，xcodebuild -showBuildSettings 实测生效）。**注意：`expo prebuild --clean` 会重新生成 pbxproj 并丢失这两行，届时需重配**（长期方案是做成 config plugin）。
+3. 设备已配对：iPhone 17（`<COREDEVICE_ID>`，available）。
+
+**验证**：两个 composer babel 解析通过；metro 全量 bundle 编译通过（10.0 MB，HTTP 200，整模块图无错）；pod install exit 0；签名设置 xcodebuild 实读确认。
+
+**待用户执行（真机）**：Xcode 打开 `app/ios/ClaudeRemote.xcworkspace` 装机 → 按迁移计划 §6 五条验收键盘 + 本次修复点（收起键盘后输入框与 home indicator 的间距）+ 暗色回归。**未决**：免费签名 7 天过期 vs $99/年（装完看描述文件有效期即可确认账号类型）。本轮改动未 commit（基线仍 82773cd）。
+
+## 2026-07-31·安全修复：配对端点隧道穿透漏洞 + Cloudflare Tunnel 方案验证
+
+**背景**：讨论「Mac 与手机建立连接的更优方案」。查明现有机制三处硬伤：① **运行中不自愈**——`app/src/App.js:119-124` 回前台只 `ws.reconnectNow()`，不重新 `probeBases`，IP 漂移后只能杀 App 重开（当日实际踩中，手机报 network_timeout）；② **串行探测慢**——`web/core/api.js:91-100` for 循环逐个 await，health 超时 8s，三候选最坏 24s；③ **WS 无逃逸路径且缺半开检测**——`web/core/ws.js` 退避上限 30s 但 `attempt` 无限递增，永远重试失效地址；客户端无心跳超时检测，移动网络切换造成的 TCP 假活不触发 `onclose`，UI 显示已连接实则收不到消息。①②③ 均未修，属后续待办。
+
+**发现并修复一个灾难级漏洞（P0）**：
+
+- 根因：`packages/daemon/src/server.ts:284` 的配对端点用 `req.socket.remoteAddress` 判 loopback，且该检查在 Bearer 校验**之前**。设计前提是「loopback = 物理在本机的人」，在仅暴露局域网/Tailscale 时成立。**但 cloudflared / ngrok / nginx 等代理跑在本机时源地址同样是 127.0.0.1，前提被打破**——隧道一开，公网任何人 `curl $URL/api/pair-info` 即可无鉴权读走 BRIDGE_TOKEN，进而读全部会话、发消息执行命令（且存在 bypassPermissions 模式）。等于把开发机 shell 挂公网。
+- 修法：新增 `looksProxied(headers)`（`pair.ts`），检测 `x-forwarded-for` / `x-forwarded-host` / `x-forwarded-proto` / `x-real-ip` / `forwarded` / `cf-connecting-ip` / `cf-ray` / `cf-ipcountry` / `cf-visitor` / `ngrok-trace-id`，出现任一即 403（fail-closed）。直连场景伪造这些头只会自拒，不构成提权，故宁可误杀。`server.ts` 与 loopback 判断做或运算。
+- 测试：`server.test.ts` 新增用例锁定行为（本机直连 200 且返回 token；五种代理头分别 403；pair-qr.svg 同样受保护）。**daemon 测试 81 → 82 全绿，typecheck 通过。**
+- **长期更稳的方案**（未做）：配对端点挪到独立的、仅绑 127.0.0.1 的端口，隧道只转发主端口——结构上不可能穿透，不依赖头部黑名单。
+
+**Cloudflare Tunnel 方案实证（PoC 全通，隧道用完已关闭）**：
+
+- `brew install cloudflared`（需 `env -u HOMEBREW_BOTTLE_DOMAIN` 绕 ghcr 镜像 SSL 失败，同 7-23 坑记）；`cloudflared tunnel --url http://127.0.0.1:8788` 拿到 `https://<随机>.trycloudflare.com`，边缘节点 sin11。
+- 实测结果：经隧道 `/api/pair-info` → **403**（修复生效）；无 token → 401；带 token → 200；`/api/sessions` 真实业务接口正常返回；**WSS 握手成功、22s 收到服务端心跳 ping、连接保持 45s 未断**（CF 对 WS 长连接无碍）。
+- 结论：**方案技术可行，daemon/API/WS 零改动即可跑通**。
+- 待评估的代价：① **TLS 在 Cloudflare 终止，会话明文对 CF 可见**——产品是「远程操作开发机」，此账迟早需端到端加密；② `trycloudflare` 免费临时域名重启即变（本架构靠扫码下发地址，反而不惧）；③ **免费临时隧道用于商业分发的服务条款与稳定性尚未核实**，押注前必须查清。
+
+**选型结论（讨论所得）**：面向最终用户，Cloudflare 显著优于 Tailscale——`cloudflared` 跑在 Mac 侧，可被菜单栏 App 内置并自动管理，用户全程零配置且无需知道 CF 存在；Tailscale 要求双端安装、注册、登录同一账号，这部分复杂度无法替用户吸收。用户自己日常使用仍用 Tailscale（已装好，按需开关）。
+
+## 2026-07-31 晚·Named Tunnel 落地（claude.example.com 固定地址已通）+ Home 顶栏精简
+
+**Named Tunnel 搭建完成，全链路实测通过**。这是本项目第一个**固定的、免疫 IP 漂移与 Tailscale 开关状态**的接入地址。
+
+- **域名**：`example.com`（阿里云购买，用户自行把 NS 从 `dns1/2.hichina.com` 改到 Cloudflare `<ns1>/<ns2>.ns.cloudflare.com`，dig +trace 从根域确认生效，域名全新无历史解析记录，零迁移风险）。
+- **隧道**：`cloudflared tunnel create claude-remote` → tunnel id `<TUNNEL_ID>`；`route dns` 绑 `claude.example.com`；配置 `~/.cloudflared/config.yml`（ingress → `http://127.0.0.1:8788`，含安全前提注释）。
+- **实测**（经 `https://claude.example.com`）：带 token /api/health → 200；无 token → 401；**/api/pair-info → 403（漏洞防护回归通过）**；/api/sessions 真实业务接口正常；**WSS 握手 0.5s、22.6s 收到心跳 ping**（比 quick tunnel 的 1.2s 更快，边缘节点 sin07/08/15/21）。
+
+**三个坑（下次搭建必看）**：
+1. **管理命令必须走代理，运行时不用**：`cloudflared tunnel login` 直连会轮询 8 分钟后报 `Failed to write the certificate / Failed to fetch resource`（拉 cert 走 login.cloudflareaccess.org 被墙）。加 `https_proxy=http://127.0.0.1:1082` 后 6 秒内成功。`create` / `route dns` 同样需要。但 `tunnel run` 是到 CF 边缘的出站 QUIC，实测**无需代理**。
+2. **本机 DNS 被代理软件劫持成 fake-ip**：`dig claude.example.com` 返回 `198.18.0.95`（保留段），本机自测走的是代理转发而非真实解析。不影响手机外网访问，但排障时别被这个 IP 误导。
+3. **nohup 起的 cloudflared / daemon 会随会话消失**：本轮两者都死过一次（先报 1033 无活跃隧道，重启隧道后又报 502 源站不可达，才发现 daemon 也没了）。长期应交由菜单栏 App 托管（同 daemon 的守护逻辑）。
+
+**其它**：
+- 删除 HomeScreen 右上角圆形按钮（连接状态灯 + 设置入口）。先确认 `DrawerContent.js:118` 有独立「设置」入口才动手，不会锁死设置页；连带清掉只为它服务的死代码 `dotColor` / `wsPhase` state / `useBus('ws-state')` 订阅，babel 解析通过。**副作用：Home 页失去连接状态可视指示**，仅剩底部「加载失败」文案，需要的话可把状态点移至他处。
+- 本机 Claude CLI 已升级 **2.1.209 → 2.1.220**（daemon health 探测所得）。
+- 服务器 `203.0.113.10`（<KEY>.pem，root）经查**没有本项目部署**：`/root/projects/` 空，`/root/.claude/` 只是该机自身的 Claude Code 配置目录。本项目目前纯本地。
+
+**当前运行态**：daemon 8788（nohup，日志 /tmp/claude-remote-daemon.log）；cloudflared named tunnel（nohup，日志 /tmp/cf-named-tunnel.log）；菜单栏 App 运行中；metro 8081；Tailscale 用户按需开关（本轮曾自行关闭）。**手机端接入地址现推荐 `https://claude.example.com`**，token 不变。
+
+**下一步待办**（优先级排序）：
+1. **三个连接硬伤**（与隧道方案无关，上了隧道照样咬人）：① 运行中不自愈（回前台不重探地址）② 串行探测最坏 24s ③ WS 无逃逸路径 + 缺半开连接检测。
+2. Cloudflare 免费版商业分发的**服务条款与稳定性核实**（决定 C 值不值得投入）。
+3. 把 cloudflared 集成进菜单栏 App，做成完整配对流程（地址变更自动刷二维码）。
+4. **P3 键盘真机验收仍未做**（RN 迁移的存在理由，硬门槛见 rn-migration-plan §6）。
+5. 端到端加密（明文对 CF 可见，产品化前必须解决）。
+
+
+
