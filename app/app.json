@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "Claude Remote",
+    "slug": "claude-remote",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "claude-remote",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "cc.anyyu.clauderemote.rn",
+      "infoPlist": {
+        "NSAppTransportSecurity": { "NSAllowsArbitraryLoads": true },
+        "NSLocalNetworkUsageDescription": "连接局域网内 Mac 上的 Claude Code daemon",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "cc.anyyu.clauderemote",
+      "adaptiveIcon": {
+        "backgroundColor": "#F5F4EF",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 160,
+          "backgroundColor": "#F5F4EF",
+          "dark": { "backgroundColor": "#1E1C18" }
+        }
+      ]
+    ]
+  }
+}

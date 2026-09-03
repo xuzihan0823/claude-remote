@@ -255,6 +255,24 @@ test("CORS：/api 预检 204 无需鉴权；普通响应带 Allow-Origin", async
   assert.equal(normal.headers.get("access-control-allow-origin"), "*");
 });
 
+// pair-info 在 Bearer 校验之前按 socket 源地址放行，前提是「loopback = 物理在本机的人」。
+// cloudflared/ngrok/nginx 等代理跑在本机时源地址同样是 127.0.0.1，该前提失效：
+// 隧道一开，公网任何人无需鉴权即可读走 token。故带任何代理特征头一律拒绝。
+test("配对端点：本机直连放行；带代理特征头（隧道/反代）一律 403，防 token 经隧道泄露", async () => {
+  const direct = await fetch(`${harness.base}/api/pair-info`);
+  assert.equal(direct.status, 200);
+  assert.equal((await direct.json()).token, TOKEN);
+
+  for (const header of ["x-forwarded-for", "cf-connecting-ip", "cf-ray", "x-real-ip", "forwarded"]) {
+    const viaProxy = await fetch(`${harness.base}/api/pair-info`, { headers: { [header]: "1.2.3.4" } });
+    assert.equal(viaProxy.status, 403, `${header} 应被拒绝`);
+    assert.deepEqual(await viaProxy.json(), { error: "loopback_only" });
+  }
+
+  const qr = await fetch(`${harness.base}/api/pair-qr.svg`, { headers: { "x-forwarded-for": "1.2.3.4" } });
+  assert.equal(qr.status, 403);
+});
+
 test("POST upload：落盘到 uploadsDir/sessionId、文件名消毒；空体 400；未知会话 404", async () => {
   const res = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/upload?filename=${encodeURIComponent("../evil/no te.txt")}`, authed({
     method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: "hello upload",
