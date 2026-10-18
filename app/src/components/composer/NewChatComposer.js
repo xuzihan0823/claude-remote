@@ -7,6 +7,8 @@ import { toast } from '../../../../web/core/bus.js';
 import { getNewSessionMode, setNewSessionMode, setSessionMode } from '../../../../web/core/modes.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useTheme } from '../../theme.js';
+import { Icon } from '../Icon.js';
+import { ComposerActions } from './ComposerActions.js';
 import { ComposerCard } from './ComposerCard.js';
 import { AttachmentChips } from './AttachmentChips.js';
 import { AttachmentPicker } from './AttachmentPicker.js';
@@ -18,7 +20,7 @@ import { ModeSheet } from './ModeSheet.js';
 // 附件走 /api/upload（新建会话专用端点），POST /api/sessions {cwd, text, model?, permissionMode?}；
 // 成功 setSessionMode(result.sessionId, mode) + onCreated(result, body)。对应 web/ui/components/composer.js。
 export function NewChatComposer({ projects, onCreated }) {
-  const { colors } = useTheme();
+  const { colors, dark } = useTheme();
   const insets = useSafeAreaInsets();
   const catalog = useModelCatalog();
   const [draft, setDraft] = useState('');
@@ -71,13 +73,16 @@ export function NewChatComposer({ projects, onCreated }) {
   const canSend = !busy && draft.trim() !== '' && !!cwd;
 
   // 见 ChatComposer 同处注释：安全区间距放子层，避免被 KAV 动画样式在键盘收起时清零。
+  // automaticOffset 必开：KAV 默认拿 onLayout 的 y（相对父容器≈0）当屏幕坐标，
+  // 停在屏幕底部的 composer 会被算成"离键盘很远"而抬升 0（真机被键盘整个盖住）。
   const padBottom = Math.max(insets.bottom, 12);
 
   return (
     <KeyboardAvoidingView
       behavior="padding"
+      automaticOffset
       keyboardVerticalOffset={-padBottom}
-      style={{ paddingHorizontal: 12, paddingTop: 6 }}
+      style={{ paddingLeft: Math.max(insets.left, 16), paddingRight: Math.max(insets.right, 16), paddingTop: 8 }}
     >
       <View style={{ paddingBottom: padBottom }}>
       <ComposerCard disabled={busy}>
@@ -88,40 +93,45 @@ export function NewChatComposer({ projects, onCreated }) {
           multiline
           editable={!busy}
           placeholder="今天想做什么？"
-          placeholderTextColor={colors.ink3}
+          placeholderTextColor={colors.ink2}
+          accessibilityLabel="消息"
+          keyboardAppearance={dark ? 'dark' : 'light'}
           onContentSizeChange={onContentSizeChange}
           style={{
             height: inputH,
             color: colors.inkStrong,
-            fontSize: 15,
+            fontSize: 17,
+            lineHeight: 24,
             textAlignVertical: 'top',
-            padding: 0,
+            paddingHorizontal: 2,
+            paddingVertical: 0,
             marginTop: 4,
           }}
         />
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 }}>
-          <AttachmentPicker disabled={busy} onPicked={(items) => setFiles((xs) => [...xs, ...items])} />
-          <ModelPicker value={model} onChange={setModel} catalog={catalog} />
-          <ModePill mode={mode} onOpen={() => setModeOpen(true)} />
-          <View style={{ flex: 1 }} />
-          <TouchableOpacity
+        <ComposerActions
+          attachment={<AttachmentPicker disabled={busy} onPicked={(items) => setFiles((xs) => [...xs, ...items])} />}
+          model={<ModelPicker value={model} onChange={setModel} catalog={catalog} />}
+          mode={<ModePill mode={mode} onOpen={() => setModeOpen(true)} />}
+          action={<TouchableOpacity
             onPress={create}
             disabled={!canSend}
+            accessibilityRole="button"
+            accessibilityState={{ disabled: !canSend, busy }}
             accessibilityLabel="创建会话并发送"
             style={{
-              width: 36, height: 36, borderRadius: 18,
-              backgroundColor: colors.accent,
+              width: 44, height: 44, borderRadius: 22,
+              backgroundColor: colors.inkStrong,
               alignItems: 'center', justifyContent: 'center',
               opacity: !canSend ? 0.4 : 1,
             }}
           >
             {busy ? (
-              <ActivityIndicator color="#fff" size="small" />
+              <ActivityIndicator color={colors.bg} size="small" />
             ) : (
-              <Text style={{ color: '#fff', fontSize: 18, fontWeight: '600', lineHeight: 20 }}>↑</Text>
+              <Icon name="send" color={colors.bg} />
             )}
-          </TouchableOpacity>
-        </View>
+          </TouchableOpacity>}
+        />
       </ComposerCard>
       {files.length > 0 ? (
         <Text style={{ color: colors.ink3, fontSize: 11, marginTop: 6, textAlign: 'center' }}>

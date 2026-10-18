@@ -6,6 +6,8 @@ import { api } from '../../../../web/core/api.js';
 import { toast } from '../../../../web/core/bus.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useTheme } from '../../theme.js';
+import { Icon } from '../Icon.js';
+import { ComposerActions } from './ComposerActions.js';
 import { ComposerCard } from './ComposerCard.js';
 import { AttachmentChips } from './AttachmentChips.js';
 import { AttachmentPicker } from './AttachmentPicker.js';
@@ -20,7 +22,7 @@ import { ModeSheet } from './ModeSheet.js';
 export function ChatComposer({
   sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped, onStatusConflict,
 }) {
-  const { colors } = useTheme();
+  const { colors, dark } = useTheme();
   const insets = useSafeAreaInsets();
   const catalog = useModelCatalog();
   const [draft, setDraft] = useState('');
@@ -110,13 +112,15 @@ export function ChatComposer({
   // 底部安全区间距必须放在 KAV 的子层：KAV(behavior=padding) 的动画样式排在 style 之后，
   // 会整体覆盖 paddingBottom——写在 KAV 自身上时键盘收起（progress=0）就被清零，输入框贴住 home indicator。
   // keyboardVerticalOffset=-padBottom 抵消内层静态间距，使键盘打开时总间距仍恰好等于键盘高度。
+  // automaticOffset：让 KAV 用原生窗口坐标算自身位置（默认用相对父容器的 onLayout.y≈0，会算出抬升 0）。
   const padBottom = Math.max(insets.bottom, 8);
 
   return (
     <KeyboardAvoidingView
       behavior="padding"
+      automaticOffset
       keyboardVerticalOffset={-padBottom}
-      style={{ paddingHorizontal: 12, paddingTop: 6 }}
+      style={{ paddingLeft: Math.max(insets.left, 16), paddingRight: Math.max(insets.right, 16), paddingTop: 8 }}
     >
       <View style={{ paddingBottom: padBottom }}>
       {isRunning ? (
@@ -140,54 +144,57 @@ export function ChatComposer({
           onChangeText={setDraft}
           multiline
           editable={canSend}
-          placeholder={canSend ? '输入消息…' : disabledReason}
-          placeholderTextColor={colors.ink3}
+          placeholder={canSend ? '回复 Claude…' : disabledReason}
+          placeholderTextColor={colors.ink2}
+          accessibilityLabel="消息"
+          keyboardAppearance={dark ? 'dark' : 'light'}
           onContentSizeChange={onContentSizeChange}
           style={{
             height: inputH,
             color: colors.inkStrong,
-            fontSize: 15,
+            fontSize: 17,
+            lineHeight: 24,
             textAlignVertical: 'top',
-            padding: 0,
+            paddingHorizontal: 2,
+            paddingVertical: 0,
             marginTop: 4,
           }}
         />
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 }}>
-          <ModelPicker value={modelOverride} onChange={setModelOverride} catalog={catalog} />
-          <ModePill mode={mode} onOpen={() => setModeOpen(true)} />
-          <Text style={{ color: colors.ink3, fontSize: 11 }}>{modelOverride ? '仅本轮' : '跟随 Mac 默认'}</Text>
-        </View>
-        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
-          <AttachmentPicker disabled={!canSend} onPicked={(items) => setFiles((xs) => [...xs, ...items])} />
-          <View style={{ flex: 1 }} />
-          {isRunning ? (
+        <ComposerActions
+          attachment={<AttachmentPicker disabled={!canSend} onPicked={(items) => setFiles((xs) => [...xs, ...items])} />}
+          model={<ModelPicker value={modelOverride} onChange={setModelOverride} catalog={catalog} />}
+          mode={<ModePill mode={mode} onOpen={() => setModeOpen(true)} />}
+          action={isRunning ? (
             <TouchableOpacity
               onPress={stopRun}
+              accessibilityRole="button"
               accessibilityLabel="停止生成"
               style={{
-                width: 36, height: 36, borderRadius: 18,
-                backgroundColor: colors.accent,
+                width: 44, height: 44, borderRadius: 22,
+                backgroundColor: colors.inkStrong,
                 alignItems: 'center', justifyContent: 'center',
               }}
             >
-              <Text style={{ color: '#fff', fontSize: 16, lineHeight: 18 }}>■</Text>
+              <Icon name="stop" color={colors.bg} />
             </TouchableOpacity>
           ) : (
             <TouchableOpacity
               onPress={doSend}
               disabled={!canSend || !hasContent}
+              accessibilityRole="button"
+              accessibilityState={{ disabled: !canSend || !hasContent }}
               accessibilityLabel="发送"
               style={{
-                width: 36, height: 36, borderRadius: 18,
-                backgroundColor: colors.accent,
+                width: 44, height: 44, borderRadius: 22,
+                backgroundColor: colors.inkStrong,
                 alignItems: 'center', justifyContent: 'center',
                 opacity: (!canSend || !hasContent) ? 0.4 : 1,
               }}
             >
-              <Text style={{ color: '#fff', fontSize: 18, fontWeight: '600', lineHeight: 20 }}>↑</Text>
+              <Icon name="send" color={colors.bg} />
             </TouchableOpacity>
           )}
-        </View>
+        />
       </ComposerCard>
       </View>
       <ModeSheet

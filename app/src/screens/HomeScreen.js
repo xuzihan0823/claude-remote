@@ -1,18 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Keyboard, Text, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
+import { Keyboard, ScrollView, Text, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { DrawerActions, useNavigation } from '@react-navigation/native';
+import { useNavigation } from '@react-navigation/native';
 import { cacheSessions, fetchSessions, pendingSessionMessages } from '../../../web/core/api.js';
 import { useBus } from '../../../web/core/bus.js';
 import { ws } from '../../../web/core/ws.js';
 import { truncate } from '../lib/format.js';
+import { ConversationHeader } from '../components/ConversationHeader.js';
 import { Spark } from '../components/Spark.js';
 import { NewChatComposer } from '../components/composer/NewChatComposer.js';
 import { useTheme } from '../theme.js';
 
 // 移植 web/ui/screens/home.js 的 StartScreen：问候居中 + 底部 composer 浮岛。
 export function HomeScreen() {
-  const { colors, fonts } = useTheme();
+  const { colors } = useTheme();
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const hour = new Date().getHours();
@@ -53,22 +54,14 @@ export function HomeScreen() {
 
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
-    <View style={{ flex: 1, backgroundColor: colors.bg, paddingTop: insets.top }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 8 }}>
-        <TouchableOpacity
-          onPress={() => navigation.dispatch(DrawerActions.openDrawer())}
-          style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line }}
-          accessibilityLabel="打开侧栏"
-        >
-          <Text style={{ color: colors.ink, fontSize: 17 }}>☰</Text>
-        </TouchableOpacity>
-        <View style={{ flex: 1 }} />
-      </View>
+    <View style={{ flex: 1, backgroundColor: colors.bg, paddingTop: insets.top, paddingLeft: insets.left, paddingRight: insets.right }}>
+      <ConversationHeader />
 
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-        <Spark size={40} style={{ marginBottom: 14 }} />
-        <Text style={{ color: colors.inkStrong, fontFamily: fonts.serifCn, fontSize: 32 }}>{greet}</Text>
-      </View>
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 24 }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+        <Spark size={48} style={{ marginBottom: 20 }} />
+        <Text style={{ color: colors.inkStrong, fontSize: 32, fontWeight: '400', letterSpacing: -0.8 }}>{greet}</Text>
+        <Text style={{ color: colors.ink2, fontSize: 15, marginTop: 12 }}>在手机上，继续你的工作。</Text>
+      </ScrollView>
 
       <View>
         {error ? (

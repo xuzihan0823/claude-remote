@@ -19,6 +19,8 @@ export interface DaemonConfig {
   cooldownMs: number;
   interactionsDbPath: string;
   permissionTimeoutMs: number;
+  /** 配对二维码额外候选地址（如 Cloudflare 隧道），排在自动枚举的局域网地址之前。 */
+  publicBases: string[];
   barkUrl?: string;
   ntfyUrl?: string;
 }
@@ -58,6 +60,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     cooldownMs: readInt(env, "ACTIVITY_COOLDOWN_MS", 120_000),
     interactionsDbPath: dbPath === ":memory:" || isAbsolute(dbPath) ? dbPath : join(process.cwd(), dbPath),
     permissionTimeoutMs: readInt(env, "PERMISSION_TIMEOUT_MS", 300_000),
+    publicBases: (readString(env, "BRIDGE_PUBLIC_BASES") ?? "")
+      .split(",")
+      .map((s) => s.trim().replace(/\/+$/, ""))
+      .filter((s) => /^https?:\/\//.test(s)),
     ...(barkUrl === undefined ? {} : { barkUrl }),
     ...(ntfyUrl === undefined ? {} : { ntfyUrl }),
   };

@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import { ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
 import { MarkdownView } from './markdown/MarkdownView.js';
+import { Icon } from './Icon.js';
 import { Spark } from './Spark.js';
 import { fmtClock, toolSummary } from '../lib/format.js';
 import { useTheme } from '../theme.js';
@@ -52,7 +53,7 @@ function MonoBody({ text, err }) {
 }
 
 export function MessageRow({ m }) {
-  const { colors, fonts, radius } = useTheme();
+  const { colors } = useTheme();
 
   if (m.kind === 'meta') {
     return (
@@ -88,44 +89,26 @@ export function MessageRow({ m }) {
       </Block>
     );
   }
-  // kind === 'text'
   if (m.role === 'user') {
     return (
-      <View style={{ flexDirection: 'row', marginVertical: 6, gap: 8 }}>
-        <View
-          style={{
-            width: 26, height: 26, borderRadius: 13, backgroundColor: colors.bubble,
-            alignItems: 'center', justifyContent: 'center', marginTop: 2,
-          }}
-        >
-          <Text style={{ fontSize: 11, color: colors.ink }}>我</Text>
-        </View>
-        <View style={{ flex: 1 }}>
-          <View
-            style={{
-              backgroundColor: colors.bubble, borderRadius: radius.md, borderTopLeftRadius: radius.xs,
-              paddingHorizontal: 12, paddingVertical: 8, alignSelf: 'flex-start', maxWidth: '100%',
-            }}
-          >
-            <Text style={{ color: colors.inkStrong, fontSize: 15, lineHeight: 22 }} selectable>{m.text}</Text>
-          </View>
-          {m.timestamp ? (
-            <Text style={{ color: colors.ink3, fontSize: 11, marginTop: 2 }}>{fmtClock(m.timestamp)}</Text>
-          ) : null}
+      <View style={{ alignItems: 'flex-end', marginTop: 12, marginBottom: 20 }}>
+        <View style={{ backgroundColor: colors.bubble, borderRadius: 26, borderCurve: 'continuous',
+          paddingHorizontal: 18, paddingVertical: 12, maxWidth: '88%' }}>
+          <Text style={{ color: colors.inkStrong, fontSize: 17, lineHeight: 26 }} selectable>{m.text}</Text>
         </View>
       </View>
     );
   }
   return (
-    <View style={{ flexDirection: 'row', marginVertical: 6, gap: 8 }}>
-      <View style={{ width: 26, alignItems: 'center', marginTop: 4 }}>
-        <Spark size={16} />
-      </View>
-      <View style={{ flex: 1 }}>
-        <MarkdownView text={m.text} />
-        {m.timestamp ? (
-          <Text style={{ color: colors.ink3, fontSize: 11, marginTop: 2 }}>{fmtClock(m.timestamp)}</Text>
-        ) : null}
+    <View style={{ marginTop: 8, marginBottom: 20 }}>
+      <MarkdownView text={m.text} />
+      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="分享回复"
+          onPress={() => Share.share({ message: m.text || '' }).catch(() => {})}
+          style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center', marginLeft: -10 }}>
+          <Icon name="share" size={20} color={colors.ink2} />
+        </TouchableOpacity>
+        {m.timestamp ? <Text style={{ color: colors.ink3, fontSize: 12 }}>{fmtClock(m.timestamp)}</Text> : null}
       </View>
     </View>
   );

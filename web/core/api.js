@@ -35,14 +35,16 @@ export function wsEndpoint() {
   const hasLoc = typeof location !== 'undefined';
   let host = hasLoc ? location.host : '';
   let secure = hasLoc && location.protocol === 'https:';
+  let prefix = '';
   if (baseUrl) {
     try {
       const u = new URL(baseUrl);
       host = u.host;
       secure = u.protocol === 'https:';
+      prefix = u.pathname.replace(/\/+$/, '');
     } catch { /* 保底同源 */ }
   }
-  return `${secure ? 'wss' : 'ws'}://${host}/ws?token=${encodeURIComponent(token)}`;
+  return `${secure ? 'wss' : 'ws'}://${host}${prefix}/ws?token=${encodeURIComponent(token)}`;
 }
 
 export class ApiError extends Error {

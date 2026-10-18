@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, FlatList, Pressable, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { api, fetchSessions, pendingSessionMessages, sessionCache } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
 import { PERMISSION_MODES, getSessionMode, setSessionMode } from '../../../web/core/modes.js';
 import { ws } from '../../../web/core/ws.js';
-import { cmpMsg, cwdTail, msgKey } from '../lib/format.js';
+import { cmpMsg, msgKey } from '../lib/format.js';
+import { ConversationHeader } from '../components/ConversationHeader.js';
+import { GlassSurface } from '../components/GlassSurface.js';
+import { Icon } from '../components/Icon.js';
 import { MessageRow } from '../components/MessageRow.js';
 import { StatusBadge } from '../components/StatusBadge.js';
 import { Spark } from '../components/Spark.js';
@@ -20,7 +23,7 @@ import { useTheme } from '../theme.js';
 export function ChatScreen({ route }) {
   const sessionId = route.params.sessionId;
   const navigation = useNavigation();
-  const { colors, fonts } = useTheme();
+  const { colors } = useTheme();
   const insets = useSafeAreaInsets();
 
   const store = useRef({ map: new Map(), sorted: [] });
@@ -237,31 +240,16 @@ export function ChatScreen({ route }) {
   );
 
   return (
-    <View style={{ flex: 1, backgroundColor: colors.bg, paddingTop: insets.top }}>
-      {/* 顶栏 */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.line }}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          accessibilityLabel="返回"
-          style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' }}
-        >
-          <Text style={{ color: colors.ink, fontSize: 22, lineHeight: 24 }}>‹</Text>
-        </TouchableOpacity>
-        <View style={{ flex: 1, marginRight: 8 }}>
-          <Text numberOfLines={1} style={{ color: colors.inkStrong, fontFamily: fonts.serifCn, fontSize: 16 }}>{title}</Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 1 }}>
-            <Text numberOfLines={1} style={{ color: colors.ink2, fontFamily: fonts.mono, fontSize: 11, flexShrink: 1 }}>
-              {cwdTail(meta?.cwd || '')}
-            </Text>
-            <StatusBadge status={status} />
-            {mode === 'bypassPermissions' ? (
-              <View style={{ backgroundColor: colors.danger, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 1 }}>
-                <Text style={{ color: '#fff', fontSize: 10, fontWeight: '600' }}>Bypass</Text>
-              </View>
-            ) : null}
-          </View>
-        </View>
-      </View>
+    <View style={{ flex: 1, backgroundColor: colors.bg, paddingTop: insets.top, paddingLeft: insets.left, paddingRight: insets.right }}>
+      <ConversationHeader
+        title={title}
+        newChat
+        details={`${meta?.cwd || ''}\n${sessionId}`}
+        subtitle={<View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: 4, marginTop: 4 }}>
+          <StatusBadge status={status} />
+          {mode === 'bypassPermissions' ? <Text style={{ color: colors.danger, fontSize: 11 }}>Bypass</Text> : null}
+        </View>}
+      />
 
       <View style={{ flex: 1 }}>
         <FlatList
@@ -277,23 +265,37 @@ export function ChatScreen({ route }) {
           scrollEventThrottle={32}
           keyboardDismissMode="interactive"
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ paddingHorizontal: 12, paddingVertical: 10 }}
+          contentContainerStyle={{ paddingHorizontal: 20, paddingVertical: 16 }}
           ListHeaderComponent={listHeader}
           ListFooterComponent={listFooter}
         />
         {showJump ? (
-          <TouchableOpacity
-            onPress={jumpToBottom}
+          <GlassSurface
+            interactive
+            variant="pill"
             style={{
-              position: 'absolute', right: 14, bottom: 14, width: 36, height: 36, borderRadius: 18,
-              backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line,
-              alignItems: 'center', justifyContent: 'center',
-              shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 8, shadowOffset: { width: 0, height: 2 },
+              position: 'absolute',
+              right: 16,
+              bottom: 14,
+              borderRadius: 22,
             }}
-            accessibilityLabel="跳到底部"
           >
-            <Text style={{ color: colors.ink, fontSize: 16 }}>↓</Text>
-          </TouchableOpacity>
+            <Pressable
+              onPress={jumpToBottom}
+              accessibilityRole="button"
+              accessibilityLabel="跳到底部"
+              style={({ pressed }) => ({
+                width: 44,
+                height: 44,
+                borderRadius: 22,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: pressed ? colors.glassPressed : 'transparent',
+              })}
+            >
+              <Icon name="arrowDown" size={18} color={colors.ink} />
+            </Pressable>
+          </GlassSurface>
         ) : null}
       </View>
 

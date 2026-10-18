@@ -3,6 +3,7 @@ import { Text, TouchableOpacity, View } from 'react-native';
 import { BottomSheetBackdrop, BottomSheetModal } from '@gorhom/bottom-sheet';
 import { findModel, modelMainName, resolveDefaultName } from '../../../../web/core/api.js';
 import { ModelSheetContent } from './ModelSheet.js';
+import { Icon } from '../Icon.js';
 import { useTheme } from '../../theme.js';
 
 // pill：选中显示 modelMainName，未选显示「默认 · defName」；点开 BottomSheetModal 选模型。
@@ -30,18 +31,26 @@ export function ModelPicker({ value, onChange, catalog }) {
     <>
       <TouchableOpacity
         onPress={() => ref.current?.present()}
+        accessibilityRole="button"
+        accessibilityLabel={`选择模型，当前${triggerMain}`}
         style={{
           flexDirection: 'row',
           alignItems: 'center',
-          backgroundColor: colors.bubble,
-          borderRadius: 12,
-          paddingHorizontal: 10,
-          paddingVertical: 4,
+          gap: 4,
+          backgroundColor: colors.controlFill,
+          borderWidth: 1,
+          borderColor: colors.controlBorder,
+          borderRadius: 22,
+          borderCurve: 'continuous',
+          paddingHorizontal: 12,
+          paddingVertical: 10,
+          minHeight: 44,
+          flexShrink: 1,
           maxWidth: 220,
         }}
       >
-        <Text numberOfLines={1} style={{ color: colors.ink, fontSize: 12, flexShrink: 1 }}>{triggerMain}</Text>
-        <Text style={{ color: colors.ink2, fontSize: 10, marginLeft: 4 }}>⌄</Text>
+        <Text numberOfLines={1} style={{ color: colors.ink, fontSize: 13.5, fontWeight: '500', flexShrink: 1 }}>{triggerMain}</Text>
+        <Icon name="chevron" size={15} color={colors.ink2} />
       </TouchableOpacity>
       <BottomSheetModal
         ref={ref}

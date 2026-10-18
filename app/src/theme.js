@@ -1,4 +1,4 @@
-// design tokens 移植自 web/style.css 的 :root 明暗两套，token 名一一对应方便对照。
+// Native surfaces share semantic tokens across light and dark appearances.
 import { useColorScheme } from 'react-native';
 
 export const palettes = {
@@ -19,24 +19,44 @@ export const palettes = {
     warn: '#D97757',
     info: '#6889B0',
     danger: '#C0473A',
+    glassTint: 'rgba(255, 253, 249, 0.54)',
+    glassTintInteractive: 'rgba(255, 254, 251, 0.66)',
+    glassTintAccent: 'rgba(217, 119, 87, 0.15)',
+    glassBorder: 'rgba(255, 255, 255, 0.88)',
+    glassBorderAccent: 'rgba(217, 119, 87, 0.36)',
+    glassEdgeOuter: 'rgba(58, 54, 48, 0.08)',
+    glassHighlight: 'rgba(255, 255, 255, 0.72)',
+    glassPressed: 'rgba(58, 54, 48, 0.08)',
+    controlFill: 'rgba(58, 54, 48, 0.055)',
+    controlBorder: 'rgba(58, 54, 48, 0.11)',
   },
   dark: {
-    bg: '#1E1C18',
-    bg2: '#262319',
-    card: '#2E2B24',
-    cardHover: '#353129',
-    bubble: '#33302A',
+    bg: '#141414',
+    bg2: '#1C1C1C',
+    card: '#282828',
+    cardHover: '#333333',
+    bubble: '#2C2C2B',
     accent: '#D97757',
     accentDeep: '#C05B3E',
-    ink: '#D6D0C4',
-    inkStrong: '#EDEADE',
-    ink2: '#7A7264',
-    ink3: '#564E44',
-    line: '#3A3730',
+    ink: '#E8E7E2',
+    inkStrong: '#F5F4F0',
+    ink2: '#AAA9A2',
+    ink3: '#92928B',
+    line: '#424240',
     ok: '#6BAA6A',
     warn: '#D97757',
     info: '#7A9DC8',
     danger: '#D0604C',
+    glassTint: 'rgba(38, 37, 35, 0.58)',
+    glassTintInteractive: 'rgba(48, 46, 44, 0.66)',
+    glassTintAccent: 'rgba(217, 119, 87, 0.22)',
+    glassBorder: 'rgba(255, 255, 255, 0.15)',
+    glassBorderAccent: 'rgba(217, 119, 87, 0.42)',
+    glassEdgeOuter: 'rgba(0, 0, 0, 0.45)',
+    glassHighlight: 'rgba(255, 255, 255, 0.09)',
+    glassPressed: 'rgba(255, 255, 255, 0.10)',
+    controlFill: 'rgba(255, 255, 255, 0.08)',
+    controlBorder: 'rgba(255, 255, 255, 0.13)',
   },
 };
 
@@ -48,7 +68,7 @@ export const fonts = {
   mono: 'Menlo',
 };
 
-export const radius = { xs: 8, sm: 12, md: 18, island: 24 };
+export const radius = { xs: 8, sm: 12, md: 18, island: 28 };
 export const dur = { fast: 150, base: 250, slow: 400 };
 // 对应 --spring: cubic-bezier(0.32,0.72,0,1)，reanimated 里用 Easing.bezier(...spring)
 export const spring = [0.32, 0.72, 0, 1];
