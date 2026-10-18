@@ -53,6 +53,16 @@ proposed backend-only approach.
 4. Run `pnpm test` (including Web request and mobile pure-logic regressions) and `pnpm typecheck`, bundle native JS from `app/` with `NODE_PATH="$PWD/node_modules" npx expo export --platform ios`, review once across the full feature, then address confirmed findings. Exercise actual UI when a native runtime is available; browser preview cannot stand in for native-only modules.
 5. Restart the local preview daemon only after checking active runs, then verify catalog/filter responses read-only. Build a distributable native artifact where the installed toolchain permits it; report precise verification limits.
 
+## Expandable Native Sidebar (approved 2026-10-18)
+
+1. Add a pure project-group controller and thin hook reusing the existing session pager, catalog, merge/filter helpers and cached session metadata. Keep expansion separate from new-chat targeting.
+2. Replace Drawer filter/flat rows with a single virtualized project tree. Preserve header/footer identity, selected session, accessibility, independent project creation and explicit group pagination/errors.
+3. Add focused mobile regressions for lazy independent paging, collapse/cache invalidation, stale responses/disposal, default expansion, unclassified/worktree membership and optimistic deduplication.
+4. Run mobile tests and Expo iOS export; build/run the actual RN app from `app/ios/ClaudeRemote.xcworkspace` on the available iPhone simulator. Capture native evidence and report any unavailable interaction checks precisely. Do not use the legacy Capacitor validation commands below for this RN change or issue paid model requests.
+5. Review the integrated diff, update the project-conversations spec where necessary, and request explicit consent before any Git commit. Leave the pre-existing untracked launch configuration untouched.
+
+R7 verification completed: mobile tests 29/29, workspace typecheck and full baseline tests passed; Expo iOS export and final Release simulator build passed. Native XCTest passed grouped browsing, default/collapse refresh behavior, 50 → 100 → 106 pagination, Unclassified, same-name projects and project-specific Home targeting (2/2 cases). Light-mode XXXL capture passed (1/1). Evidence: `output/sidebar-verification/verification.md` and adjacent native screenshots. No real model turn was submitted. Git commit remains pending explicit user authorization.
+
 ## Validation Commands
 
 ```bash

@@ -16,7 +16,13 @@ Home displays the target and allows project/workspace selection. New from an exi
 
 Shared project state is scoped to the connected daemon. Connection identity changes must be reactive even when auth stays `ok`; importing mutable base/token variables alone does not trigger a React render. Clear old session caches and guard asynchronous results from an old connection or project filter. Never persist a bearer token in preference keys.
 
-Refresh catalog/list on reconnect and foreground; coalesce activity refreshes rather than refetching for every streamed message. Paginated rows deduplicate by sessionId; refresh must invalidate stale pagination responses and replace authoritative rows instead of retaining deleted sessions indefinitely. Empty pages still use the server's `total`. New-session optimistic state tolerates the delay between POST acceptance and JSONL creation.
+Refresh catalog/list on reconnect and foreground; coalesce activity refreshes rather than refetching for every streamed message. Preserve live status updates on optimistic summaries across catalog/cache refreshes until an authoritative server row replaces them or the optimistic TTL expires. Paginated rows deduplicate by sessionId; refresh must invalidate stale pagination responses and replace authoritative rows instead of retaining deleted sessions indefinitely. Empty pages still use the server's `total`. New-session optimistic state tolerates the delay between POST acceptance and JSONL creation.
+
+The native drawer presents the complete project catalog as expandable groups in one virtualized list. Expansion must not call `selectProject` or change the Home target. Create group-specific `createSessionPager` instances lazily; preserve cached pages when collapsed, invalidate them on shared refresh, and refetch only expanded groups. Use explicit group-level pagination because the global list end does not identify which project needs another page. Preserve the empty-string Unclassified filter; it is not the null All filter.
+
+Default expansion reads the complete root navigation state (`NavigationContainerRefContext` / `getRootState()` with a state subscription), not only the Drawer props' potentially incomplete nested state. Resolve the active Chat leaf route and its cached/optimistic session cwd; Home opens the most recent project, or Unclassified when it is the only group. A missing cache entry is unresolved metadata, not a missing-cwd session. Once a user collapses a project, catalog polling or the first late-arriving Home route must not reopen it. Dispose all group pagers on connection remount and entries removed by an authoritative catalog; late results must not publish.
+
+Project-header creation uses Home's existing `fromCwd` plus fresh `nonce` route parameters with a catalog actual cwd, not the repository-group ID. Existing draft preservation/target feedback still applies. Unclassified has no creation action. Keep current-session selection, status, and actual workspace context accessible even when repeated ordinary project paths are omitted.
 
 Project switching changes browsing only. Global approval delivery and active runs remain independent.
 
@@ -39,7 +45,7 @@ Project switching changes browsing only. Global approval delivery and active run
 
 ## 6. Tests Required
 
-Verify encoded project filters, unclassified/all distinction, pagination and deduplication, connection/filter races, draft target stability, and new-from-chat cwd propagation. Export the iOS Hermes bundle; exercise native controls in a supported runtime when available. Web daemon preview verifies HTTP/client requests, not native-only UI behavior.
+Verify encoded project filters, unclassified/all distinction, pagination and deduplication, connection/filter races, draft target stability, and new-from-chat cwd propagation. For grouped browsing assert zero session requests for untouched collapsed groups, independent offsets, stale-cache refresh on reopening, manual collapse surviving polling, and ignored responses after disposal. Export the iOS Hermes bundle; exercise native controls in a supported runtime when available. Web daemon preview verifies HTTP/client requests, not native-only UI behavior.
 
 ## 7. Wrong vs Correct
 
