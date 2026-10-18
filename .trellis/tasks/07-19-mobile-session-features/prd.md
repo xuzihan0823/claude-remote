@@ -90,6 +90,15 @@ continue using the same Mac project/session truth.
 - Keep JSONL transcripts as the source of truth, preserve the known-cwd create allowlist, and add no project database or arbitrary directory execution.
 - Verify repository/worktree aggregation, filter-before-pagination totals, unknown projects, unclassified data, refresh races, and explicit new-session cwd propagation.
 
+### R7. Expandable project sidebar (approved 2026-10-18)
+
+- Replace the native drawer's flat list and project filter with expandable project groups matching the supplied reference. Multiple groups may remain open.
+- Each project header shows its name, disclosure state, complete session count, and a separate new-conversation action. Unclassified sessions remain browsable without a project creation action.
+- Default to the current conversation's project, or the most recent project on Home. Respect subsequent manual collapse across refreshes.
+- Indent conversations, distinguish the selected conversation, and retain status/time and actual workspace context for multi-workspace projects. Avoid repeating the project path on every ordinary row.
+- Expansion changes browsing only. Project creation targets an actual known cwd, preserves drafts with existing feedback, and leaves workspace selection available on Home.
+- Preserve the existing brand header, refresh, bottom settings/new-chat actions, global approvals, active runs, and complete per-project pagination. Fetch groups lazily and isolate pagination, errors, and stale responses per project.
+
 ## Acceptance Criteria
 
 - [ ] `GET /api/models` (or the agreed equivalent) returns the Mac-backed model

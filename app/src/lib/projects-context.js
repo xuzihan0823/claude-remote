@@ -1,17 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
-import { fetchProjects, fetchSessions } from '../../../web/core/api.js';
+import { fetchProjects } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
 import {
-  ALL_PROJECTS, mergeSessions, normalizeCatalog, parsePref, pathTail,
-  prefKey, resolveTarget, sessionMatchesFilter,
+  ALL_PROJECTS, normalizeCatalog, parsePref, pathTail,
+  prefKey, resolveTarget,
 } from './projects.js';
-import { createSessionPager } from './session-pager.js';
 
 const ProjectsContext = createContext(null);
 export const useProjects = () => useContext(ProjectsContext);
-
-const OPTIMISTIC_TTL = 120_000;
 
 // 共享项目目录 + 浏览筛选 + Home 新建目标。App 按连接 key 重新挂载本 Provider；
 // 偏好只按 base 存储（不含 token），卸载后 gen 递增，旧连接的异步响应一律丢弃。
@@ -132,33 +129,6 @@ export function ProjectsProvider({ base, children }) {
     refresh, selectProject, setTarget, inheritCwd, prepareNewChat, noteCreated, setDraftActive]);
 
   return <ProjectsContext.Provider value={value}>{children}</ProjectsContext.Provider>;
-}
-
-export function useSessionList() {
-  const { catalog, projectId, listSignal, optimistic } = useProjects();
-  const [st, setSt] = useState({ items: [], total: 0, loading: true, error: '', loadingMore: false, moreError: '' });
-  const pager = useRef(null);
-  if (!pager.current) pager.current = createSessionPager(fetchSessions, setSt);
-
-  useEffect(() => { pager.current.refresh(projectId, true); }, [projectId]);
-  useEffect(() => () => pager.current.dispose(), []);
-  const firstSignal = useRef(true);
-  useEffect(() => {
-    if (firstSignal.current) { firstSignal.current = false; return; }
-    pager.current.refresh(projectId);
-  }, [listSignal]);
-
-  useBus('ws:status', ({ sessionId, status }) => pager.current.setStatus(sessionId, status), []);
-
-  const sessions = useMemo(() => {
-    const now = Date.now();
-    const pending = optimistic.filter((s) => now - s.createdAt < OPTIMISTIC_TTL
-      && sessionMatchesFilter(catalog.projects, s, projectId));
-    return pending.length ? mergeSessions(pending, st.items) : st.items;
-  }, [optimistic, catalog, projectId, st.items]);
-
-  return { ...st, sessions, hasMore: pager.current.hasMore(), loadMore: pager.current.loadMore,
-    reload: () => pager.current.refresh(projectId, st.items.length === 0) };
 }
 
 export { ALL_PROJECTS };

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useBus } from '../../../web/core/bus.js';
@@ -6,26 +6,19 @@ import { ws } from '../../../web/core/ws.js';
 import { useTheme } from '../theme.js';
 import { GlassSurface } from './GlassSurface.js';
 import { Icon } from './Icon.js';
-import { ProjectPicker } from './ProjectPicker.js';
 import { Spark } from './Spark.js';
-import { cwdTail, relTime, statusColor } from '../lib/format.js';
-import { useProjects, useSessionList } from '../lib/projects-context.js';
-import { filterCount, filterLabel } from '../lib/projects.js';
+import { relTime, STATUS_LABEL, statusColor } from '../lib/format.js';
+import { useProjects } from '../lib/projects-context.js';
+import { shortPath } from '../lib/projects.js';
+import { useProjectSessionGroups } from '../lib/use-project-session-groups.js';
 
-// 侧栏抽屉：顶部品牌 + 液态玻璃刷新按钮，项目筛选 + 分页会话列表，底部悬浮液态玻璃操作栏（左侧设置与连接状态 + 右侧新对话胶囊按钮）。
-export function DrawerContent({ navigation }) {
+export function DrawerContent({ navigation, state }) {
   const { colors, fonts } = useTheme();
   const insets = useSafeAreaInsets();
   const projects = useProjects();
-  const list = useSessionList();
-  const pickerRef = useRef(null);
+  const list = useProjectSessionGroups(state);
   const [wsPhase, setWsPhase] = useState(ws.state.phase);
   useBus('ws-state', (s) => setWsPhase(s.phase), []);
-
-  const sorted = list.sessions;
-  const { catalog, catalogLoaded, projectId } = projects;
-  const scopeLabel = filterLabel(catalog, projectId);
-  const scopeCount = catalogLoaded ? filterCount(catalog, projectId) : list.total;
 
   const connDotColor = wsPhase === 'open' ? colors.ok : wsPhase === 'connecting' ? colors.warn : colors.danger;
   const bottomBarOffset = Math.max(insets.bottom, 14);
@@ -35,34 +28,94 @@ export function DrawerContent({ navigation }) {
   const goSettings = go(() => navigation.navigate('Main', { screen: 'Settings' }));
   const goChat = (sessionId) => go(() => navigation.navigate('Main', { screen: 'Chat', params: { sessionId } }));
 
-  const renderItem = ({ item: s }) => {
+  const renderItem = ({ item }) => {
+    const { group } = item;
+    if (item.type === 'project') {
+      return (
+        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}>
+          <Pressable
+            onPress={() => list.toggle(group.id)}
+            testID={`drawer-project-${group.id}`}
+            accessibilityRole="button"
+            accessibilityLabel={`${group.title}，${group.sessionCount} 个对话${group.cwd ? `，工作目录 ${group.cwd}` : ''}`}
+            accessibilityState={{ expanded: group.expanded }}
+            style={({ pressed }) => ({
+              flex: 1, minWidth: 0, minHeight: 44, paddingHorizontal: 10, paddingVertical: 9,
+              flexDirection: 'row', alignItems: 'center', gap: 7, borderRadius: 10,
+              backgroundColor: pressed ? colors.glassPressed : 'transparent',
+            })}
+          >
+            <Text numberOfLines={1} ellipsizeMode="middle" style={{ flexShrink: 1, color: colors.inkStrong, fontSize: 15, fontWeight: '600' }}>
+              {group.title}
+            </Text>
+            <Icon name={group.expanded ? 'chevron' : 'chevronRight'} size={14} color={colors.ink2} />
+            <View style={{ flex: 1 }} />
+            <Text style={{ color: colors.ink2, fontSize: 12, fontVariant: ['tabular-nums'] }}>{group.sessionCount}</Text>
+          </Pressable>
+          {group.cwd ? (
+            <Pressable
+              onPress={go(() => navigation.navigate('Main', { screen: 'Home', params: { fromCwd: group.cwd, nonce: Date.now() }, pop: true }))}
+              testID={`drawer-project-new-${group.id}`}
+              accessibilityRole="button"
+              accessibilityLabel={`在 ${group.title} 新建对话`}
+              accessibilityHint={`工作目录 ${shortPath(group.cwd)}，已有草稿会保留`}
+              style={({ pressed }) => ({
+                width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 10,
+                backgroundColor: pressed ? colors.glassPressed : 'transparent',
+              })}
+            >
+              <Icon name="plus" size={18} color={colors.ink2} />
+            </Pressable>
+          ) : null}
+        </View>
+      );
+    }
+    if (item.type === 'footer') {
+      const error = group.error || group.moreError;
+      const busy = group.loading || group.loadingMore;
+      const label = error ? `${error} · 点击重试` : group.hasMore
+        ? `加载更早的对话（${group.sessions.length} / ${group.total}）`
+        : group.sessions.length ? '' : '这个项目还没有会话';
+      if (busy) return <ActivityIndicator style={{ minHeight: 44, justifyContent: 'center' }} color={colors.ink2} />;
+      if (!label) return null;
+      if (!error && !group.hasMore) return <Text style={{ paddingVertical: 14, paddingLeft: 34, color: colors.ink2, fontSize: 12 }}>{label}</Text>;
+      return (
+        <TouchableOpacity
+          onPress={() => group.error ? list.retry(group.id) : list.loadMore(group.id)}
+          testID={`drawer-project-more-${group.id}`}
+          accessibilityRole="button"
+          accessibilityLabel={`${group.title}，${label}`}
+          style={{ minHeight: 44, justifyContent: 'center', paddingVertical: 10, paddingLeft: 34, paddingRight: 12 }}
+        >
+          <Text style={{ color: error ? colors.danger : colors.ink2, fontSize: 12.5 }}>{label}</Text>
+        </TouchableOpacity>
+      );
+    }
+    const s = item.session;
+    const selected = s.sessionId === list.selectedSessionId;
+    const workspace = group.cwds.length > 1 && s.cwd ? shortPath(s.cwd) : '';
     const dot = statusColor(colors, s.status) || colors.ink3;
     return (
       <Pressable
         onPress={goChat(s.sessionId)}
         testID={`session-row-${s.sessionId}`}
         accessibilityRole="button"
-        accessibilityLabel={`${s.title || '空会话'}，${s.cwd ? cwdTail(s.cwd) : '未归类'}，${relTime(s.lastActiveAt)}`}
+        accessibilityState={{ selected }}
+        accessibilityLabel={`${s.title || '空会话'}，${s.cwd || '未归类'}，${STATUS_LABEL[s.status] || '状态未知'}，${relTime(s.lastActiveAt)}`}
         style={({ pressed }) => ({
-          paddingVertical: 11,
-          paddingHorizontal: 12,
-          borderRadius: 14,
-          borderCurve: 'continuous',
-          backgroundColor: pressed ? colors.glassPressed : 'transparent',
+          minHeight: 52, marginLeft: 24, paddingVertical: 10, paddingHorizontal: 10,
+          borderRadius: 10, borderCurve: 'continuous',
+          backgroundColor: pressed || selected ? colors.glassPressed : 'transparent',
         })}
       >
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <Text
-            numberOfLines={1}
-            ellipsizeMode="tail"
-            style={{ flex: 1, color: colors.inkStrong, fontSize: 15, letterSpacing: -0.1 }}
-          >
+          <Text numberOfLines={1} ellipsizeMode="tail" style={{ flex: 1, color: colors.inkStrong, fontSize: 15, letterSpacing: -0.1 }}>
             {s.title || '(空会话)'}
           </Text>
-          <View style={{ width: 8, height: 8, borderRadius: 4, marginLeft: 10, backgroundColor: dot }} />
+          <View style={{ width: 7, height: 7, borderRadius: 3.5, marginLeft: 10, backgroundColor: dot }} />
         </View>
-        <Text numberOfLines={1} style={{ marginTop: 3, color: colors.ink2, fontSize: 12.5 }}>
-          {s.cwd ? cwdTail(s.cwd) : '未归类'} · {relTime(s.lastActiveAt)}
+        <Text numberOfLines={1} ellipsizeMode="middle" style={{ marginTop: 3, color: colors.ink2, fontSize: 12.5 }}>
+          {workspace ? `${workspace} · ` : ''}{relTime(s.lastActiveAt)}
         </Text>
       </Pressable>
     );
@@ -99,81 +152,22 @@ export function DrawerContent({ navigation }) {
         </GlassSurface>
       </View>
 
-      {/* 项目筛选：只影响浏览，不中断运行、不屏蔽全局审批 */}
-      <View style={{ paddingHorizontal: 8, paddingBottom: 4 }}>
-        <Pressable
-          onPress={() => pickerRef.current?.present()}
-          testID="drawer-project-filter"
-          accessibilityRole="button"
-          accessibilityLabel={`浏览项目：${scopeLabel}，${scopeCount} 个对话`}
-          accessibilityHint="切换要浏览的项目"
-          style={({ pressed }) => ({
-            minHeight: 44,
-            paddingHorizontal: 10,
-            borderRadius: 14,
-            borderCurve: 'continuous',
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: 6,
-            backgroundColor: pressed ? colors.glassPressed : 'transparent',
-          })}
-        >
-          <Icon name="folder" size={16} color={colors.ink2} />
-          <Text numberOfLines={1} style={{ flexShrink: 1, color: colors.ink2, fontSize: 13, fontWeight: '600' }}>
-            {scopeLabel}
-          </Text>
-          <Icon name="chevron" size={14} color={colors.ink3} />
-          <View style={{ flex: 1 }} />
-          {scopeCount > 0 ? (
-            <Text style={{ color: colors.ink3, fontFamily: fonts.mono, fontSize: 11.5 }}>
-              {scopeCount}
-            </Text>
-          ) : null}
-        </Pressable>
-      </View>
-
+      {projects.catalogError ? (
+        <TouchableOpacity onPress={projects.refresh} accessibilityRole="button" accessibilityLabel={`${projects.catalogError}，重试`} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 18 }}>
+          <Text style={{ color: colors.danger, fontSize: 13 }}>{projects.catalogError} · 点击重试</Text>
+        </TouchableOpacity>
+      ) : null}
       <FlatList
-        data={sorted}
-        keyExtractor={(s) => s.sessionId}
+        data={list.rows}
+        keyExtractor={(row) => row.key}
         renderItem={renderItem}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{
-          paddingHorizontal: 8,
-          paddingTop: 2,
-          paddingBottom: bottomBarOffset + 74,
-          flexGrow: 1,
-        }}
-        onEndReached={() => { if (list.hasMore && !list.moreError) list.loadMore(); }}
-        onEndReachedThreshold={0.5}
-        ListEmptyComponent={
-          list.error ? (
-            <TouchableOpacity onPress={list.reload} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center', padding: 16 }}>
-              <Text style={{ color: colors.danger, fontSize: 13, textAlign: 'center' }}>
-                {list.error} · 点击重试
-              </Text>
-            </TouchableOpacity>
-          ) : list.loading ? null : (
-            <Text style={{ padding: 16, color: colors.ink3, fontSize: 13, textAlign: 'center' }}>
-              {projectId === null ? '没有会话' : '这个项目还没有会话'}
-            </Text>
-          )
-        }
-        ListFooterComponent={
-          !list.hasMore || sorted.length === 0 ? null : list.loadingMore ? (
-            <ActivityIndicator style={{ padding: 12 }} color={colors.ink2} />
-          ) : (
-            <TouchableOpacity
-              onPress={list.loadMore}
-              testID="drawer-load-more"
-              accessibilityRole="button"
-              style={{ minHeight: 44, justifyContent: 'center', padding: 12 }}
-            >
-              <Text style={{ color: list.moreError ? colors.danger : colors.ink3, fontSize: 12.5, textAlign: 'center' }}>
-                {list.moreError ? `${list.moreError} · 点击重试` : `加载更早的对话（${sorted.length} / ${list.total}）`}
-              </Text>
-            </TouchableOpacity>
-          )
-        }
+        contentContainerStyle={{ paddingHorizontal: 8, paddingTop: 2, paddingBottom: bottomBarOffset + 74, flexGrow: 1 }}
+        ListEmptyComponent={!projects.catalogLoaded ? (
+          projects.catalogError ? null : <ActivityIndicator style={{ padding: 16 }} color={colors.ink2} />
+        ) : (
+          <Text style={{ padding: 16, color: colors.ink2, fontSize: 13, textAlign: 'center' }}>没有会话</Text>
+        )}
       />
 
       {/* 底部悬浮液态玻璃操作栏：左侧设置与连接状态胶囊 + 右侧新对话胶囊 */}
@@ -238,16 +232,6 @@ export function DrawerContent({ navigation }) {
           </Text>
         </Pressable>
       </View>
-      <ProjectPicker
-        sheetRef={pickerRef}
-        variant="filter"
-        catalog={catalog}
-        value={projectId}
-        onPick={projects.selectProject}
-        loaded={catalogLoaded}
-        error={projects.catalogError}
-        onRetry={projects.refresh}
-      />
     </View>
   );
 }

@@ -79,6 +79,12 @@ All API inputs are validated at the HTTP boundary. Errors use the existing
 
 The native app owns a project context shared by drawer and Home. Drawer selection is a browsing filter; Home target is an explicit cwd. Selecting a project updates its default target, while opening/new-from a conversation supplies its real cwd. ProjectPicker reuses the existing bottom-sheet interaction, with workspace choices for grouped worktrees. The catalog refreshes on reconnect/foreground and session activity; async results are guarded against stale connection/filter responses. Paginated lists deduplicate by sessionId. Local preferences are scoped by the normalized daemon base URL; token changes reset in-memory state. Tokens are only part of the in-memory mount identity, never persisted in preference keys.
 
+## Expandable Native Sidebar (2026-10-18)
+
+Use one virtualized list of project-header, conversation, and group-footer rows. Project headers come from the complete catalog, not loaded conversation pages. A pure group controller owns independent `createSessionPager` instances and an expanded-ID set; a thin React hook connects catalog, refresh signals, optimistic rows, cached current-session metadata, and live status. First expansion fetches one project; collapse caches rows; refresh invalidates all caches but only fetches expanded groups. Each group has its own explicit older-page/retry action. Disposal prevents late publishes, and catalog removal disposes obsolete entries.
+
+Expansion is independent of the legacy browsing filter and Home target. Current-session navigation/cache metadata determines initial expansion without treating missing cache as missing cwd; manual collapse survives catalog polling. Project new-chat actions reuse Home's `fromCwd`/`nonce` route protocol with the catalog's actual `cwd`, never the group ID. Multi-workspace rows preserve workspace context. Existing brand, theme, safe-area and bottom actions remain unchanged.
+
 ## Compatibility And Rollback
 
 - Existing clients that omit `model` continue to use the Mac/CLI default.
