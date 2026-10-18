@@ -150,7 +150,7 @@ export default function App() {
     colors: {
       ...(dark ? DarkTheme : DefaultTheme).colors,
       background: colors.bg,
-      card: colors.bg2,
+      card: colors.bg,
       text: colors.ink,
       border: colors.line,
       primary: colors.accent,
@@ -183,7 +183,7 @@ export default function App() {
                     screenOptions={{
                       headerShown: false,
                       drawerType: 'front',
-                      drawerStyle: { width: 320, backgroundColor: colors.bg2 },
+                      drawerStyle: { width: 320, backgroundColor: colors.bg },
                       overlayColor: 'rgba(30,26,22,0.32)',
                     }}
                   >
