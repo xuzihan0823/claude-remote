@@ -34,23 +34,19 @@ export function ModelPicker({ value, onChange, catalog }) {
         accessibilityRole="button"
         accessibilityLabel={`选择模型，当前${triggerMain}`}
         style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: 4,
-          backgroundColor: colors.controlFill,
-          borderWidth: 1,
-          borderColor: colors.controlBorder,
           borderRadius: 22,
           borderCurve: 'continuous',
           paddingHorizontal: 12,
           paddingVertical: 10,
           minHeight: 44,
+          justifyContent: 'center',
+          backgroundColor: colors.controlFill,
+          borderWidth: 1,
+          borderColor: colors.controlBorder,
           flexShrink: 1,
-          maxWidth: 220,
         }}
       >
-        <Text numberOfLines={1} style={{ color: colors.ink, fontSize: 13.5, fontWeight: '500', flexShrink: 1 }}>{triggerMain}</Text>
-        <Icon name="chevron" size={15} color={colors.ink2} />
+        <Text numberOfLines={1} style={{ color: colors.ink, fontSize: 13.5, fontWeight: '500' }}>{triggerMain}</Text>
       </TouchableOpacity>
       <BottomSheetModal
         ref={ref}

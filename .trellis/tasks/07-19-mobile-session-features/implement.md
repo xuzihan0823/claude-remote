@@ -28,6 +28,31 @@
 - Primary window: task artifacts, API contract integration, final merge, full
   tests, simulator/device build, and conflict resolution.
 
+## Model Catalog Fix (2026-10-18)
+
+The user authorized this bounded repair after reviewing the diagnosed cause and
+proposed backend-only approach.
+
+1. Extend the daemon reader to project `modelPicker.options`, preserve labels and
+   order, deduplicate full IDs, and preserve defaults and legacy alias inputs.
+2. Add focused regressions for picker coverage, invalid entries, duplicates,
+   redaction, defaults, legacy fallback, and alias compatibility.
+3. Exercise the reader through HTTP integration tests with a fake SDK: GET lists
+   configured models, POST forwards the selected ID, and unknown IDs are rejected.
+4. Run daemon tests and workspace typecheck, then independently review this fix.
+   Do not modify concurrent frontend work or send paid model requests.
+5. Compare the real configuration with the fixed reader. After confirming no
+   daemon-driven turn is active, restart the local daemon and verify all current
+   configured options appear in the live API. No phone rebuild is needed.
+
+## Project Conversations (2026-10-18)
+
+1. Backend owns `packages/daemon/**`: add repository/worktree project projection, authenticated catalog, filter-before-pagination, and focused unit/HTTP regressions. Preserve all concurrent model changes.
+2. Frontend owns `app/src/**`: shared project context, project/workspace picker, drawer filtering/pagination, explicit Home target, and new-from-chat inheritance. Preserve existing style, modes, attachments, and keyboard behavior.
+3. Main session owns `web/core/api.js`, API documentation, task manifests, integration verification, and native export/build validation. Do not send real model requests just to test targeting.
+4. Run `pnpm test` (including Web request and mobile pure-logic regressions) and `pnpm typecheck`, bundle native JS from `app/` with `NODE_PATH="$PWD/node_modules" npx expo export --platform ios`, review once across the full feature, then address confirmed findings. Exercise actual UI when a native runtime is available; browser preview cannot stand in for native-only modules.
+5. Restart the local preview daemon only after checking active runs, then verify catalog/filter responses read-only. Build a distributable native artifact where the installed toolchain permits it; report precise verification limits.
+
 ## Validation Commands
 
 ```bash

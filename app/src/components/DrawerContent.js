@@ -1,61 +1,37 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, AppState, FlatList, Pressable, Text, TouchableOpacity, View } from 'react-native';
+import { useRef, useState } from 'react';
+import { ActivityIndicator, FlatList, Pressable, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { fetchSessions } from '../../../web/core/api.js';
 import { useBus } from '../../../web/core/bus.js';
 import { ws } from '../../../web/core/ws.js';
 import { useTheme } from '../theme.js';
 import { GlassSurface } from './GlassSurface.js';
 import { Icon } from './Icon.js';
+import { ProjectPicker } from './ProjectPicker.js';
 import { Spark } from './Spark.js';
 import { cwdTail, relTime, statusColor } from '../lib/format.js';
+import { useProjects, useSessionList } from '../lib/projects-context.js';
+import { filterCount, filterLabel } from '../lib/projects.js';
 
-// 侧栏抽屉：顶部品牌 + 液态玻璃刷新按钮，中部最近对话列表，底部悬浮液态玻璃操作栏（左侧设置与连接状态 + 右侧新对话胶囊按钮）。
+// 侧栏抽屉：顶部品牌 + 液态玻璃刷新按钮，项目筛选 + 分页会话列表，底部悬浮液态玻璃操作栏（左侧设置与连接状态 + 右侧新对话胶囊按钮）。
 export function DrawerContent({ navigation }) {
   const { colors, fonts } = useTheme();
   const insets = useSafeAreaInsets();
-  const [data, setData] = useState({ sessions: [], total: 0 });
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [, setTick] = useState(0);
+  const projects = useProjects();
+  const list = useSessionList();
+  const pickerRef = useRef(null);
   const [wsPhase, setWsPhase] = useState(ws.state.phase);
-
-  const load = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
-    try {
-      setData(await fetchSessions(100));
-      setError('');
-    } catch (e) {
-      if (e.code !== 'unauthorized') {
-        setError(e.code === 'network_error' ? '网络不可达' : `加载失败：${e.code}`);
-      }
-    } finally { setLoading(false); }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-  useEffect(() => {
-    const t1 = setInterval(() => load(true), 30_000);
-    const t2 = setInterval(() => setTick((x) => x + 1), 30_000);
-    const sub = AppState.addEventListener('change', (s) => { if (s === 'active') load(true); });
-    return () => { clearInterval(t1); clearInterval(t2); sub.remove(); };
-  }, [load]);
-
-  useBus('ws-open', () => load(true), [load]);
-  useBus('ws:status', ({ sessionId, status }) => {
-    setData((d) => ({ ...d, sessions: d.sessions.map((s) => (s.sessionId === sessionId ? { ...s, status } : s)) }));
-  }, []);
   useBus('ws-state', (s) => setWsPhase(s.phase), []);
 
-  const sorted = useMemo(
-    () => [...data.sessions].sort((a, b) => b.lastActiveAt - a.lastActiveAt),
-    [data],
-  );
+  const sorted = list.sessions;
+  const { catalog, catalogLoaded, projectId } = projects;
+  const scopeLabel = filterLabel(catalog, projectId);
+  const scopeCount = catalogLoaded ? filterCount(catalog, projectId) : list.total;
 
   const connDotColor = wsPhase === 'open' ? colors.ok : wsPhase === 'connecting' ? colors.warn : colors.danger;
   const bottomBarOffset = Math.max(insets.bottom, 14);
 
   const go = (fn) => () => { fn(); navigation.closeDrawer(); };
-  const goNew = go(() => navigation.navigate('Main', { screen: 'Home' }));
+  const goNew = go(() => { projects.prepareNewChat(); navigation.navigate('Main', { screen: 'Home', pop: true }); });
   const goSettings = go(() => navigation.navigate('Main', { screen: 'Settings' }));
   const goChat = (sessionId) => go(() => navigation.navigate('Main', { screen: 'Chat', params: { sessionId } }));
 
@@ -64,8 +40,9 @@ export function DrawerContent({ navigation }) {
     return (
       <Pressable
         onPress={goChat(s.sessionId)}
+        testID={`session-row-${s.sessionId}`}
         accessibilityRole="button"
-        accessibilityLabel={`${s.title || '空会话'}，${cwdTail(s.cwd)}，${relTime(s.lastActiveAt)}`}
+        accessibilityLabel={`${s.title || '空会话'}，${s.cwd ? cwdTail(s.cwd) : '未归类'}，${relTime(s.lastActiveAt)}`}
         style={({ pressed }) => ({
           paddingVertical: 11,
           paddingHorizontal: 12,
@@ -85,7 +62,7 @@ export function DrawerContent({ navigation }) {
           <View style={{ width: 8, height: 8, borderRadius: 4, marginLeft: 10, backgroundColor: dot }} />
         </View>
         <Text numberOfLines={1} style={{ marginTop: 3, color: colors.ink2, fontSize: 12.5 }}>
-          {cwdTail(s.cwd)} · {relTime(s.lastActiveAt)}
+          {s.cwd ? cwdTail(s.cwd) : '未归类'} · {relTime(s.lastActiveAt)}
         </Text>
       </Pressable>
     );
@@ -102,7 +79,8 @@ export function DrawerContent({ navigation }) {
         <View style={{ flex: 1 }} />
         <GlassSurface interactive variant="pill" style={{ borderRadius: 22 }}>
           <Pressable
-            onPress={() => load()}
+            onPress={projects.refresh}
+            testID="drawer-refresh"
             accessibilityLabel="刷新会话列表"
             accessibilityRole="button"
             style={({ pressed }) => ({
@@ -114,23 +92,44 @@ export function DrawerContent({ navigation }) {
               backgroundColor: pressed ? colors.glassPressed : 'transparent',
             })}
           >
-            {loading
+            {list.loading
               ? <ActivityIndicator size="small" color={colors.ink2} />
               : <Icon name="refresh" size={18} color={colors.ink} />}
           </Pressable>
         </GlassSurface>
       </View>
 
-      {/* 分组标题 */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, paddingTop: 4, paddingBottom: 6 }}>
-        <Text style={{ color: colors.ink3, fontSize: 12.5, fontWeight: '500' }}>
-          最近对话
-        </Text>
-        {sorted.length > 0 ? (
-          <Text style={{ color: colors.ink3, fontFamily: fonts.mono, fontSize: 11.5 }}>
-            {sorted.length}
+      {/* 项目筛选：只影响浏览，不中断运行、不屏蔽全局审批 */}
+      <View style={{ paddingHorizontal: 8, paddingBottom: 4 }}>
+        <Pressable
+          onPress={() => pickerRef.current?.present()}
+          testID="drawer-project-filter"
+          accessibilityRole="button"
+          accessibilityLabel={`浏览项目：${scopeLabel}，${scopeCount} 个对话`}
+          accessibilityHint="切换要浏览的项目"
+          style={({ pressed }) => ({
+            minHeight: 44,
+            paddingHorizontal: 10,
+            borderRadius: 14,
+            borderCurve: 'continuous',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 6,
+            backgroundColor: pressed ? colors.glassPressed : 'transparent',
+          })}
+        >
+          <Icon name="folder" size={16} color={colors.ink2} />
+          <Text numberOfLines={1} style={{ flexShrink: 1, color: colors.ink2, fontSize: 13, fontWeight: '600' }}>
+            {scopeLabel}
           </Text>
-        ) : null}
+          <Icon name="chevron" size={14} color={colors.ink3} />
+          <View style={{ flex: 1 }} />
+          {scopeCount > 0 ? (
+            <Text style={{ color: colors.ink3, fontFamily: fonts.mono, fontSize: 11.5 }}>
+              {scopeCount}
+            </Text>
+          ) : null}
+        </Pressable>
       </View>
 
       <FlatList
@@ -144,25 +143,36 @@ export function DrawerContent({ navigation }) {
           paddingBottom: bottomBarOffset + 74,
           flexGrow: 1,
         }}
+        onEndReached={() => { if (list.hasMore && !list.moreError) list.loadMore(); }}
+        onEndReachedThreshold={0.5}
         ListEmptyComponent={
-          error ? (
-            <TouchableOpacity onPress={() => load()} style={{ padding: 16 }}>
+          list.error ? (
+            <TouchableOpacity onPress={list.reload} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center', padding: 16 }}>
               <Text style={{ color: colors.danger, fontSize: 13, textAlign: 'center' }}>
-                {error} · 点击重试
+                {list.error} · 点击重试
               </Text>
             </TouchableOpacity>
-          ) : loading ? null : (
+          ) : list.loading ? null : (
             <Text style={{ padding: 16, color: colors.ink3, fontSize: 13, textAlign: 'center' }}>
-              没有会话
+              {projectId === null ? '没有会话' : '这个项目还没有会话'}
             </Text>
           )
         }
         ListFooterComponent={
-          data.total > sorted.length ? (
-            <Text style={{ padding: 12, color: colors.ink3, fontSize: 12, textAlign: 'center' }}>
-              已显示 {sorted.length} / {data.total} 个会话
-            </Text>
-          ) : null
+          !list.hasMore || sorted.length === 0 ? null : list.loadingMore ? (
+            <ActivityIndicator style={{ padding: 12 }} color={colors.ink2} />
+          ) : (
+            <TouchableOpacity
+              onPress={list.loadMore}
+              testID="drawer-load-more"
+              accessibilityRole="button"
+              style={{ minHeight: 44, justifyContent: 'center', padding: 12 }}
+            >
+              <Text style={{ color: list.moreError ? colors.danger : colors.ink3, fontSize: 12.5, textAlign: 'center' }}>
+                {list.moreError ? `${list.moreError} · 点击重试` : `加载更早的对话（${sorted.length} / ${list.total}）`}
+              </Text>
+            </TouchableOpacity>
+          )
         }
       />
 
@@ -176,37 +186,39 @@ export function DrawerContent({ navigation }) {
           bottom: bottomBarOffset,
           flexDirection: 'row',
           alignItems: 'center',
+          justifyContent: 'space-between',
           gap: 10,
         }}
       >
-        <GlassSurface interactive variant="pill" style={{ flex: 1, minWidth: 0, borderRadius: 25 }}>
+        <GlassSurface interactive variant="pill" style={{ flexShrink: 1, minWidth: 0, borderRadius: 25 }}>
           <Pressable
             onPress={goSettings}
             accessibilityRole="button"
+            testID="drawer-settings"
             accessibilityLabel="设置"
             style={({ pressed }) => ({
               height: 50,
               borderRadius: 25,
-              paddingHorizontal: 14,
+              paddingLeft: 16,
+              paddingRight: 18,
               flexDirection: 'row',
               alignItems: 'center',
-              gap: 10,
+              gap: 8,
               backgroundColor: pressed ? colors.glassPressed : 'transparent',
             })}
           >
             <Icon name="settings" size={19} color={colors.ink} />
-            <View style={{ flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <Text style={{ color: colors.inkStrong, fontSize: 14, fontWeight: '600' }}>
-                设置
-              </Text>
-              <View style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: connDotColor }} />
-            </View>
+            <Text style={{ color: colors.inkStrong, fontSize: 14, fontWeight: '600' }}>
+              设置
+            </Text>
+            <View style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: connDotColor }} />
           </Pressable>
         </GlassSurface>
 
         <Pressable
           onPress={goNew}
           accessibilityRole="button"
+          testID="drawer-new-chat"
           accessibilityLabel="新对话"
           style={({ pressed }) => ({
             height: 50,
@@ -226,6 +238,16 @@ export function DrawerContent({ navigation }) {
           </Text>
         </Pressable>
       </View>
+      <ProjectPicker
+        sheetRef={pickerRef}
+        variant="filter"
+        catalog={catalog}
+        value={projectId}
+        onPick={projects.selectProject}
+        loaded={catalogLoaded}
+        error={projects.catalogError}
+        onRetry={projects.refresh}
+      />
     </View>
   );
 }

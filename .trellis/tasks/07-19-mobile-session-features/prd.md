@@ -32,6 +32,12 @@ continue using the same Mac project/session truth.
   model identifiers, aliases, and display metadata; never return auth tokens or
   arbitrary environment values.
 - The phone UI shows the Mac-backed model catalog and the current default.
+- When Mac settings provide `modelPicker.options`, expose every valid configured
+  model in order, preserve labels, and deduplicate by the full model ID. Different
+  provider prefixes identify different models. If no valid picker options exist,
+  retain the legacy alias catalog.
+- Keep built-in aliases compatible as per-turn inputs. Project only model IDs,
+  aliases, and display names; do not expose picker descriptions or credentials.
 - A selected model is passed to the next SDK turn. By default, when no phone
   override is selected, the next turn uses the current Mac-side default.
 - Do not write `~/.claude/settings.json` from the phone in the MVP unless the
@@ -71,9 +77,18 @@ continue using the same Mac project/session truth.
 
 ### R5. Brand mark
 
-- Replace the inline six-ray `Spark` mark with a twelve-ray mark matching the
-  supplied reference. Keep Web/PWA/iOS icon assets visually consistent.
+- Replace the inline six-ray `Spark` mark with a twelve-ray mark matching the supplied reference. Keep Web/PWA/iOS icon assets visually consistent.
 - Preserve a non-transparent, App Store-compatible iOS marketing icon.
+
+### R6. Project-scoped mobile conversations (authorized 2026-10-18)
+
+- Provide an all-conversations view and a project selector in the native mobile drawer. Projects and their counts must come from the complete daemon index, not a truncated client page.
+- Selecting a project filters its conversations before pagination; older conversations remain reachable. Missing-cwd sessions remain accessible as Unclassified.
+- Group Git worktrees of the same repository under one project, but preserve and display each session's actual working directory. Non-Git directories remain distinct by full path; equal basenames never merge.
+- New conversations visibly target a known working directory. New from a conversation inherits that conversation's cwd; new from a selected project uses its selected/recent known workspace. Allow explicit project/workspace selection on Home.
+- Changing the browsing project never aborts a run or hides global approvals. Local project preferences are scoped to the connected daemon, with no credentials persisted in preference keys.
+- Keep JSONL transcripts as the source of truth, preserve the known-cwd create allowlist, and add no project database or arbitrary directory execution.
+- Verify repository/worktree aggregation, filter-before-pagination totals, unknown projects, unclassified data, refresh races, and explicit new-session cwd propagation.
 
 ## Acceptance Criteria
 
@@ -95,6 +110,15 @@ continue using the same Mac project/session truth.
       and reconnect behavior.
 - [ ] `pnpm typecheck`, `pnpm test`, Capacitor sync, simulator Debug build/run,
       and unsigned Release device archive all pass.
+
+### R6 Acceptance
+
+- [x] Catalog counts cover the complete index, including projects absent from the first session page.
+- [x] Main checkout and linked worktree aggregate together; two separate repositories with the same name remain separate.
+- [x] Project and unclassified filters return correct totals and reachable older pages without duplicate rows.
+- [ ] Home visibly selects a known actual cwd; new-from-chat preserves that chat's workspace.
+- [x] Reconnect, project switching, and delayed-response safeguards have focused regressions; native interaction remains subject to device acceptance.
+- [ ] Existing creation allowlist, global approvals, active runs, model selection, and attachments remain compatible.
 
 ## Out Of Scope
 

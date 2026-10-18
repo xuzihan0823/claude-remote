@@ -10,13 +10,14 @@ import { createDrawerNavigator } from '@react-navigation/drawer';
 import * as Linking from 'expo-linking';
 
 import {
-  api, baseUrl, BASE_KEY, clearToken, connErrMsg, connHost, loadBases,
-  probeBases, saveBases, saveConn, token, TOKEN_KEY,
+  baseUrl, BASE_KEY, clearToken, connErrMsg, connHost, loadBases, normalizeBase,
+  pendingSessionMessages, probeBase, probeBases, saveBases, saveConn, sessionCache, token, TOKEN_KEY,
 } from '../../web/core/api.js';
 import { toast, useBus } from '../../web/core/bus.js';
 import { ws } from '../../web/core/ws.js';
 import { parseSetupLink } from './lib/pairing.js';
 import { ConnActions } from './lib/conn-context.js';
+import { ProjectsProvider } from './lib/projects-context.js';
 import { useTheme } from './theme.js';
 import { ConnectScreen } from './screens/ConnectScreen.js';
 import { HomeScreen } from './screens/HomeScreen.js';
@@ -50,6 +51,17 @@ export default function App() {
   const [authErr, setAuthErr] = useState('');
   const authRef = useRef(auth);
   authRef.current = auth;
+  // baseUrl/token 是模块变量，不会触发渲染；仅在连接成功后更新，用作导航与项目上下文的挂载 key
+  const [conn, setConn] = useState(() => ({ key: `${baseUrl}\n${token}`, base: baseUrl }));
+  const connKeyRef = useRef(conn.key);
+  const commitConn = useCallback(() => {
+    const key = `${baseUrl}\n${token}`;
+    if (connKeyRef.current === key) return;
+    connKeyRef.current = key;
+    sessionCache.clear();
+    pendingSessionMessages.clear();
+    setConn({ key, base: baseUrl });
+  }, []);
 
   useBus('unauthorized', () => {
     ws.stop();
@@ -70,23 +82,22 @@ export default function App() {
   const tryConnect = useCallback(async (base, tok) => {
     setAuth((a) => (a === 'ok' ? 'ok' : 'checking'));
     setAuthErr('');
-    const prevBase = baseUrl;
-    const prevToken = token;
-    saveConn(base, tok);
+    const nextBase = normalizeBase(base);
     try {
-      await api('/api/health');
+      await probeBase(nextBase, tok);
+      saveConn(nextBase, tok);
+      commitConn();
       setAuth('ok');
       ws.stop();
       ws.start();
       return true;
     } catch (e) {
-      saveConn(prevBase, prevToken);
       const msg = connErrMsg(e);
       if (authRef.current !== 'ok') { setAuth('need'); setAuthErr(msg); }
       toast(msg, 'error');
       return false;
     }
-  }, []);
+  }, [commitConn]);
 
   const tryConnectBases = useCallback(async (bases, tok) => {
     setAuth((a) => (a === 'ok' ? 'ok' : 'checking'));
@@ -95,6 +106,7 @@ export default function App() {
       const base = await probeBases(bases, tok);
       saveBases(bases);
       saveConn(base, tok);
+      commitConn();
       setAuth('ok');
       ws.stop();
       ws.start();
@@ -105,7 +117,7 @@ export default function App() {
       toast(msg, 'error');
       return false;
     }
-  }, []);
+  }, [commitConn]);
 
   // 启动自动重连：优先多候选探测（扫码配对存的 bases），退回单地址
   useEffect(() => {
@@ -177,6 +189,7 @@ export default function App() {
               {auth !== 'ok' ? (
                 <ConnectScreen busy={auth === 'checking'} error={authErr} onSubmit={tryConnect} />
               ) : (
+                <ProjectsProvider key={conn.key} base={conn.base}>
                 <NavigationContainer theme={navTheme}>
                   <Drawer.Navigator
                     drawerContent={(props) => <DrawerContent {...props} />}
@@ -190,6 +203,7 @@ export default function App() {
                     <Drawer.Screen name="Main" component={MainStack} />
                   </Drawer.Navigator>
                 </NavigationContainer>
+                </ProjectsProvider>
               )}
               {auth === 'ok' ? <ApprovalLayer /> : null}
               {pairOverlay}

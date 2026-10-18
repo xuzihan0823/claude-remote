@@ -24,6 +24,7 @@ import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-confi
 import { readSessionCwd, resolveSessionFile } from "./session-files.js";
 import { NotIdleError, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
 import { listSessions } from "./transcript/indexer.js";
+import { buildProjectIndex } from "./transcript/projects.js";
 import { readBefore, readTail } from "./transcript/reader.js";
 import type { ActivityTracker } from "./watch/activity.js";
 import type { SessionWatcher } from "./watch/watcher.js";
@@ -231,6 +232,12 @@ export class DaemonServer {
       return;
     }
 
+    if (method === "GET" && path === "/api/projects") {
+      const all = await listSessions(this.#options.config.projectsDir);
+      this.#json(res, 200, (await buildProjectIndex(all)).catalog);
+      return;
+    }
+
     if (method === "GET" && path === "/api/models") {
       this.#json(res, 200, await this.#readModelCatalog());
       return;
@@ -303,11 +310,20 @@ export class DaemonServer {
     const limit = clampInt(url.searchParams.get("limit"), 50, 1, 500);
     const offset = clampInt(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const all = await listSessions(this.#options.config.projectsDir);
-    const sessions = all.slice(offset, offset + limit).map((summary) => ({
+    const projectId = url.searchParams.get("projectId");
+    const cwd = url.searchParams.get("cwd");
+    let filtered = cwd === null ? all : all.filter((summary) => summary.cwd === cwd);
+    if (projectId === "") {
+      filtered = filtered.filter((summary) => summary.cwd === "");
+    } else if (projectId !== null) {
+      const { projectIdByCwd } = await buildProjectIndex(all);
+      filtered = filtered.filter((summary) => projectIdByCwd.get(summary.cwd) === projectId);
+    }
+    const sessions = filtered.slice(offset, offset + limit).map((summary) => ({
       ...summary,
       status: this.#options.tracker.getStatus(summary.sessionId),
     }));
-    this.#json(res, 200, { sessions, total: all.length });
+    this.#json(res, 200, { sessions, total: filtered.length });
   }
 
   async #readModelCatalog(): Promise<ModelCatalog> {
