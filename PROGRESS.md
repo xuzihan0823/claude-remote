@@ -287,5 +287,24 @@ agent team：explorer-opus47 审计完成度正常；**coder-glm（glm-5.2[1m]�
 4. **P3 键盘真机验收仍未做**（RN 迁移的存在理由，硬门槛见 rn-migration-plan §6）。
 5. 端到端加密（明文对 CF 可见，产品化前必须解决）。
 
+## 2026-09-03·RN 真机 Distribution 签名安装完成
+
+**目标设备**：iPhone 17（UDID `<DEVICE_UDID>`，CoreDevice id `<COREDEVICE_ID>`），iOS 27.0 Beta，Developer Mode 已开启、有线配对。首次安装因手机锁屏报 `kAMDMobileImageMounterDeviceLocked`；解锁后 DDI 服务正常启用，无需更换 Xcode 26.5。
+
+**Metro Release 构建修复**（`app/metro.config.js`）：Expo 57 / Metro 0.84 在 `projectRoot=app/`、`watchFolders=web/` 时无法为 `web/core/*.js` 建立文件哈希，生产打包先报模块不存在，直接 resolver 后进一步明确为 `Failed to get the SHA-1`。最小稳定修法是把 Metro `projectRoot`/`watchFolders` 提升到仓库根，同时显式设置依赖查找顺序为 `app/node_modules`、根 `node_modules`；自定义 resolver 按 Expo 官方方式回退到 `context.resolveRequest(...)`。冷缓存 `export:embed` 通过：1657 modules，bundle 6,272,535 bytes，18 assets。
+
+**签名材料与本机状态**：
+- 使用描述文件 UUID `<PROFILE_UUID>`，仅包含上述 UDID；允许的 Bundle ID 为 `<BUNDLE_ID>`，到期时间 2027-08-30（CST）。
+- 对应证书为 `iPhone Distribution: <NAME> (<TEAM_ID>)`，SHA-1 `<CERT_SHA1>`；Root → Apple WWDR G3 → leaf 密码学链验证通过。
+- 原 `.p12` 是旧式 PKCS#12 容器，先在临时目录解密并转换为 Apple 兼容容器；经用户明确授权后导入登录钥匙串，仅授权 `/usr/bin/codesign` 与 `/usr/bin/security`，未使用允许所有应用访问的 ACL。中间私钥文件与临时钥匙串均已清除。
+- 描述文件安装于 Xcode UserData Provisioning Profiles；项目源码中的默认 Team/Bundle ID 未改，Release 构建通过命令行临时覆盖为 Team `<TEAM_ID>` 与 `<BUNDLE_ID>`。
+
+**验证结果**：
+- `xcodebuild` Release/iphoneos：`BUILD SUCCEEDED`。
+- `codesign --verify --deep --strict`：通过；签名 Application Identifier 为 `<TEAM_ID>.<BUNDLE_ID>`，嵌入描述文件 UUID 匹配。
+- `devicectl device install app`：成功，设备安装路径返回正常。
+- `devicectl device process launch`：成功；3 秒后进程列表仍有 `ClaudeRemote`（PID 67571），未立即崩溃。
+
+**待人工真机验收**：按 `docs/rn-migration-plan.md` §6 检查键盘逐帧跟手、交互式收起、sheet/审批卡位置、表情面板高度切换和暗色模式。当前源码未提交：`app/metro.config.js` 与本进度记录。
 
 

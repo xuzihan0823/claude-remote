@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, AppState, FlatList, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, AppState, FlatList, Pressable, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { connHost, fetchSessions } from '../../../web/core/api.js';
 import { useBus } from '../../../web/core/bus.js';
 import { ws } from '../../../web/core/ws.js';
 import { useTheme } from '../theme.js';
+import { GlassSurface } from './GlassSurface.js';
+import { Icon } from './Icon.js';
 import { Spark } from './Spark.js';
 import { cwdTail, relTime, statusColor } from '../lib/format.js';
 
-// 移植自 web/ui/components/sidebar.js：最近会话列表 + 新对话/设置入口 + WS 实时状态点 + 连接状态脚注。
+// 侧栏抽屉：顶部品牌 + 液态玻璃刷新按钮，中部最近对话列表，底部悬浮液态玻璃操作栏（左侧设置与连接状态 + 右侧新对话胶囊按钮）。
 export function DrawerContent({ navigation }) {
-  const { colors, fonts } = useTheme();
+  const { colors, dark, fonts } = useTheme();
   const insets = useSafeAreaInsets();
   const [data, setData] = useState({ sessions: [], total: 0 });
   const [loading, setLoading] = useState(true);
@@ -24,7 +26,6 @@ export function DrawerContent({ navigation }) {
       setData(await fetchSessions(100));
       setError('');
     } catch (e) {
-      // unauthorized 由全局 bus 处理（App.js 弹回 ConnectScreen），这里静默
       if (e.code !== 'unauthorized') {
         setError(e.code === 'network_error' ? '网络不可达' : `加载失败：${e.code}`);
       }
@@ -34,9 +35,7 @@ export function DrawerContent({ navigation }) {
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
     const t1 = setInterval(() => load(true), 30_000);
-    // 30s tick 驱动 relTime 重渲染（web 同款）
     const t2 = setInterval(() => setTick((x) => x + 1), 30_000);
-    // RN 无 visibilitychange，用 AppState 'active' 对应
     const sub = AppState.addEventListener('change', (s) => { if (s === 'active') load(true); });
     return () => { clearInterval(t1); clearInterval(t2); sub.remove(); };
   }, [load]);
@@ -53,8 +52,8 @@ export function DrawerContent({ navigation }) {
   );
 
   const connDotColor = wsPhase === 'open' ? colors.ok : wsPhase === 'connecting' ? colors.warn : colors.danger;
+  const bottomBarOffset = Math.max(insets.bottom, 14);
 
-  // 跳转后关闭抽屉
   const go = (fn) => () => { fn(); navigation.closeDrawer(); };
   const goNew = go(() => navigation.navigate('Main', { screen: 'Home' }));
   const goSettings = go(() => navigation.navigate('Main', { screen: 'Settings' }));
@@ -63,75 +62,88 @@ export function DrawerContent({ navigation }) {
   const renderItem = ({ item: s }) => {
     const dot = statusColor(colors, s.status) || colors.ink3;
     return (
-      <TouchableOpacity
+      <Pressable
         onPress={goChat(s.sessionId)}
-        style={{ paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10 }}
+        accessibilityRole="button"
+        accessibilityLabel={`${s.title || '空会话'}，${cwdTail(s.cwd)}，${relTime(s.lastActiveAt)}`}
+        style={({ pressed }) => ({
+          paddingVertical: 11,
+          paddingHorizontal: 12,
+          borderRadius: 14,
+          borderCurve: 'continuous',
+          backgroundColor: pressed ? colors.glassPressed : 'transparent',
+        })}
       >
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <Text
             numberOfLines={1}
             ellipsizeMode="tail"
-            style={{ flex: 1, color: colors.ink, fontSize: 15 }}
+            style={{ flex: 1, color: colors.inkStrong, fontSize: 15, letterSpacing: -0.1 }}
           >
             {s.title || '(空会话)'}
           </Text>
-          <View style={{ width: 8, height: 8, borderRadius: 4, marginLeft: 8, backgroundColor: dot }} />
+          <View style={{ width: 8, height: 8, borderRadius: 4, marginLeft: 10, backgroundColor: dot }} />
         </View>
-        <Text numberOfLines={1} style={{ marginTop: 2, color: colors.ink2, fontSize: 12 }}>
+        <Text numberOfLines={1} style={{ marginTop: 3, color: colors.ink2, fontSize: 12.5 }}>
           {cwdTail(s.cwd)} · {relTime(s.lastActiveAt)}
         </Text>
-      </TouchableOpacity>
+      </Pressable>
     );
   };
 
   return (
-    <View style={{ flex: 1, backgroundColor: colors.bg2, paddingTop: insets.top + 12 }}>
-      {/* 品牌行 */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingBottom: 8 }}>
-        <Spark size={18} />
-        <Text style={{ marginLeft: 8, color: colors.inkStrong, fontFamily: fonts.serif, fontSize: 18 }}>
+    <View style={{ flex: 1, backgroundColor: colors.bg2, paddingTop: insets.top + 8 }}>
+      {/* 品牌与液态玻璃刷新按钮 */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingBottom: 10 }}>
+        <Spark size={20} />
+        <Text style={{ marginLeft: 9, color: colors.inkStrong, fontFamily: fonts.serif, fontSize: 19, letterSpacing: -0.3 }}>
           Claude Remote
         </Text>
         <View style={{ flex: 1 }} />
-        <TouchableOpacity
-          onPress={() => load()}
-          accessibilityLabel="刷新"
-          accessibilityRole="button"
-          style={{ width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' }}
-        >
-          {loading
-            ? <ActivityIndicator size="small" color={colors.ink2} />
-            : <Text style={{ color: colors.ink2, fontSize: 18 }}>⟳</Text>}
-        </TouchableOpacity>
+        <GlassSurface interactive variant="pill" style={{ borderRadius: 22 }}>
+          <Pressable
+            onPress={() => load()}
+            accessibilityLabel="刷新会话列表"
+            accessibilityRole="button"
+            style={({ pressed }) => ({
+              width: 44,
+              height: 44,
+              borderRadius: 22,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: pressed ? colors.glassPressed : 'transparent',
+            })}
+          >
+            {loading
+              ? <ActivityIndicator size="small" color={colors.ink2} />
+              : <Icon name="refresh" size={18} color={colors.ink} />}
+          </Pressable>
+        </GlassSurface>
       </View>
 
-      {/* 导航项 */}
-      <View style={{ paddingHorizontal: 16 }}>
-        <TouchableOpacity
-          onPress={goNew}
-          style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 10 }}
-        >
-          <Text style={{ width: 24, textAlign: 'center', color: colors.accent, fontSize: 18 }}>＋</Text>
-          <Text style={{ marginLeft: 8, color: colors.inkStrong, fontSize: 16 }}>新对话</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          onPress={goSettings}
-          style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 10 }}
-        >
-          <Text style={{ width: 24, textAlign: 'center', color: colors.ink2, fontSize: 18 }}>⚙</Text>
-          <Text style={{ marginLeft: 8, color: colors.inkStrong, fontSize: 16 }}>设置</Text>
-        </TouchableOpacity>
+      {/* 分组标题 */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, paddingTop: 4, paddingBottom: 6 }}>
+        <Text style={{ color: colors.ink3, fontSize: 12.5, fontWeight: '500' }}>
+          最近对话
+        </Text>
+        {sorted.length > 0 ? (
+          <Text style={{ color: colors.ink3, fontFamily: fonts.mono, fontSize: 11.5 }}>
+            {sorted.length}
+          </Text>
+        ) : null}
       </View>
-
-      <Text style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4, color: colors.ink3, fontSize: 12 }}>
-        最近对话
-      </Text>
 
       <FlatList
         data={sorted}
         keyExtractor={(s) => s.sessionId}
         renderItem={renderItem}
-        contentContainerStyle={{ paddingHorizontal: 4, flexGrow: 1 }}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{
+          paddingHorizontal: 8,
+          paddingTop: 2,
+          paddingBottom: bottomBarOffset + 74,
+          flexGrow: 1,
+        }}
         ListEmptyComponent={
           error ? (
             <TouchableOpacity onPress={() => load()} style={{ padding: 16 }}>
@@ -154,17 +166,75 @@ export function DrawerContent({ navigation }) {
         }
       />
 
-      {/* 连接状态脚注 */}
-      <View style={{
-        flexDirection: 'row', alignItems: 'center',
-        paddingHorizontal: 16, paddingTop: 12,
-        paddingBottom: Math.max(insets.bottom, 12),
-        borderTopWidth: 1, borderTopColor: colors.line,
-      }}>
-        <View style={{ width: 8, height: 8, borderRadius: 4, marginRight: 8, backgroundColor: connDotColor }} />
-        <Text numberOfLines={1} style={{ flex: 1, color: colors.ink2, fontFamily: fonts.mono, fontSize: 12 }}>
-          {connHost()}
-        </Text>
+      {/* 底部悬浮液态玻璃操作栏：左侧设置与连接状态胶囊 + 右侧新对话胶囊 */}
+      <View
+        pointerEvents="box-none"
+        style={{
+          position: 'absolute',
+          left: 12,
+          right: 12,
+          bottom: bottomBarOffset,
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 10,
+        }}
+      >
+        <GlassSurface interactive variant="pill" style={{ flex: 1, minWidth: 0, borderRadius: 25 }}>
+          <Pressable
+            onPress={goSettings}
+            accessibilityRole="button"
+            accessibilityLabel={`设置，当前连接 ${connHost()}`}
+            style={({ pressed }) => ({
+              height: 50,
+              borderRadius: 25,
+              paddingHorizontal: 14,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 10,
+              backgroundColor: pressed ? colors.glassPressed : 'transparent',
+            })}
+          >
+            <Icon name="settings" size={19} color={colors.ink} />
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Text style={{ color: colors.inkStrong, fontSize: 14, fontWeight: '600' }}>
+                  设置
+                </Text>
+                <View style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: connDotColor }} />
+              </View>
+              <Text
+                numberOfLines={1}
+                ellipsizeMode="middle"
+                style={{ color: colors.ink2, fontFamily: fonts.mono, fontSize: 10.5, marginTop: 1 }}
+              >
+                {connHost()}
+              </Text>
+            </View>
+          </Pressable>
+        </GlassSurface>
+
+        <GlassSurface interactive variant="accent" style={{ borderRadius: 25 }}>
+          <Pressable
+            onPress={goNew}
+            accessibilityRole="button"
+            accessibilityLabel="新对话"
+            style={({ pressed }) => ({
+              height: 50,
+              borderRadius: 25,
+              paddingHorizontal: 16,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 6,
+              backgroundColor: pressed ? colors.glassPressed : 'transparent',
+            })}
+          >
+            <Icon name="plus" size={18} strokeWidth={2.1} color={dark ? colors.accent : colors.accentDeep} />
+            <Text style={{ color: dark ? colors.inkStrong : colors.accentDeep, fontSize: 15, fontWeight: '600' }}>
+              新对话
+            </Text>
+          </Pressable>
+        </GlassSurface>
       </View>
     </View>
   );

@@ -11,16 +11,21 @@ export function ModePill({ mode, onOpen }) {
   return (
     <TouchableOpacity
       onPress={onOpen}
-      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+      accessibilityRole="button"
+      accessibilityLabel={`权限模式：${MODE_LABELS[mode] || '标准'}`}
       style={{
-        borderRadius: 12,
-        paddingHorizontal: 10,
-        paddingVertical: 4,
+        borderRadius: 22,
+        borderCurve: 'continuous',
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        minHeight: 44,
+        justifyContent: 'center',
+        backgroundColor: active ? colors.glassTintAccent : colors.controlFill,
         borderWidth: 1,
-        borderColor: active ? colors.accent : colors.line,
+        borderColor: active ? colors.glassBorderAccent : colors.controlBorder,
       }}
     >
-      <Text style={{ color: active ? colors.accent : colors.ink, fontSize: 12 }}>
+      <Text style={{ color: active ? colors.accent : colors.ink, fontSize: 12.5, fontWeight: active ? '600' : '500' }}>
         {MODE_LABELS[mode] || '标准'}
       </Text>
     </TouchableOpacity>

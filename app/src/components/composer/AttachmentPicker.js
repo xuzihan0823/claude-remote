@@ -1,7 +1,8 @@
-import { ActionSheetIOS, Text, TouchableOpacity } from 'react-native';
+import { ActionSheetIOS, TouchableOpacity } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { toast } from '../../../../web/core/bus.js';
+import { Icon } from '../Icon.js';
 import { useTheme } from '../../theme.js';
 
 // + 按钮：弹 iOS ActionSheet 选 拍照/相册/文件，归一为 {uri,name,size} 列表回调 onPicked。
@@ -69,20 +70,23 @@ export function AttachmentPicker({ disabled, onPicked }) {
     <TouchableOpacity
       onPress={openSheet}
       disabled={disabled}
-      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      accessibilityRole="button"
+      accessibilityState={{ disabled: !!disabled }}
       accessibilityLabel="上传附件"
       style={{
-        width: 30,
-        height: 30,
-        borderRadius: 15,
+        width: 44,
+        height: 44,
+        borderRadius: 22,
+        borderCurve: 'continuous',
         alignItems: 'center',
         justifyContent: 'center',
+        backgroundColor: colors.controlFill,
         borderWidth: 1,
-        borderColor: colors.line,
+        borderColor: colors.controlBorder,
         opacity: disabled ? 0.4 : 1,
       }}
     >
-      <Text style={{ color: colors.ink, fontSize: 18, lineHeight: 20 }}>+</Text>
+      <Icon name="plus" />
     </TouchableOpacity>
   );
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import { Pressable, ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -8,6 +8,8 @@ import { bus, toast } from '../../../web/core/bus.js';
 import { useConnActions } from '../lib/conn-context.js';
 import { useTheme } from '../theme.js';
 import { ConnForm } from '../components/ConnForm.js';
+import { GlassSurface } from '../components/GlassSurface.js';
+import { Icon } from '../components/Icon.js';
 
 // 移植 web/ui/screens/settings.js：顶栏（‹ 返回 + 衬线「设置」）+ 三卡（连接 / 状态 / 快速上手）
 // + 底部危险按钮（断开并清除本机凭据 -> bus.emit('logout')，App 处理）。
@@ -63,15 +65,25 @@ export function SettingsScreen() {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg, paddingTop: insets.top }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 8 }}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          accessibilityLabel="返回"
-          style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' }}
-        >
-          <Text style={{ color: colors.ink, fontSize: 22, lineHeight: 24 }}>‹</Text>
-        </TouchableOpacity>
-        <Text style={{ fontFamily: fonts.serifCn, fontSize: 16.5, fontWeight: '600', color: colors.inkStrong }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 10 }}>
+        <GlassSurface interactive variant="pill" style={{ borderRadius: 22 }}>
+          <Pressable
+            onPress={() => navigation.goBack()}
+            accessibilityRole="button"
+            accessibilityLabel="返回"
+            style={({ pressed }) => ({
+              width: 44,
+              height: 44,
+              borderRadius: 22,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: pressed ? colors.glassPressed : 'transparent',
+            })}
+          >
+            <Icon name="back" size={20} color={colors.ink} />
+          </Pressable>
+        </GlassSurface>
+        <Text style={{ fontFamily: fonts.serifCn, fontSize: 17, fontWeight: '600', color: colors.inkStrong }}>
           设置
         </Text>
       </View>

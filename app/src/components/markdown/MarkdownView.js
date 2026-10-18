@@ -7,8 +7,8 @@ import { marked } from '../../../../web/vendor/marked.esm.min.js';
 import { useTheme } from '../../theme.js';
 
 // 基准字号 / 行高（规格约定）
-const BASE_FS = 15;
-const BASE_LH = 24;
+const BASE_FS = 17;
+const BASE_LH = 28;
 
 // marked 的 text token 保留原始 HTML 实体（&amp; 等）；web 端靠浏览器解析 innerHTML 解码，
 // RN Text 不会解码，故这里手动解码以对齐 web 输出。原始 < > & 等已是裸字符，无需处理。
