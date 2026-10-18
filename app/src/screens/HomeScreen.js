@@ -36,13 +36,16 @@ export function HomeScreen() {
     if (fromNonce) inheritCwd(route.params?.fromCwd || '');
   }, [fromNonce]);
 
+  const isHome = !!catalog.homeCwd && target === catalog.homeCwd;
   const owner = projectForCwd(catalog.projects, target);
   const ownerTitle = owner ? projectTitles(catalog.projects).get(owner.id) : '';
-  const cwdLabel = !target ? '' : owner && owner.cwds.length > 1
-    ? `${ownerTitle} · ${pathTail(target, 1)}`
-    : ownerTitle || pathTail(target);
+  const cwdLabel = !target ? '' : isHome
+    ? '主目录 (~)'
+    : owner && owner.cwds.length > 1
+      ? `${ownerTitle} · ${pathTail(target, 1)}`
+      : ownerTitle || pathTail(target);
   // 目录未加载成功时交给服务端白名单校验，避免网络抖动把可用目标判成不可用
-  const cwdKnown = !catalogLoaded || isKnownCwd(catalog.projects, target);
+  const cwdKnown = !catalogLoaded || isHome || isKnownCwd(catalog.projects, target);
 
   const created = useCallback((result, body) => {
     const summary = {

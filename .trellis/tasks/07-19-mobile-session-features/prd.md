@@ -99,6 +99,12 @@ continue using the same Mac project/session truth.
 - Expansion changes browsing only. Project creation targets an actual known cwd, preserves drafts with existing feedback, and leaves workspace selection available on Home.
 - Preserve the existing brand header, refresh, bottom settings/new-chat actions, global approvals, active runs, and complete per-project pagination. Fetch groups lazily and isolate pagination, errors, and stale responses per project.
 
+### R8. Home-directory default for new conversations (approved 2026-10-18)
+
+- When the user has neither a stored target nor a project preference, a new conversation defaults to the daemon host's home directory (`/Users/mac` on the Mac), matching a terminal CLI started there.
+- Expose the home directory in the authenticated project catalog, accept it as a creation target, and list it in the target picker as the home-directory option.
+- Keep existing stored or inherited targets unchanged, and continue requiring explicit selection when the catalog is unavailable.
+
 ## Acceptance Criteria
 
 - [ ] `GET /api/models` (or the agreed equivalent) returns the Mac-backed model

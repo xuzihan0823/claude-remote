@@ -85,6 +85,12 @@ Use one virtualized list of project-header, conversation, and group-footer rows.
 
 Expansion is independent of the legacy browsing filter and Home target. Current-session navigation/cache metadata determines initial expansion without treating missing cache as missing cwd; manual collapse survives catalog polling. Project new-chat actions reuse Home's `fromCwd`/`nonce` route protocol with the catalog's actual `cwd`, never the group ID. Multi-workspace rows preserve workspace context. Existing brand, theme, safe-area and bottom actions remain unchanged.
 
+## Home-Directory Default (2026-10-18)
+
+`GET /api/projects` gains `homeCwd`, the daemon host's `os.homedir()`. It is not a project and has no transcript-derived group until a session exists there. New-session validation accepts `homeCwd` in addition to transcript-known cwds; repository-root IDs remain rejected. On the Mac this is `/Users/mac`, producing the normal `-Users-mac` transcript directory.
+
+Home defaults to `homeCwd` only when the persisted target is `null` and no project preference supplies a target. Explicit, inherited, and intentionally empty targets are unchanged. A missing catalog still leaves send disabled. The target picker lists the home option first and labels it `主目录 (~)`, excluding the duplicate catalog project once home sessions exist. Creating a home session requires no daemon configuration change; restarting the daemon is required to serve `homeCwd`.
+
 ## Compatibility And Rollback
 
 - Existing clients that omit `model` continue to use the Mac/CLI default.

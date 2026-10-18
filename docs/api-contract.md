@@ -37,13 +37,14 @@
     "lastActiveAt": 1752825600000
   }],
   "totalSessions": 15,
-  "unclassifiedCount": 3
+  "unclassifiedCount": 3,
+  "homeCwd": "/Users/mac" // daemon 主机用户主目录，未选择项目时的默认新建目标
 }
 ```
 
 - 同一 Git 仓库的 worktree 归到同一项目；普通目录按完整路径区分，同名目录不合并。Git 识别失败时保留原始 cwd。
 - `cwds` 仅包含实际出现在会话中的非空目录，项目按最近活动排序。缺少 cwd 的会话计入未归类，不推测编码目录名。
-- 项目 ID 用于浏览归组；新建会话仍必须提交选定的已知实际 `cwd`，不可拿仓库根目录代替 worktree。
+- 项目 ID 用于浏览归组；新建会话仍必须提交选定的已知实际 `cwd`，不可拿仓库根目录代替 worktree。`homeCwd` 等同于在主机上直接启动 CLI 的当前目录，可作为没有项目偏好时的默认目标。
 
 ### GET /api/sessions?limit=50&offset=0
 会话列表，按 `lastActiveAt` 降序。可选 `projectId` 按项目过滤（省略表示全部，空字符串表示未归类）；可选 `cwd` 按原始工作目录精确过滤。参数须 URL 编码，两种过滤同时提供时取交集。过滤发生在分页前，`total` 为过滤后的数量；未知项目返回空列表。旧调用兼容。

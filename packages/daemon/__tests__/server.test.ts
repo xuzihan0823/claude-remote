@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, appendFile, readFile, writeFile, rm, utimes } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, after } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -351,14 +351,14 @@ test("项目目录与会话过滤：完整索引、worktree 合并、分页前�
   }
   const response = await fetch(`${isolated.base}/api/projects?limit=1`, authed());
   assert.equal(response.status, 200);
-  const catalog = await response.json() as ProjectCatalog;
+  const catalog = await response.json() as ProjectCatalog & { homeCwd: string };
   assert.deepEqual(catalog, {
     projects: [
       { id: repo, name: "repo with spaces", cwd: worktree, cwds: [worktree, repo, nested], sessionCount: 3, lastActiveAt: 90_000 },
       { id: plainA, name: "same-name", cwd: plainA, cwds: [plainA], sessionCount: 1, lastActiveAt: 80_000 },
       { id: plainB, name: "same-name", cwd: plainB, cwds: [plainB], sessionCount: 1, lastActiveAt: 60_000 },
     ],
-    totalSessions: 6, unclassifiedCount: 1,
+    totalSessions: 6, unclassifiedCount: 1, homeCwd: homedir(),
   });
 
   const page = async (query: string) => {
@@ -439,6 +439,15 @@ test("新会话/模型输入校验：未知 cwd、未知模型拒绝；abort 对
   }));
   assert.equal(unknownCwd.status, 400);
   assert.deepEqual(await unknownCwd.json(), { error: "unknown_cwd" });
+
+  const home = await fetch(`${harness.base}/api/sessions`, authed({
+    method: "POST", body: JSON.stringify({ cwd: homedir(), text: "hello from home" }),
+  }));
+  assert.equal(home.status, 202);
+  const homeSession = await home.json() as { sessionId: string };
+  assert.equal((harness.sdk.params?.options as { cwd?: string } | undefined)?.cwd, homedir());
+  const homeStop = await fetch(`${harness.base}/api/sessions/${homeSession.sessionId}/abort`, authed({ method: "POST" }));
+  assert.equal(homeStop.status, 200);
 
   const unknownModel = await fetch(`${harness.base}/api/sessions`, authed({
     method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, text: "hello", model: "wat" }),

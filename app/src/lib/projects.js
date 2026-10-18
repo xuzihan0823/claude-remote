@@ -5,7 +5,7 @@ export const ALL_PROJECTS = null;
 export const UNCLASSIFIED = '';
 export const SESSION_PAGE = 50;
 
-const EMPTY_CATALOG = { projects: [], totalSessions: 0, unclassifiedCount: 0 };
+const EMPTY_CATALOG = { projects: [], totalSessions: 0, unclassifiedCount: 0, homeCwd: '' };
 
 export function normalizeCatalog(d) {
   if (!d || !Array.isArray(d.projects)) return EMPTY_CATALOG;
@@ -27,6 +27,7 @@ export function normalizeCatalog(d) {
     projects,
     totalSessions: Number(d.totalSessions) || 0,
     unclassifiedCount: Number(d.unclassifiedCount) || 0,
+    homeCwd: typeof d.homeCwd === 'string' ? d.homeCwd : '',
   };
 }
 
