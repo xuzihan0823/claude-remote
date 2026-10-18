@@ -12,7 +12,7 @@ Consume `fetchProjects()` and `fetchSessions(limit, { offset, projectId, cwd })`
 
 Keep the drawer's browsing filter separate from the new-conversation target. All/unclassified are browsing choices, never executable directories. Project IDs identify repository groups; only original `cwds` from the catalog are valid execution targets.
 
-Home displays the target and allows project/workspace selection. New from an existing conversation inherits its original cwd, including linked worktrees; a missing cwd leaves the target empty rather than inheriting an unrelated previous project. Catalog refresh must not silently replace an explicit target, even when it has become unavailable. Capture the target when submitting, before attachment uploads or other awaits. If the connection changes during upload, stop before POSTing to another daemon.
+Home displays the target and allows project/workspace selection. New from an existing conversation inherits its original cwd, including linked worktrees; a missing cwd leaves the target empty rather than inheriting an unrelated previous project. When neither a stored target nor a project preference exists, default to the catalog's `homeCwd` (the daemon host's home directory), label it as the home directory, treat it as known, and expose the same choice in the target picker. Catalog refresh must not silently replace an explicit target, even when it has become unavailable. Capture the target when submitting, before attachment uploads or other awaits. If the connection changes during upload, stop before POSTing to another daemon.
 
 Shared project state is scoped to the connected daemon. Connection identity changes must be reactive even when auth stays `ok`; importing mutable base/token variables alone does not trigger a React render. Clear old session caches and guard asynchronous results from an old connection or project filter. Never persist a bearer token in preference keys.
 
@@ -30,6 +30,7 @@ Project switching changes browsing only. Global approval delivery and active run
 
 | Condition | UI behavior |
 | --- | --- |
+| No stored target and no project preference | Default to `homeCwd`, show it explicitly |
 | No known runnable directory | Explain project selection; disable send |
 | Catalog/list request fails | Keep useful content when available and offer retry |
 | Old connection/filter response finishes late | Discard it |

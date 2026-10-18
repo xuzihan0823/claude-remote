@@ -55,28 +55,35 @@ export function ProjectPicker({ sheetRef, variant, catalog, value, onPick, loade
     })),
   ];
 
-  const targetRows = () => catalog.projects.flatMap((p) => {
-    if (p.cwds.length <= 1) {
-      const cwd = p.cwds[0] || p.cwd;
-      return cwd ? [row(p.id, {
-        title: titles.get(p.id), sub: shortPath(cwd), count: p.sessionCount,
-        selected: value === cwd, onPress: () => pick(cwd), testID: `workspace-option-${cwd}`,
-      })] : [];
-    }
-    return [
-      <View key={`${p.id}:h`} accessible accessibilityRole="header" style={{ flexDirection: 'row', alignItems: 'center', paddingTop: 12, paddingBottom: 2, paddingHorizontal: 16 }}>
-        <Text numberOfLines={1} style={{ flex: 1, color: colors.ink2, fontSize: 13, fontWeight: '600' }}>
-          {titles.get(p.id)} · {p.cwds.length} 个工作目录
-        </Text>
-        <Text style={{ color: colors.ink3, fontSize: 12.5, marginRight: 22, fontVariant: ['tabular-nums'] }}>{p.sessionCount}</Text>
-      </View>,
-      ...p.cwds.map((cwd) => row(`${p.id}:${cwd}`, {
-        title: pathTail(cwd, 1), sub: shortPath(cwd), indent: true,
-        badge: cwd === p.cwd ? '最近' : '', selected: value === cwd,
-        onPress: () => pick(cwd), testID: `workspace-option-${cwd}`,
-      })),
-    ];
-  });
+  const homeProject = catalog.projects.find((p) => p.id === catalog.homeCwd);
+  const targetRows = () => [
+    ...(catalog.homeCwd ? [row('home', {
+      title: '主目录 (~)', sub: shortPath(catalog.homeCwd), count: homeProject?.sessionCount,
+      selected: value === catalog.homeCwd, onPress: () => pick(catalog.homeCwd), testID: 'workspace-option-home',
+    })] : []),
+    ...catalog.projects.filter((p) => p.id !== catalog.homeCwd).flatMap((p) => {
+      if (p.cwds.length <= 1) {
+        const cwd = p.cwds[0] || p.cwd;
+        return cwd ? [row(p.id, {
+          title: titles.get(p.id), sub: shortPath(cwd), count: p.sessionCount,
+          selected: value === cwd, onPress: () => pick(cwd), testID: `workspace-option-${cwd}`,
+        })] : [];
+      }
+      return [
+        <View key={`${p.id}:h`} accessible accessibilityRole="header" style={{ flexDirection: 'row', alignItems: 'center', paddingTop: 12, paddingBottom: 2, paddingHorizontal: 16 }}>
+          <Text numberOfLines={1} style={{ flex: 1, color: colors.ink2, fontSize: 13, fontWeight: '600' }}>
+            {titles.get(p.id)} · {p.cwds.length} 个工作目录
+          </Text>
+          <Text style={{ color: colors.ink3, fontSize: 12.5, marginRight: 22, fontVariant: ['tabular-nums'] }}>{p.sessionCount}</Text>
+        </View>,
+        ...p.cwds.map((cwd) => row(`${p.id}:${cwd}`, {
+          title: pathTail(cwd, 1), sub: shortPath(cwd), indent: true,
+          badge: cwd === p.cwd ? '最近' : '', selected: value === cwd,
+          onPress: () => pick(cwd), testID: `workspace-option-${cwd}`,
+        })),
+      ];
+    }),
+  ];
 
   const rows = variant === 'filter' ? filterRows() : targetRows();
   const empty = variant === 'target' && rows.length === 0;

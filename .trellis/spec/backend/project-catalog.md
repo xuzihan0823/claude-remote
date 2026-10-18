@@ -13,7 +13,7 @@ Applies to the daemon's authenticated project projection and mobile conversation
 
 ## 3. Contracts
 
-Catalog response: `{ projects: [{ id, name, cwd, cwds, sessionCount, lastActiveAt }], totalSessions, unclassifiedCount }`.
+Catalog response: `{ projects: [{ id, name, cwd, cwds, sessionCount, lastActiveAt }], totalSessions, unclassifiedCount, homeCwd }`. `homeCwd` is the daemon host's user home directory and is always a valid new-session target, matching a CLI launched from home.
 
 Projects are aggregated from the entire transcript index before pagination. For Git working directories, identify the shared repository root so linked worktrees belong to one project. On Git discovery failure, retain the original full cwd. Distinct repositories with equal basenames remain distinct. `name` is presentation only; never use it as identity.
 

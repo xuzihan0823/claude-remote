@@ -234,7 +234,7 @@ export class DaemonServer {
 
     if (method === "GET" && path === "/api/projects") {
       const all = await listSessions(this.#options.config.projectsDir);
-      this.#json(res, 200, (await buildProjectIndex(all)).catalog);
+      this.#json(res, 200, { ...(await buildProjectIndex(all)).catalog, homeCwd: homedir() });
       return;
     }
 
@@ -332,7 +332,7 @@ export class DaemonServer {
 
   async #knownCwds(): Promise<Set<string>> {
     const sessions = await listSessions(this.#options.config.projectsDir);
-    return new Set(sessions.map((session) => session.cwd).filter((cwd) => cwd !== ""));
+    return new Set([...sessions.map((session) => session.cwd).filter((cwd) => cwd !== ""), homedir()]);
   }
 
   async #validateModel(

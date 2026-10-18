@@ -70,9 +70,10 @@ export function ProjectsProvider({ base, children }) {
   }, [loadCatalog]);
 
   // 只为未选择目标的新建页设置项目默认值；失效目录保留给用户显式更换。
+  // 没有任何项目偏好时落到 daemon 的主目录，对应终端里直接启动 CLI。
   useEffect(() => {
     if (!catalogLoaded || draftActive.current || state.current.target !== null) return;
-    setTarget(resolveTarget(catalog.projects, projectId, null));
+    setTarget(resolveTarget(catalog.projects, projectId, null) ?? (catalog.homeCwd || null));
   }, [catalog, catalogLoaded, projectId, setTarget]);
 
   useEffect(() => {

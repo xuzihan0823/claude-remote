@@ -82,4 +82,6 @@ test('目录数据防御：cwd 缺失时取 cwds 首项，非法项目丢弃', (
   assert.equal(c.projects[0].cwd, '/x/w');
   assert.equal(c.projects[0].name, 'x');
   assert.deepEqual(normalizeCatalog(null).projects, []);
+  assert.equal(normalizeCatalog(null).homeCwd, '');
+  assert.equal(normalizeCatalog({ projects: [], homeCwd: '/Users/mac' }).homeCwd, '/Users/mac');
 });

@@ -63,6 +63,16 @@ proposed backend-only approach.
 
 R7 verification completed: mobile tests 29/29, workspace typecheck and full baseline tests passed; Expo iOS export and final Release simulator build passed. Native XCTest passed grouped browsing, default/collapse refresh behavior, 50 → 100 → 106 pagination, Unclassified, same-name projects and project-specific Home targeting (2/2 cases). Light-mode XXXL capture passed (1/1). Evidence: `output/sidebar-verification/verification.md` and adjacent native screenshots. No real model turn was submitted. Git commit remains pending explicit user authorization.
 
+## Home Directory Default (2026-10-18)
+
+1. Add `homeCwd` to the authenticated project catalog and accept it in new-session cwd validation; keep repository-root and arbitrary-path rejection unchanged.
+2. Fall back to `homeCwd` on Home only when no stored or project-derived target exists; keep explicit/inherited/empty targets and catalog-failure behavior unchanged.
+3. Show the home target as `主目录 (~)`, treat it as known, and add the same option to the target picker without duplicating a future home project group.
+4. Run daemon server tests, mobile tests, and workspace typecheck; rebuild the native app and confirm the default target on the simulator without submitting a model turn.
+5. Restart the local daemon before device use so `/api/projects` serves `homeCwd`. Do not commit or deploy without explicit user authorization.
+
+Home-default verification: daemon server tests assert `homeCwd` in the catalog and successful creation in the home directory; mobile tests and `pnpm typecheck` pass; full workspace tests pass (Web 5, mobile 29, interactions 7, agent-bridge 13, daemon 102). A clean simulator install connected to the fixture daemon defaulted Home to `主目录 (~)` with the home picker option selected (`testHomeTargetDefaultsToHomeDirectory`, 1/1). No model turn was submitted. The running daemon still needs a restart, and the new app build needs authorization before commit/push/device install.
+
 ## Validation Commands
 
 ```bash
