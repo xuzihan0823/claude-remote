@@ -56,15 +56,17 @@ export function apiTimeoutMs(path) {
   return 20_000;
 }
 export async function api(path, opts = {}) {
+  const requestBase = baseUrl;
+  const requestToken = token;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? apiTimeoutMs(path));
   let res;
   try {
-    res = await fetch(`${baseUrl}${path}`, {
+    res = await fetch(`${requestBase}${path}`, {
       ...opts,
       signal: ctrl.signal,
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${requestToken}`,
         ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
         ...(opts.headers || {}),
       },
@@ -73,6 +75,7 @@ export async function api(path, opts = {}) {
     throw new ApiError(0, ctrl.signal.aborted ? 'network_timeout' : 'network_error');
   } finally { clearTimeout(timer); }
   const data = await res.json().catch(() => ({}));
+  if (requestBase !== baseUrl || requestToken !== token) throw new ApiError(0, 'connection_changed');
   if (res.status === 401) { bus.emit('unauthorized'); throw new ApiError(401, 'unauthorized'); }
   if (!res.ok) throw new ApiError(res.status, data.error || `http_${res.status}`, data);
   return data;
@@ -110,11 +113,21 @@ export const sessionCache = new Map();
 export const pendingSessionMessages = new Map();
 export let modelCache = { models: [], defaultModel: '' };
 export function cacheSessions(list) { for (const s of list) sessionCache.set(s.sessionId, s); }
-export async function fetchSessions(limit = 100) {
-  const d = await api(`/api/sessions?limit=${limit}`);
-  cacheSessions(d.sessions);
-  bus.emit('sessions-cached');
+export async function fetchSessions(limit = 100, { offset = 0, projectId, cwd } = {}) {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (projectId !== undefined) params.set('projectId', projectId);
+  if (cwd !== undefined) params.set('cwd', cwd);
+  const requestBase = baseUrl;
+  const requestToken = token;
+  const d = await api(`/api/sessions?${params}`);
+  if (requestBase === baseUrl && requestToken === token) {
+    cacheSessions(d.sessions);
+    bus.emit('sessions-cached');
+  }
   return d;
+}
+export async function fetchProjects() {
+  return api('/api/projects');
 }
 export async function fetchModels() {
   const d = await api('/api/models');

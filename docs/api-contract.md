@@ -13,8 +13,40 @@
 ### GET /api/health
 `200 {"ok":true,"version":"<daemon版本>","claudeCliVersion":"<检测值|unknown>"}`
 
+### GET /api/models
+
+返回 Mac 模型目录：`200 {"models":[{"id":"provider/model","alias":"provider/model","displayName":"Model label"}],"defaultModel":"provider/model"}`。`defaultModel` 可省略；本接口沿用 Bearer 鉴权。
+
+- 数据源为 `CLAUDE_CONFIG_DIR/settings.json`，未设置目录时读取 `~/.claude/settings.json`；每次请求重新读取。
+- 优先使用 `modelPicker.options` 中有效的 `model` / `label`，保留顺序，按完整模型 ID 去重；不同服务来源不合并。只返回 ID、别名和显示名称，不透出 `description`、凭据或其他设置。
+- 没有有效选项时回退到 `fable` / `opus` / `sonnet` / `haiku` 及其 `env.ANTHROPIC_DEFAULT_*_MODEL` 映射。有效默认模型不在列表内时补入；使用完整列表时，默认别名按有效映射解析为具体 ID。
+- 新建会话和续聊的可选 `model` 使用同一目录校验。内置别名保留兼容；未知 ID 返回 `400 {"error":"unknown_model"}`，非字符串或空值返回 `400 {"error":"invalid_model"}`。省略 `model` 则由 SDK 使用 Mac 默认。
+
+### GET /api/projects
+
+返回完整会话索引聚合的项目目录，沿用 Bearer 鉴权：
+
+```jsonc
+{
+  "projects": [{
+    "id": "/Users/mac/Desktop/foo", // Git 仓库根路径；非 Git 则为原始 cwd
+    "name": "foo",
+    "cwd": "/Users/mac/Desktop/foo", // 最近活跃的已知实际工作目录
+    "cwds": ["/Users/mac/Desktop/foo", "/Users/mac/worktrees/foo-fix"],
+    "sessionCount": 12,
+    "lastActiveAt": 1752825600000
+  }],
+  "totalSessions": 15,
+  "unclassifiedCount": 3
+}
+```
+
+- 同一 Git 仓库的 worktree 归到同一项目；普通目录按完整路径区分，同名目录不合并。Git 识别失败时保留原始 cwd。
+- `cwds` 仅包含实际出现在会话中的非空目录，项目按最近活动排序。缺少 cwd 的会话计入未归类，不推测编码目录名。
+- 项目 ID 用于浏览归组；新建会话仍必须提交选定的已知实际 `cwd`，不可拿仓库根目录代替 worktree。
+
 ### GET /api/sessions?limit=50&offset=0
-会话列表，按 `lastActiveAt` 降序。
+会话列表，按 `lastActiveAt` 降序。可选 `projectId` 按项目过滤（省略表示全部，空字符串表示未归类）；可选 `cwd` 按原始工作目录精确过滤。参数须 URL 编码，两种过滤同时提供时取交集。过滤发生在分页前，`total` 为过滤后的数量；未知项目返回空列表。旧调用兼容。
 
 ```jsonc
 {

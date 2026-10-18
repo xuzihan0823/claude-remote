@@ -2,5 +2,9 @@
 {"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Reuse the existing Runner, composer, route, and icon generation patterns."}
 {"file":".trellis/spec/backend/error-handling.md","reason":"Preserve the existing structured API error response shape."}
 {"file":".trellis/spec/backend/quality-guidelines.md","reason":"Apply project backend testing and lifecycle expectations."}
+{"file":".trellis/spec/backend/project-catalog.md","reason":"Repository/worktree project identity, filter-before-pagination, and original cwd targeting."}
+{"file":".trellis/spec/backend/model-catalog.md","reason":"Model picker projection, defaults, alias compatibility, and safe field contracts."}
+{"file":".trellis/tasks/07-19-mobile-session-features/research/model-catalog-missing-options-2026-10-18.md","reason":"Verified omission of modelPicker.options from the daemon catalog."}
 {"file":".trellis/spec/frontend/state-management.md","reason":"Keep model/cwd/run state aligned with existing Preact bus and server state patterns."}
 {"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Apply existing frontend validation and UI quality expectations."}
+{"file":".trellis/spec/frontend/project-conversations.md","reason":"Native project state, explicit workspace selection, connection scope, and paginated refresh conventions."}

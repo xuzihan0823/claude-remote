@@ -1,10 +1,10 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
-import { api } from '../../../../web/core/api.js';
+import { createSession } from '../../lib/create-session.js';
 import { toast } from '../../../../web/core/bus.js';
-import { getNewSessionMode, setNewSessionMode, setSessionMode } from '../../../../web/core/modes.js';
+import { setSessionMode } from '../../../../web/core/modes.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useTheme } from '../../theme.js';
 import { Icon } from '../Icon.js';
@@ -13,45 +13,33 @@ import { ComposerCard } from './ComposerCard.js';
 import { AttachmentChips } from './AttachmentChips.js';
 import { AttachmentPicker } from './AttachmentPicker.js';
 import { ModelPicker } from './ModelPicker.js';
-import { ModePill } from './ModePill.js';
-import { ModeSheet } from './ModeSheet.js';
 
-// 新建会话 composer：cwd = projects[0]（web 同款，无项目选择 UI）；
+// 新建会话 composer：cwd 由父层显式传入（目录入口在顶栏三点菜单；未选目录时点发送也会调 onPickCwd），不做隐式回退；
 // 附件走 /api/upload（新建会话专用端点），POST /api/sessions {cwd, text, model?, permissionMode?}；
 // 成功 setSessionMode(result.sessionId, mode) + onCreated(result, body)。对应 web/ui/components/composer.js。
-export function NewChatComposer({ projects, onCreated }) {
+export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onDraftChange, onCreated, mode }) {
   const { colors, dark } = useTheme();
   const insets = useSafeAreaInsets();
   const catalog = useModelCatalog();
   const [draft, setDraft] = useState('');
   const [model, setModel] = useState('');
-  const [mode, setMode] = useState(getNewSessionMode);
-  const [modeOpen, setModeOpen] = useState(false);
   const [files, setFiles] = useState([]);
   const [busy, setBusy] = useState(false);
   const [inputH, setInputH] = useState(44);
   const lastH = useRef(44);
 
-  const cwd = projects && projects.length ? projects[0] : '';
+  const hasDraft = draft.trim() !== '' || files.length > 0;
+  useEffect(() => {
+    onDraftChange?.(hasDraft);
+    return () => onDraftChange?.(false);
+  }, [hasDraft, onDraftChange]);
 
   const create = useCallback(async () => {
-    let text = draft.trim();
-    if (!text || !cwd || busy) return;
+    const text = draft.trim();
+    if (!text || !cwd || !cwdKnown || busy) return;
     setBusy(true);
     try {
-      if (files.length) {
-        const uploaded = [];
-        for (const f of files) {
-          const blob = await (await fetch(f.uri)).blob();
-          const r = await api(`/api/upload?filename=${encodeURIComponent(f.name)}`, {
-            method: 'POST', body: blob, headers: { 'Content-Type': 'application/octet-stream' },
-          });
-          uploaded.push(r.path);
-        }
-        text = `${text}\n\n[手机端上传的附件，已保存在本机，可直接读取]\n${uploaded.map((p) => `- ${p}`).join('\n')}`;
-      }
-      const body = { cwd, text, ...(model ? { model } : {}), ...(mode !== 'default' ? { permissionMode: mode } : {}) };
-      const result = await api('/api/sessions', { method: 'POST', body: JSON.stringify(body) });
+      const { result, body } = await createSession({ cwd, text, model, mode, files });
       setSessionMode(result.sessionId, mode);
       onCreated?.(result, body);
       setDraft('');
@@ -61,16 +49,22 @@ export function NewChatComposer({ projects, onCreated }) {
       else if (e.status === 413) toast('附件过大（上限 25MB）', 'error');
       else if (e.code === 'unknown_model') toast('该模型已不可用，请重新选择', 'error');
       else if (e.code === 'unknown_cwd') toast('该项目已不可用，请刷新后重试', 'error');
+      else if (e.code === 'connection_changed') toast('连接已切换，请在当前连接重新发送', 'info');
       else if (e.code !== 'unauthorized') toast(`新建失败：${e.code}`, 'error');
     } finally { setBusy(false); }
-  }, [draft, cwd, model, mode, busy, files, onCreated]);
+  }, [draft, cwd, cwdKnown, model, mode, busy, files, onCreated]);
 
   const onContentSizeChange = (e) => {
     const h = Math.min(Math.max(Math.ceil(e.nativeEvent.contentSize.height), 44), 150);
     if (h !== lastH.current) { lastH.current = h; setInputH(h); }
   };
 
-  const canSend = !busy && draft.trim() !== '' && !!cwd;
+  const canSend = !busy && draft.trim() !== '';
+  const needsCwd = !cwd || !cwdKnown;
+  const onSendPress = () => {
+    if (needsCwd) { onPickCwd?.(); return; }
+    create();
+  };
 
   // 见 ChatComposer 同处注释：安全区间距放子层，避免被 KAV 动画样式在键盘收起时清零。
   // automaticOffset 必开：KAV 默认拿 onLayout 的 y（相对父容器≈0）当屏幕坐标，
@@ -111,13 +105,13 @@ export function NewChatComposer({ projects, onCreated }) {
         <ComposerActions
           attachment={<AttachmentPicker disabled={busy} onPicked={(items) => setFiles((xs) => [...xs, ...items])} />}
           model={<ModelPicker value={model} onChange={setModel} catalog={catalog} />}
-          mode={<ModePill mode={mode} onOpen={() => setModeOpen(true)} />}
+          mode={null}
           action={<TouchableOpacity
-            onPress={create}
+            onPress={onSendPress}
             disabled={!canSend}
             accessibilityRole="button"
             accessibilityState={{ disabled: !canSend, busy }}
-            accessibilityLabel="创建会话并发送"
+            accessibilityLabel={needsCwd ? '选择工作目录后发送' : '创建会话并发送'}
             style={{
               width: 44, height: 44, borderRadius: 22,
               backgroundColor: colors.inkStrong,
@@ -139,12 +133,6 @@ export function NewChatComposer({ projects, onCreated }) {
         </Text>
       ) : null}
       </View>
-      <ModeSheet
-        open={modeOpen}
-        mode={mode}
-        onSelect={(m) => { setMode(m); setNewSessionMode(m); setModeOpen(false); }}
-        onClose={() => setModeOpen(false)}
-      />
     </KeyboardAvoidingView>
   );
 }

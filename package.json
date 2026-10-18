@@ -10,7 +10,9 @@
   },
   "scripts": {
     "dev": "tsx packages/daemon/src/index.ts",
-    "test": "pnpm -r --if-present test",
+    "test": "pnpm run test:web && pnpm run test:mobile && pnpm -r --if-present test",
+    "test:web": "node --test web/core/*.test.js",
+    "test:mobile": "node --test app/src/lib/__tests__/*.test.mjs",
     "typecheck:packages": "pnpm -r --if-present typecheck",
     "typecheck:root": "tsc --noEmit -p tsconfig.json",
     "typecheck": "pnpm run typecheck:packages && pnpm run typecheck:root"

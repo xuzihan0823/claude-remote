@@ -1,5 +1,10 @@
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check API, event, persistence, and UI round-trip consistency."}
 {"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Review for duplicated model/config validation and state transitions."}
 {"file":".trellis/spec/backend/error-handling.md","reason":"Review invalid input, busy, abort, and unknown session responses."}
+{"file":".trellis/spec/backend/project-catalog.md","reason":"Verify complete catalog, worktree grouping, filtered totals, and known-cwd execution."}
+{"file":".trellis/tasks/07-19-mobile-session-features/research/project-conversations-2026-10-18.md","reason":"Project feature scope, actual HTTP/build evidence, and native verification limits."}
+{"file":".trellis/spec/backend/model-catalog.md","reason":"Verify full picker coverage, deduplication, fallback, and safe model validation."}
+{"file":".trellis/tasks/07-19-mobile-session-features/research/model-catalog-missing-options-2026-10-18.md","reason":"Verify complete picker coverage, safe projection, and GET/POST consistency."}
 {"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Review responsive layout, accessibility labels, and no-overlap behavior."}
 {"file":".trellis/spec/frontend/type-safety.md","reason":"Review shared payload typing and boundary validation."}
+{"file":".trellis/spec/frontend/project-conversations.md","reason":"Check explicit workspace targeting, pagination, draft stability, and connection/filter races."}

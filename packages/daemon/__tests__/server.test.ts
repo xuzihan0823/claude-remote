@@ -2,7 +2,7 @@
 // SDK 侧走 fake QueryFactory（不触真 SDK/网络）。fixture 会话文件建在临时目录。
 
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, appendFile, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, appendFile, readFile, writeFile, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, after } from "node:test";
@@ -13,14 +13,21 @@ import { InteractionManager, InteractionStore } from "@claude-remote/interaction
 import type { QueryFactory } from "@claude-remote/agent-bridge";
 
 import { ConfigError, loadConfig, type DaemonConfig } from "../src/config.js";
+import { readModelCatalog } from "../src/model-config.js";
 import { ApprovalBridge, TurnRunner, type ActivityGate, type Notifier } from "../src/run/index.js";
 import { DaemonServer } from "../src/server.js";
 import { ActivityTracker } from "../src/watch/activity.js";
 import { SessionWatcher } from "../src/watch/watcher.js";
+import type { ProjectCatalog } from "../src/transcript/projects.js";
+import type { SessionSummary } from "../src/transcript/types.js";
+import { projectWorkspaces } from "./fixtures/project-workspaces.js";
 
 const SESSION_ID = "11111111-2222-3333-4444-555555555555";
 const SESSION_CWD = "/tmp/claude-remote-it";
 const TOKEN = "it-token";
+const PICKER_MODELS = Array.from({ length: 25 }, (_, index) => ({
+  model: `provider-${index}/shared-model`, label: `Configured model ${index}`,
+}));
 
 function jsonlLine(o: Record<string, unknown>): string {
   return `${JSON.stringify(o)}\n`;
@@ -96,6 +103,12 @@ interface Harness {
 
 async function startHarness(): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "claude-remote-it-"));
+  const settingsPath = join(root, "settings.json");
+  await writeFile(settingsPath, JSON.stringify({
+    model: "fable",
+    env: { ANTHROPIC_DEFAULT_FABLE_MODEL: PICKER_MODELS[0]?.model, ANTHROPIC_API_KEY: "private-api-key" },
+    modelPicker: { options: PICKER_MODELS.map((option) => ({ ...option, description: "private-description" })) },
+  }));
   const projectsDir = join(root, "projects");
   const projectDir = join(projectsDir, "-tmp-claude-remote-it");
   await mkdir(projectDir, { recursive: true });
@@ -139,13 +152,7 @@ async function startHarness(): Promise<Harness> {
   server = new DaemonServer({
     config, webRoot, watcher, tracker, runner, approvals: bridge, notifier,
     version: "0.1.0-test", claudeCliVersion: () => "9.9.9-test",
-    modelCatalog: async () => ({
-      defaultModel: "fable",
-      models: [
-        { id: "claude-fable-5", alias: "fable", displayName: "Fable" },
-        { id: "claude-sonnet-5", alias: "sonnet", displayName: "Sonnet" },
-      ],
-    }),
+    modelCatalog: () => readModelCatalog(settingsPath),
   });
   await server.listen();
   const { port } = server.address();
@@ -313,17 +320,116 @@ test("GET /api/sessions：fixture 会话 + 状态覆盖 + 分页 total", async (
   assert.equal(session.title, "hello daemon");
 });
 
+test("项目目录与会话过滤：完整索引、worktree 合并、分页前筛选、鉴权与原 cwd 创建", async (t) => {
+  const isolated = await startHarness();
+  t.after(() => isolated.dispose());
+  const root = await mkdtemp(join(tmpdir(), "claude-project-http-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { repo, worktree, nested, plainA, plainB } = await projectWorkspaces(root);
+  await rm(isolated.sessionFile);
+  const dir = join(isolated.projectsDir, "project-fixtures");
+  await mkdir(dir);
+  const specs = [
+    { cwd: worktree, at: 90 }, { cwd: plainA, at: 80 }, { cwd: repo, at: 70 },
+    { cwd: plainB, at: 60 }, { cwd: nested, at: 50 }, { cwd: "", at: 40 },
+  ];
+  const ids = specs.map((_, index) => `aaaaaaaa-bbbb-4ccc-8ddd-${String(index).padStart(12, "0")}`);
+  for (const [index, spec] of specs.entries()) {
+    const file = join(dir, `${ids[index]}.jsonl`);
+    await writeFile(file, jsonlLine({
+      type: "user", uuid: `user-${index}`, parentUuid: null,
+      ...(spec.cwd === "" ? {} : { cwd: spec.cwd }),
+      message: { role: "user", content: `conversation ${index}` },
+    }));
+    await utimes(file, spec.at, spec.at);
+  }
+
+  for (const headers of [undefined, { Authorization: "Bearer wrong" }]) {
+    const rejected = await fetch(`${isolated.base}/api/projects`, headers === undefined ? {} : { headers });
+    assert.equal(rejected.status, 401);
+    assert.deepEqual(await rejected.json(), { error: "unauthorized" });
+  }
+  const response = await fetch(`${isolated.base}/api/projects?limit=1`, authed());
+  assert.equal(response.status, 200);
+  const catalog = await response.json() as ProjectCatalog;
+  assert.deepEqual(catalog, {
+    projects: [
+      { id: repo, name: "repo with spaces", cwd: worktree, cwds: [worktree, repo, nested], sessionCount: 3, lastActiveAt: 90_000 },
+      { id: plainA, name: "same-name", cwd: plainA, cwds: [plainA], sessionCount: 1, lastActiveAt: 80_000 },
+      { id: plainB, name: "same-name", cwd: plainB, cwds: [plainB], sessionCount: 1, lastActiveAt: 60_000 },
+    ],
+    totalSessions: 6, unclassifiedCount: 1,
+  });
+
+  const page = async (query: string) => {
+    const result = await fetch(`${isolated.base}/api/sessions?${query}`, authed());
+    assert.equal(result.status, 200);
+    return await result.json() as { sessions: SessionSummary[]; total: number };
+  };
+  const all = await page("limit=2&offset=1");
+  assert.equal(all.total, 6);
+  assert.deepEqual(all.sessions.map((session) => session.sessionId), [ids[1], ids[2]]);
+  isolated.tracker.beginRun(ids[2]!);
+  const filtered = await page(new URLSearchParams({ projectId: repo, limit: "1", offset: "1" }).toString());
+  assert.equal(filtered.total, 3);
+  assert.deepEqual(filtered.sessions.map((session) => session.sessionId), [ids[2]]);
+  assert.equal(filtered.sessions[0]?.status, "daemon-driving");
+  isolated.tracker.endRun(ids[2]!);
+  const older = await page(new URLSearchParams({ projectId: repo, limit: "1", offset: "2" }).toString());
+  assert.equal(older.total, 3);
+  assert.equal(older.sessions[0]?.cwd, nested);
+  const exact = await page(new URLSearchParams({ cwd: worktree }).toString());
+  assert.equal(exact.total, 1);
+  assert.equal(exact.sessions[0]?.sessionId, ids[0]);
+  const combined = await page(new URLSearchParams({ projectId: repo, cwd: nested }).toString());
+  assert.equal(combined.total, 1);
+  assert.equal(combined.sessions[0]?.sessionId, ids[4]);
+  const unclassified = await page("projectId=");
+  assert.equal(unclassified.total, 1);
+  assert.equal(unclassified.sessions[0]?.sessionId, ids[5]);
+  assert.deepEqual(await page("cwd="), unclassified);
+  for (const query of [
+    new URLSearchParams({ projectId: "/unknown" }).toString(),
+    new URLSearchParams({ projectId: worktree }).toString(),
+    new URLSearchParams({ projectId: repo, cwd: plainA }).toString(),
+    new URLSearchParams({ cwd: "/unknown" }).toString(),
+    "projectId=&offset=1",
+  ]) {
+    const empty = await page(query);
+    assert.deepEqual(empty.sessions, []);
+    assert.equal(empty.total, query === "projectId=&offset=1" ? 1 : 0);
+  }
+
+  const created = await fetch(`${isolated.base}/api/sessions`, authed({
+    method: "POST", body: JSON.stringify({ cwd: worktree, text: "worktree target" }),
+  }));
+  assert.equal(created.status, 202);
+  const { sessionId } = await created.json() as { sessionId: string };
+  assert.equal((isolated.sdk.params?.options as { cwd?: string } | undefined)?.cwd, worktree);
+  const stop = await fetch(`${isolated.base}/api/sessions/${sessionId}/abort`, authed({ method: "POST" }));
+  assert.equal(stop.status, 200);
+
+  await rm(join(dir, `${ids[0]}.jsonl`));
+  await rm(join(dir, `${ids[2]}.jsonl`));
+  const refreshed = await fetch(`${isolated.base}/api/projects`, authed());
+  const current = await refreshed.json() as ProjectCatalog;
+  assert.deepEqual(current.projects.find((project) => project.id === repo)?.cwds, [nested]);
+  assert.equal(current.projects.find((project) => project.id === repo)?.cwd, nested);
+  const rootNotKnown = await fetch(`${isolated.base}/api/sessions`, authed({
+    method: "POST", body: JSON.stringify({ cwd: repo, text: "repository ID is not a runnable cwd" }),
+  }));
+  assert.equal(rootNotKnown.status, 400);
+  assert.deepEqual(await rootNotKnown.json(), { error: "unknown_cwd" });
+});
+
 test("GET /api/models：返回 Mac 模型投影；未鉴权拒绝", async () => {
   const anon = await fetch(`${harness.base}/api/models`);
   assert.equal(anon.status, 401);
   const res = await fetch(`${harness.base}/api/models`, authed());
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), {
-    defaultModel: "fable",
-    models: [
-      { id: "claude-fable-5", alias: "fable", displayName: "Fable" },
-      { id: "claude-sonnet-5", alias: "sonnet", displayName: "Sonnet" },
-    ],
+    defaultModel: PICKER_MODELS[0]?.model,
+    models: PICKER_MODELS.map(({ model, label }) => ({ id: model, alias: model, displayName: label })),
   });
 });
 
@@ -339,6 +445,12 @@ test("新会话/模型输入校验：未知 cwd、未知模型拒绝；abort 对
   }));
   assert.equal(unknownModel.status, 400);
   assert.deepEqual(await unknownModel.json(), { error: "unknown_model" });
+
+  const unknownResumeModel = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed({
+    method: "POST", body: JSON.stringify({ text: "hello", model: "provider-25/shared-model" }),
+  }));
+  assert.equal(unknownResumeModel.status, 400);
+  assert.deepEqual(await unknownResumeModel.json(), { error: "unknown_model" });
 
   const missing = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/abort`, authed({ method: "POST" }));
   assert.equal(missing.status, 200);
@@ -444,10 +556,32 @@ test("POST messages：202 起 run、cwd 来自 JSONL、run 帧广播、完成通
   assert.ok(harness.notifications.some((n) => n.title === "Claude 已完成" && n.body === "web turn"));
 });
 
+test("POST messages：picker 末项和内置别名均传入 fake SDK", async (t) => {
+  const sink = new FrameSink(harness.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  sink.send({ type: "subscribe", sessionId: SESSION_ID });
+  await delay(30);
+
+  for (const model of ["provider-24/shared-model", "sonnet"]) {
+    const res = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed({
+      method: "POST", body: JSON.stringify({ text: "selected model turn", model }),
+    }));
+    assert.equal(res.status, 202);
+    const { runId } = (await res.json()) as { runId: string };
+    const sdkOptions = harness.sdk.params?.options as Record<string, unknown> | undefined;
+    assert.equal(sdkOptions?.model, model);
+    assert.equal(sdkOptions?.resume, SESSION_ID);
+    harness.sdk.finish();
+    await sink.waitFor((frame) => frame.type === "run" && frame.state === "done" && frame.runId === runId);
+    assert.equal(harness.tracker.getStatus(SESSION_ID), "idle");
+  }
+});
+
 test("POST sessions：显式 UUID、模型覆盖、JSONL 延迟出现后 resync、abort 幂等", async (t) => {
   const res = await fetch(`${harness.base}/api/sessions`, authed({
     method: "POST",
-    body: JSON.stringify({ cwd: SESSION_CWD, text: "new mobile chat", model: "fable" }),
+    body: JSON.stringify({ cwd: SESSION_CWD, text: "new mobile chat", model: PICKER_MODELS[24]?.model }),
   }));
   assert.equal(res.status, 202);
   const created = (await res.json()) as { sessionId: string; runId: string };
@@ -457,7 +591,7 @@ test("POST sessions：显式 UUID、模型覆盖、JSONL 延迟出现后 resync�
   const sdkOptions = harness.sdk.params?.options as Record<string, unknown> | undefined;
   assert.equal(sdkOptions?.cwd, SESSION_CWD);
   assert.equal(sdkOptions?.sessionId, created.sessionId);
-  assert.equal(sdkOptions?.model, "fable");
+  assert.equal(sdkOptions?.model, PICKER_MODELS[24]?.model);
   assert.equal(Object.hasOwn(sdkOptions ?? {}, "resume"), false);
 
   const sink = new FrameSink(harness.wsUrl());
@@ -485,6 +619,26 @@ test("POST sessions：显式 UUID、模型覆盖、JSONL 延迟出现后 resync�
   const duplicate = await fetch(`${harness.base}/api/sessions/${created.sessionId}/abort`, authed({ method: "POST" }));
   assert.equal(duplicate.status, 200);
   assert.deepEqual(await duplicate.json(), { runId: null, status: "idle" });
+});
+
+test("POST sessions：未选择模型时省略 SDK model 参数", async (t) => {
+  const sink = new FrameSink(harness.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+
+  const res = await fetch(`${harness.base}/api/sessions`, authed({
+    method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, text: "follow Mac default" }),
+  }));
+  assert.equal(res.status, 202);
+  const { sessionId, runId } = (await res.json()) as { sessionId: string; runId: string };
+  const sdkOptions = harness.sdk.params?.options as Record<string, unknown> | undefined;
+  assert.equal(sdkOptions?.sessionId, sessionId);
+  assert.equal(Object.hasOwn(sdkOptions ?? {}, "model"), false);
+
+  sink.send({ type: "subscribe", sessionId });
+  await delay(30);
+  harness.sdk.finish();
+  await sink.waitFor((frame) => frame.type === "run" && frame.state === "done" && frame.runId === runId);
 });
 
 test("审批闭环：approval 帧广播 → HTTP 决议 200 → resolved 帧；重复决议 409；未知 404", async (t) => {

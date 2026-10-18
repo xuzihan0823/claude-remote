@@ -244,7 +244,11 @@ export function ChatScreen({ route }) {
       <ConversationHeader
         title={title}
         newChat
+        onNewChat={() => navigation.popTo('Home', { fromCwd: meta?.cwd || sessionCache.get(sessionId)?.cwd || '', nonce: Date.now() })}
         details={`${meta?.cwd || ''}\n${sessionId}`}
+        mode={mode}
+        onModeChange={(m) => { setMode(m); setSessionMode(sessionId, m); }}
+        showModeSelector
         subtitle={<View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: 4, marginTop: 4 }}>
           <StatusBadge status={status} />
           {mode === 'bypassPermissions' ? <Text style={{ color: colors.danger, fontSize: 11 }}>Bypass</Text> : null}

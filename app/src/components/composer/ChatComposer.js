@@ -12,8 +12,6 @@ import { ComposerCard } from './ComposerCard.js';
 import { AttachmentChips } from './AttachmentChips.js';
 import { AttachmentPicker } from './AttachmentPicker.js';
 import { ModelPicker } from './ModelPicker.js';
-import { ModePill } from './ModePill.js';
-import { ModeSheet } from './ModeSheet.js';
 
 // 聊天 composer（发送/停止/附件/模型 pill/模式 pill/bypass 确认）。
 // 契约（不得更改）：props { sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped }
@@ -29,7 +27,6 @@ export function ChatComposer({
   const [files, setFiles] = useState([]);
   const [sendBusy, setSendBusy] = useState(false);
   const [modelOverride, setModelOverride] = useState('');
-  const [modeOpen, setModeOpen] = useState(false);
   const [inputH, setInputH] = useState(36);
   const lastH = useRef(36);
 
@@ -163,7 +160,7 @@ export function ChatComposer({
         <ComposerActions
           attachment={<AttachmentPicker disabled={!canSend} onPicked={(items) => setFiles((xs) => [...xs, ...items])} />}
           model={<ModelPicker value={modelOverride} onChange={setModelOverride} catalog={catalog} />}
-          mode={<ModePill mode={mode} onOpen={() => setModeOpen(true)} />}
+          mode={null}
           action={isRunning ? (
             <TouchableOpacity
               onPress={stopRun}
@@ -197,12 +194,6 @@ export function ChatComposer({
         />
       </ComposerCard>
       </View>
-      <ModeSheet
-        open={modeOpen}
-        mode={mode}
-        onSelect={(m) => { onModeChange?.(m); setModeOpen(false); }}
-        onClose={() => setModeOpen(false)}
-      />
     </KeyboardAvoidingView>
   );
 }

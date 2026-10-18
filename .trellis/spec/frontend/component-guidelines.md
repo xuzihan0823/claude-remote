@@ -76,4 +76,6 @@ Questions to answer:
   substitute.
 - Expo SDK 57 native modules require CocoaPods sync and a native rebuild.
   `NODE_PATH="$PWD/node_modules" npx expo export --platform ios` from `app/`
-  validates the Hermes bundle with the repository's monorepo Metro root.
+  validates the Hermes bundle with the repository's monorepo Metro root. Set
+  `NODE_PATH` to `app/node_modules`, where React Native is installed, rather than
+  the repository root's `node_modules`.

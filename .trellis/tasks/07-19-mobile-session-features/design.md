@@ -19,10 +19,18 @@ projections and must not parse settings JSON or transcript records itself.
 
 ## Backend And SDK
 
-- Add a small model-config reader next to daemon configuration. It reads the
-  selected model and safe alias/model metadata from the Mac-side settings source
-  and returns a redacted catalog. Missing or malformed settings fall back to the
-  SDK/CLI default rather than preventing daemon startup.
+- The model-config reader consumes `modelPicker.options` from the selected Mac
+  settings file. Valid trimmed `model` values become both `id` and `alias` for
+  existing client compatibility. A trimmed non-empty `label` becomes
+  `displayName`, otherwise use the existing ID-derived name. Preserve first
+  occurrence order, deduplicate by full ID, and project only those three fields.
+- If valid picker options exist, show those options rather than appending the
+  four legacy alias rows. Resolve the default through its configured alias
+  mapping when applicable, and include a valid default absent from the picker.
+  Keep built-in aliases accepted by the shared model validation helper.
+- If no valid picker options exist, preserve the legacy four-alias catalog and
+  optional default. Missing/malformed settings must not prevent startup. Re-read
+  settings on catalog requests; do not mutate Mac settings or client UI.
 - Extend `StartQueryOptions` and `startSdkQuery` with optional `model` and
   `sessionId`; pass them to the SDK only when present. Keep `resume` and
   `sessionId` mutually exclusive for new sessions.
@@ -62,6 +70,14 @@ All API inputs are validated at the HTTP boundary. Errors use the existing
 - Replace the inline `Spark` path with a shared twelve-ray polygon/path. Keep
   `web/icons/*` and the synced `ios/App/App/public` assets consistent, then
   regenerate the iOS app icon without alpha.
+
+## Native Project Conversations (2026-10-18)
+
+`GET /api/projects` returns `{ projects: [{ id, name, cwd, cwds, sessionCount, lastActiveAt }], totalSessions, unclassifiedCount }`. IDs are full repository-root paths for Git workspaces (resolve the common Git directory using bounded, argument-based Git execution); otherwise the original full cwd. Only cwd values present in indexed transcripts are exposed as runnable `cwds`; `cwd` is the most recently active known workspace, not necessarily the repository root.
+
+`GET /api/sessions` accepts optional `projectId` and `cwd`, with empty `projectId` selecting missing-cwd sessions. Project filtering uses the same projection as the catalog and runs before offset/limit; unknown IDs return an empty page. Existing requests and response fields remain compatible. `POST /api/sessions` continues receiving the original known cwd.
+
+The native app owns a project context shared by drawer and Home. Drawer selection is a browsing filter; Home target is an explicit cwd. Selecting a project updates its default target, while opening/new-from a conversation supplies its real cwd. ProjectPicker reuses the existing bottom-sheet interaction, with workspace choices for grouped worktrees. The catalog refreshes on reconnect/foreground and session activity; async results are guarded against stale connection/filter responses. Paginated lists deduplicate by sessionId. Local preferences are scoped by the normalized daemon base URL; token changes reset in-memory state. Tokens are only part of the in-memory mount identity, never persisted in preference keys.
 
 ## Compatibility And Rollback
 
