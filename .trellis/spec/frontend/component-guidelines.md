@@ -66,6 +66,11 @@ Questions to answer:
 - `GlassSurface({ children, style, interactive })` owns Liquid Glass capability
   checks and the Reduce Transparency subscription. Do not apply animated opacity
   to the glass or its parents; disabled appearance belongs to individual controls.
+- `GlassMenu({ visible, anchor, items, onClose })` is the anchored Liquid Glass
+  dropdown (header ⋯ menu). `anchor` comes from `measureInWindow` on the trigger.
+  It animates only `scale`/`translateY` on the glass container; opacity fades
+  apply to the inner content layer. Item `onPress` runs after the menu Modal is
+  dismissed so follow-up `Alert` / BottomSheet presentations are not hidden.
 - Use the shared SVG `Icon` for controls and `Spark` for branding. Actions must
   have a label, button role, and at least a 44pt touch area.
 - `ComposerActions` uses two rows below 360pt or above font scale 1.3. Long model
