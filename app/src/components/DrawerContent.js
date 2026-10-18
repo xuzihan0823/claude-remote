@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, AppState, FlatList, Pressable, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { connHost, fetchSessions } from '../../../web/core/api.js';
+import { fetchSessions } from '../../../web/core/api.js';
 import { useBus } from '../../../web/core/bus.js';
 import { ws } from '../../../web/core/ws.js';
 import { useTheme } from '../theme.js';
@@ -12,7 +12,7 @@ import { cwdTail, relTime, statusColor } from '../lib/format.js';
 
 // 侧栏抽屉：顶部品牌 + 液态玻璃刷新按钮，中部最近对话列表，底部悬浮液态玻璃操作栏（左侧设置与连接状态 + 右侧新对话胶囊按钮）。
 export function DrawerContent({ navigation }) {
-  const { colors, dark, fonts } = useTheme();
+  const { colors, fonts } = useTheme();
   const insets = useSafeAreaInsets();
   const [data, setData] = useState({ sessions: [], total: 0 });
   const [loading, setLoading] = useState(true);
@@ -92,7 +92,7 @@ export function DrawerContent({ navigation }) {
   };
 
   return (
-    <View style={{ flex: 1, backgroundColor: colors.bg2, paddingTop: insets.top + 8 }}>
+    <View style={{ flex: 1, backgroundColor: colors.bg, paddingTop: insets.top + 8 }}>
       {/* 品牌与液态玻璃刷新按钮 */}
       <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingBottom: 10 }}>
         <Spark size={20} />
@@ -183,7 +183,7 @@ export function DrawerContent({ navigation }) {
           <Pressable
             onPress={goSettings}
             accessibilityRole="button"
-            accessibilityLabel={`设置，当前连接 ${connHost()}`}
+            accessibilityLabel="设置"
             style={({ pressed }) => ({
               height: 50,
               borderRadius: 25,
@@ -195,46 +195,36 @@ export function DrawerContent({ navigation }) {
             })}
           >
             <Icon name="settings" size={19} color={colors.ink} />
-            <View style={{ flex: 1, minWidth: 0 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Text style={{ color: colors.inkStrong, fontSize: 14, fontWeight: '600' }}>
-                  设置
-                </Text>
-                <View style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: connDotColor }} />
-              </View>
-              <Text
-                numberOfLines={1}
-                ellipsizeMode="middle"
-                style={{ color: colors.ink2, fontFamily: fonts.mono, fontSize: 10.5, marginTop: 1 }}
-              >
-                {connHost()}
+            <View style={{ flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={{ color: colors.inkStrong, fontSize: 14, fontWeight: '600' }}>
+                设置
               </Text>
+              <View style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: connDotColor }} />
             </View>
           </Pressable>
         </GlassSurface>
 
-        <GlassSurface interactive variant="accent" style={{ borderRadius: 25 }}>
-          <Pressable
-            onPress={goNew}
-            accessibilityRole="button"
-            accessibilityLabel="新对话"
-            style={({ pressed }) => ({
-              height: 50,
-              borderRadius: 25,
-              paddingHorizontal: 16,
-              flexDirection: 'row',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 6,
-              backgroundColor: pressed ? colors.glassPressed : 'transparent',
-            })}
-          >
-            <Icon name="plus" size={18} strokeWidth={2.1} color={dark ? colors.accent : colors.accentDeep} />
-            <Text style={{ color: dark ? colors.inkStrong : colors.accentDeep, fontSize: 15, fontWeight: '600' }}>
-              新对话
-            </Text>
-          </Pressable>
-        </GlassSurface>
+        <Pressable
+          onPress={goNew}
+          accessibilityRole="button"
+          accessibilityLabel="新对话"
+          style={({ pressed }) => ({
+            height: 50,
+            borderRadius: 25,
+            borderCurve: 'continuous',
+            paddingHorizontal: 16,
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            backgroundColor: pressed ? '#242424' : '#000000',
+          })}
+        >
+          <Icon name="plus" size={18} strokeWidth={2.1} color="#FFFFFF" />
+          <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '600' }}>
+            新对话
+          </Text>
+        </Pressable>
       </View>
     </View>
   );

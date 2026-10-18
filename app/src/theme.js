@@ -3,7 +3,7 @@ import { useColorScheme } from 'react-native';
 
 export const palettes = {
   light: {
-    bg: '#F5F4EF',
+    bg: '#FAF9F6',
     bg2: '#EDEADE',
     card: '#FFFFFF',
     cardHover: '#F7F6F1',
