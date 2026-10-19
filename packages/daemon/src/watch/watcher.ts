@@ -134,7 +134,7 @@ export class SessionWatcher extends EventEmitter {
 
   readonly #sessions = new Map<string, SessionState>();
   readonly #dirWatchers = new Map<string, DirWatchEntry>();
-  readonly #pendingWatch = new Set<string>();
+  readonly #pendingWatch = new Map<string, Promise<void>>();
   #tickHandle: unknown;
   #closed = false;
 
@@ -184,30 +184,37 @@ export class SessionWatcher extends EventEmitter {
    */
   async watch(sessionId: string): Promise<void> {
     if (this.#closed) throw new Error("watcher closed");
-    if (this.#sessions.has(sessionId) || this.#pendingWatch.has(sessionId)) return;
-    this.#pendingWatch.add(sessionId);
-    try {
-      const file = await this.#resolveFile(sessionId);
-      const dir = join(file, "..");
-      const init = await scanExisting(file);
-      if (this.#closed || this.#sessions.has(sessionId)) return;
-      const state: SessionState = {
-        sessionId,
-        file,
-        dir,
-        offset: init.offset,
-        lineCount: init.lineCount,
-        remainder: init.remainder,
-        lastUuid: init.lastUuid,
-        polling: false,
-        dirty: false,
-      };
-      this.#sessions.set(sessionId, state);
-      this.#acquireDirWatcher(dir);
-      if (this.#tickHandle === undefined) this.#armTick();
-    } finally {
-      this.#pendingWatch.delete(sessionId);
-    }
+    if (this.#sessions.has(sessionId)) return;
+    const pending = this.#pendingWatch.get(sessionId);
+    if (pending !== undefined) return pending;
+    let tracked: Promise<void>;
+    const init = this.#initialize(sessionId);
+    tracked = init.finally(() => {
+      if (this.#pendingWatch.get(sessionId) === tracked) this.#pendingWatch.delete(sessionId);
+    });
+    this.#pendingWatch.set(sessionId, tracked);
+    await tracked;
+  }
+
+  async #initialize(sessionId: string): Promise<void> {
+    const file = await this.#resolveFile(sessionId);
+    const dir = join(file, "..");
+    const init = await scanExisting(file);
+    if (this.#closed || this.#sessions.has(sessionId)) return;
+    const state: SessionState = {
+      sessionId,
+      file,
+      dir,
+      offset: init.offset,
+      lineCount: init.lineCount,
+      remainder: init.remainder,
+      lastUuid: init.lastUuid,
+      polling: false,
+      dirty: false,
+    };
+    this.#sessions.set(sessionId, state);
+    this.#acquireDirWatcher(dir);
+    if (this.#tickHandle === undefined) this.#armTick();
   }
 
   unwatch(sessionId: string): void {

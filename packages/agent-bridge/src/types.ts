@@ -1,6 +1,6 @@
 export type WorkerEvent =
   | { type: "session"; sessionId: string }
-  | { type: "assistant_delta"; text: string; messageId: string }
+  | { type: "assistant_delta"; text: string; messageId: string; apiMessageId?: string; blockIndex?: number }
   | { type: "assistant"; text: string; messageId: string }
   | { type: "tool_use"; toolUseId: string; toolName: string; input: Record<string, unknown>; messageId: string }
   | { type: "tool_result"; toolUseId: string; content: string; isError: boolean; messageId?: string }

@@ -105,6 +105,27 @@ continue using the same Mac project/session truth.
 - Expose the home directory in the authenticated project catalog, accept it as a creation target, and list it in the target picker as the home-directory option.
 - Keep existing stored or inherited targets unchanged, and continue requiring explicit selection when the catalog is unavailable.
 
+### R9. Reliable sending, live streaming, and chat bubble direction (approved 2026-10-19)
+
+- User messages must always render on the right, including the in-flight state, and must transition to the confirmed state in place without creating a second bubble. Assistant replies remain on the left.
+- Introduce a client-generated `clientMessageId` carried through POST, the runner, and the SDK user-message UUID so the persisted row can be matched exactly. Older clients that omit it keep working via text matching.
+- Sending progress replaces the current left-aligned pending header: `sending`, `accepted`, `failed` (definite rejection, retryable), and `unconfirmed` (ambiguous timeout/5xx, reconciled from history, never auto-resent).
+- Replies must stream as the SDK actually generates them. The daemon forwards partial deltas and a bounded in-memory snapshot on re-subscribe; persisted JSONL remains the final truth and transient items never become a second message store.
+- WebSocket connections need application-level liveness (ping/pong, foreground watchdog, background pause) and an explicit subscribe-ready acknowledgement; initial load, reconnect, and resync all reconcile through the same snapshot path with connection/session/run generation guards.
+- An abort request only affects the run it names; a late stop must not cancel a newer run.
+- New user bubbles animate in with a short, restrained entrance (opacity plus a small upward drift, native driver). History, paging, reconnect, and resync never animate. Reduce Motion disables movement.
+- Desktop Code sees CLI sessions only through its own `/resume` flow; this task does not modify Desktop state, the default working directory, or transcripts.
+
+#### R9 Acceptance
+
+- [ ] Sending a message produces exactly one user bubble on the right, which becomes confirmed in place; no left-aligned pending row remains.
+- [ ] Echo arriving before the POST response, a lost 202, a late error, repeated identical text, and rapid double taps do not duplicate, regress, or drop the bubble.
+- [ ] Assistant text appears incrementally while the turn runs, survives a mid-turn reconnect via snapshot, and is replaced by the persisted row without flicker or duplication.
+- [ ] Empty-store reconnect, history gaps beyond three pages, and resync all reconcile without phantom continuity, and viewing older history is not forcibly scrolled.
+- [ ] A late abort does not affect a subsequent run; terminal frames only settle their own run.
+- [ ] Entrance animation runs once per newly sent message and is suppressed for history, reconnect, and Reduce Motion.
+- [ ] `pnpm test`, `pnpm test:mobile`, `pnpm typecheck`, mock streaming scenarios, and native simulator checks pass without any paid model request.
+
 ## Acceptance Criteria
 
 - [ ] `GET /api/models` (or the agreed equivalent) returns the Mac-backed model

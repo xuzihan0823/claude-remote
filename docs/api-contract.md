@@ -68,15 +68,31 @@
 ### GET /api/sessions/:id/messages?beforeSeq=&limit=100
 消息按 `seq` 升序返回主链消息（`offChain` 行不返回）。`beforeSeq` 缺省 = 从尾部取最新 `limit` 条。
 
-`200 {"messages":[RenderMessage], "firstSeq":12, "hasMore":true}`
+`200 {"messages":[RenderMessage], "firstSeq":12, "hasMore":true, "status":"daemon-driving", "activeRunId":"<uuid|undefined>"}`
+`status`/`activeRunId` 供客户端重建运行状态；`activeRunId` 缺席表示当前无活跃 run。
 会话不存在 → `404 {"error":"session_not_found"}`
 
 ### POST /api/sessions/:id/messages
-Body `{"text":"下一句话"}`。触发 Runner 以 `resume` 续聊。
+Body `{"text":"下一句话", "clientMessageId?":"<uuid>", "model?":"…", "permissionMode?":"…"}`。触发 Runner 以 `resume` 续聊。
 
-- `202 {"runId":"<uuid>"}` — 已开始，后续经 WS `run`/`message` 事件观察
+- `202 {"runId":"<uuid>", "clientMessageId?":"<uuid>"}` — 已开始，后续经 WS `run`/`message`/`stream` 事件观察；`clientMessageId` 会作为 SDK 输入消息的 uuid 落盘，随后可由 `RenderMessage.uuid` 精确确认
 - `409 {"error":"not_idle","status":"terminal-driving"}` — 互斥拒绝
-- `404` 会话不存在；`400` text 空或非字符串
+- `404` 会话不存在；`400` text 空/非字符串、`clientMessageId` 非 UUID
+
+### POST /api/sessions
+Body `{"cwd":"…", "text":"…", "sessionId?":"<uuid>", "clientMessageId?":"<uuid>", "model?":"…", "permissionMode?":"…"}`。
+
+- `202 {"sessionId":"<uuid>", "runId":"<uuid>", "clientMessageId?":"<uuid>"}` — 新建会话并开始首轮
+- 客户端可预分配 `sessionId`（必须是 UUID）；该 ID 已存在时 `409 {"error":"session_exists"}`
+- 省略 `sessionId` 时由 daemon 生成（旧客户端兼容）
+
+### POST /api/sessions/:id/abort
+Body 可选 `{"runId?":"<uuid>"}`。中止该会话当前的 daemon run。
+
+- `200 {"runId":"<uuid>","status":"aborted"}` — 已发出中止
+- `200 {"status":"already_finished"}` — 当前没有活跃 run（幂等）
+- `200 {"runId":"<uuid>","status":"run_mismatch"}` — 请求的 runId 与当前活跃 run 不一致，不执行中止（防止迟到停止误伤新一轮）
+- `404` 会话不存在；`400` runId 非 UUID
 
 ### POST /api/interactions/:id/decision
 Body 三选一：`{"type":"allow_once"}` | `{"type":"deny","message?":"…"}` | `{"type":"answer","answers":{"<question>":"<answer>"}}`
@@ -100,15 +116,22 @@ Body 三选一：`{"type":"allow_once"}` | `{"type":"deny","message?":"…"}` | 
 
 文本帧 JSON。客户端断线自行指数退避重连，重连后重新 subscribe 并用 `GET messages` 补缺口（以 `seq` 去重）。
 
+存活检测：服务端仍保留协议层 ping（30s），但 JS 客户端看不到；客户端前台每 10s 发 `{"type":"ping"}`，5s 无 pong 且期间无任何帧则重连。旧 daemon 不回 pong 时，只要仍在收到数据帧即视为存活。订阅以 `subscribed` 帧为“就绪”信号；客户端在该帧到前缓存 live 帧，到后拉取快照合并。
+
 ### client → server
 ```jsonc
 {"type":"subscribe","sessionId":"…"}    // 可多会话；列表页可订阅 "*" 仅收 status/approval
 {"type":"unsubscribe","sessionId":"…"}
+{"type":"ping"}                          // 应用层心跳；服务端不要求 sessionId
 ```
 
 ### server → client
 ```jsonc
+{"type":"subscribed","sessionId":"…"}   // watcher 已就绪（或 "*" 订阅已登记）；客户端收到后做快照同步
+{"type":"pong"}                          // 对 {"type":"ping"} 的回应
 {"type":"message","sessionId":"…","message":RenderMessage}          // watcher 增量（含 daemon 自跑轮次落盘的行）
+{"type":"stream","sessionId":"…","runId":"…","messageId":"<API message id>","blockIndex":0,"text":"增量"}  // 真实流式文本；非持久，最终以 message 为准
+{"type":"stream_snapshot","sessionId":"…","runId":"…","blocks":[{"messageId":"…","blockIndex":0,"text":"已生成文本"}]}  // 订阅/重连时恢复当前 run 已生成前缀
 {"type":"resync","sessionId":"…"}   // daemon 侧链视图失效（终端 rewind/fork、文件截断）；客户端清空本地列表并重新 GET messages
 {"type":"status","sessionId":"…","status":"idle|terminal-driving|daemon-driving"}
 {"type":"run","sessionId":"…","runId":"…","state":"started|done|error","error?":"…"}
@@ -136,9 +159,12 @@ Body 三选一：`{"type":"allow_once"}` | `{"type":"deny","message?":"…"}` | 
   "toolName?": "Bash", "toolInput?": {…}, "toolUseId?": "…",
   "isError?": false,                    // tool_result
   "timestamp?": "2026-07-18T08:30:28.132Z",
-  "rawType?": "file-history-snapshot"   // kind=meta 时保留原始 type 供折叠展示
+  "rawType?": "file-history-snapshot",  // kind=meta 时保留原始 type 供折叠展示
+  "apiMessageId?": "msg_…"              // 仅 assistant 行：JSONL 行内 message.id，用于与流式增量对账
 }
 ```
+
+`uuid` 对用户消息等于提交时的 `clientMessageId`（旧客户端提交的消息为 CLI 生成的 UUID）。客户端以 `role=user && kind=text && uuid === clientMessageId` 精确确认本地待发气泡。
 
 映射规则：
 - user 行 content 为字符串或 blocks；text block → `kind:text`；tool_result block → `kind:tool_result`（role 保持 user）。剥离 `<local-command-caveat>…</local-command-caveat>` 等包裹标签后为空的行不返回。

@@ -46,6 +46,8 @@ export interface RenderMessage {
   timestamp?: string;
   /** kind=meta 时保留原始行 type 供折叠展示。 */
   rawType?: string;
+  /** 仅 assistant 行：JSONL 行内 message.id（API 消息 ID），用于流式增量与落盘行对账。 */
+  apiMessageId?: string;
 }
 
 /** readTail / readBefore 的返回。messages 按 seq 升序，只含主链。 */

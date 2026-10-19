@@ -250,7 +250,7 @@ export class DaemonServer {
 
     const abortMatch = /^\/api\/sessions\/([^/]+)\/abort$/.exec(path);
     if (abortMatch !== null && method === "POST") {
-      this.#handleAbort(res, decodeURIComponent(abortMatch[1] ?? ""));
+      await this.#handleAbort(req, res, decodeURIComponent(abortMatch[1] ?? ""));
       return;
     }
 
@@ -352,6 +352,16 @@ export class DaemonServer {
     return model;
   }
 
+  /** 校验可选的 clientMessageId；省略 -> undefined，非 UUID -> 400 false。 */
+  #validateClientMessageId(res: ServerResponse, value: unknown): string | undefined | false {
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || !isUuid(value)) {
+      this.#json(res, 400, { error: "invalid_client_message_id" });
+      return false;
+    }
+    return value;
+  }
+
   /** 校验 permissionMode 白名单；省略 -> undefined，非法 -> 400 false。 */
   #validatePermissionMode(res: ServerResponse, value: unknown): PermissionMode | undefined | false {
     if (value === undefined) return undefined;
@@ -383,8 +393,31 @@ export class DaemonServer {
     if (model === false) return;
     const permissionMode = this.#validatePermissionMode(res, permModeValue);
     if (permissionMode === false) return;
+    const clientMessageId = this.#validateClientMessageId(res, (body as { clientMessageId?: unknown }).clientMessageId);
+    if (clientMessageId === false) return;
+    const requestedSessionId = (body as { sessionId?: unknown }).sessionId;
+    if (requestedSessionId !== undefined && (typeof requestedSessionId !== "string" || !isUuid(requestedSessionId))) {
+      this.#json(res, 400, { error: "invalid_session_id" });
+      return;
+    }
 
-    const sessionId = randomUUID();
+    let sessionId: string;
+    if (requestedSessionId === undefined) {
+      sessionId = randomUUID();
+    } else {
+      sessionId = requestedSessionId;
+      if (this.#newSessions.has(sessionId)) {
+        this.#json(res, 409, { error: "session_exists" });
+        return;
+      }
+      try {
+        await resolveSessionFile(this.#options.config.projectsDir, sessionId);
+        this.#json(res, 409, { error: "session_exists" });
+        return;
+      } catch (error) {
+        if (!isEnoent(error)) throw error;
+      }
+    }
     let handle: TurnHandle;
     try {
       handle = this.#options.runner.startTurn({
@@ -394,6 +427,7 @@ export class DaemonServer {
         newSession: true,
         ...(model === undefined ? {} : { model }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
+        ...(clientMessageId === undefined ? {} : { clientMessageId }),
       });
     } catch (error) {
       if (error instanceof NotIdleError) {
@@ -409,17 +443,32 @@ export class DaemonServer {
     this.#newSessions.add(sessionId);
     this.#activeRuns.set(handle.runId, handle);
     void this.#pumpRun(sessionId, textValue, handle);
-    this.#json(res, 202, { sessionId, runId: handle.runId });
+    this.#json(res, 202, {
+      sessionId,
+      runId: handle.runId,
+      ...(clientMessageId === undefined ? {} : { clientMessageId }),
+    });
   }
 
-  #handleAbort(res: ServerResponse, sessionId: string): void {
+  async #handleAbort(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
     if (!isUuid(sessionId)) {
       this.#json(res, 400, { error: "invalid_session_id" });
       return;
     }
+    const body = await this.#readJsonBody(req, res, true);
+    if (body === undefined) return;
+    const requestedRunId = (body as { runId?: unknown }).runId;
+    if (requestedRunId !== undefined && (typeof requestedRunId !== "string" || !isUuid(requestedRunId))) {
+      this.#json(res, 400, { error: "invalid_run_id" });
+      return;
+    }
     const runId = this.#options.runner.activeRunId(sessionId);
     if (runId === undefined) {
-      this.#json(res, 200, { runId: null, status: "idle" });
+      this.#json(res, 200, { status: "already_finished" });
+      return;
+    }
+    if (requestedRunId !== undefined && requestedRunId !== runId) {
+      this.#json(res, 200, { runId, status: "run_mismatch" });
       return;
     }
     this.#options.runner.abort(runId);
@@ -446,7 +495,13 @@ export class DaemonServer {
     }
     try {
       const page = beforeSeq === undefined ? await readTail(file, limit) : await readBefore(file, beforeSeq, limit);
-      this.#json(res, 200, { messages: page.messages, firstSeq: page.firstSeq, hasMore: page.hasMore });
+      this.#json(res, 200, {
+        messages: page.messages,
+        firstSeq: page.firstSeq,
+        hasMore: page.hasMore,
+        status: this.#options.tracker.getStatus(sessionId),
+        activeRunId: this.#options.runner.activeRunId(sessionId),
+      });
     } catch (error) {
       if (isEnoent(error)) {
         this.#json(res, 404, { error: "session_not_found" });
@@ -468,6 +523,8 @@ export class DaemonServer {
     if (model === false) return;
     const permissionMode = this.#validatePermissionMode(res, (body as { permissionMode?: unknown }).permissionMode);
     if (permissionMode === false) return;
+    const clientMessageId = this.#validateClientMessageId(res, (body as { clientMessageId?: unknown }).clientMessageId);
+    if (clientMessageId === false) return;
     let file: string;
     try {
       file = await resolveSessionFile(this.#options.config.projectsDir, sessionId);
@@ -487,6 +544,7 @@ export class DaemonServer {
         text,
         ...(model === undefined ? {} : { model }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
+        ...(clientMessageId === undefined ? {} : { clientMessageId }),
       });
     } catch (error) {
       if (error instanceof NotIdleError) {
@@ -501,7 +559,7 @@ export class DaemonServer {
     }
     this.#activeRuns.set(handle.runId, handle);
     void this.#pumpRun(sessionId, text, handle);
-    this.#json(res, 202, { runId: handle.runId });
+    this.#json(res, 202, { runId: handle.runId, ...(clientMessageId === undefined ? {} : { clientMessageId }) });
   }
 
   /** 消费 run 事件流：run 帧 → 订阅者；终态 → notifier。message 帧走 watcher，不在此转发。 */
@@ -511,6 +569,16 @@ export class DaemonServer {
         if (event.type === "worker") {
           if (this.#newSessions.has(sessionId) && event.event.type === "session") {
             void this.#activateNewSessionWatch(sessionId);
+          }
+          if (event.event.type === "assistant_delta") {
+            this.#broadcastToSubscribers(sessionId, {
+              type: "stream",
+              sessionId,
+              runId: event.runId,
+              messageId: event.event.apiMessageId ?? event.event.messageId,
+              blockIndex: event.event.blockIndex ?? 0,
+              text: event.event.text,
+            });
           }
           continue;
         }
@@ -599,7 +667,7 @@ export class DaemonServer {
     }
   }
 
-  async #readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<unknown | undefined> {
+  async #readJsonBody(req: IncomingMessage, res: ServerResponse, allowEmpty = false): Promise<unknown | undefined> {
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const chunk of req) {
@@ -611,6 +679,7 @@ export class DaemonServer {
       chunks.push(chunk as Buffer);
     }
     if (chunks.length === 0) {
+      if (allowEmpty) return {};
       this.#json(res, 400, { error: "invalid_json" });
       return undefined;
     }
@@ -677,7 +746,7 @@ export class DaemonServer {
       state.alive = true;
     });
     ws.on("message", (data) => {
-      void this.#onClientFrame(state, data.toString());
+      void this.#onClientFrame(ws, state, data.toString());
     });
     ws.on("close", () => {
       this.#clients.delete(ws);
@@ -686,7 +755,7 @@ export class DaemonServer {
     ws.on("error", () => ws.terminate());
   }
 
-  async #onClientFrame(state: ClientState, raw: string): Promise<void> {
+  async #onClientFrame(ws: WebSocket, state: ClientState, raw: string): Promise<void> {
     let frame: unknown;
     try {
       frame = JSON.parse(raw);
@@ -695,6 +764,10 @@ export class DaemonServer {
     }
     if (typeof frame !== "object" || frame === null) return;
     const { type, sessionId } = frame as { type?: unknown; sessionId?: unknown };
+    if (type === "ping") {
+      this.#send(ws, { type: "pong" });
+      return;
+    }
     if (typeof sessionId !== "string" || sessionId === "") return;
 
     if (type === "subscribe") {
@@ -709,12 +782,27 @@ export class DaemonServer {
             void this.#activateNewSessionWatch(sessionId);
             return;
           }
-          if (isEnoent(error)) return; // 未知会话：静默忽略（HTTP 侧已 404）
+          if (isEnoent(error)) {
+            this.#send(ws, { type: "subscribed", sessionId, ok: false });
+            return;
+          }
           console.warn(`watch(${sessionId}) failed:`, error);
           return;
         }
       }
       state.subs.add(sessionId);
+      this.#send(ws, { type: "subscribed", sessionId });
+      if (sessionId !== "*") {
+        const runId = this.#options.runner.activeRunId(sessionId);
+        if (runId !== undefined) {
+          this.#send(ws, {
+            type: "stream_snapshot",
+            sessionId,
+            runId,
+            blocks: this.#options.runner.streamSnapshot(sessionId) ?? [],
+          });
+        }
+      }
       return;
     }
     if (type === "unsubscribe") {
@@ -742,7 +830,10 @@ export class DaemonServer {
       const retry = this.#watchRetryTimers.get(sessionId);
       if (retry !== undefined) clearTimeout(retry);
       this.#watchRetryTimers.delete(sessionId);
-      if (refs > 0) this.#broadcastToSubscribers(sessionId, { type: "resync", sessionId });
+      if (refs > 0) {
+        this.#broadcastToSubscribers(sessionId, { type: "subscribed", sessionId });
+        this.#broadcastToSubscribers(sessionId, { type: "resync", sessionId });
+      }
     } catch (error) {
       if (isEnoent(error)) this.#scheduleNewSessionWatchRetry(sessionId);
       else console.warn(`watch(${sessionId}) failed:`, error);
@@ -833,6 +924,11 @@ export class DaemonServer {
       ws.send(payload);
     }
   }
+
+  #send(ws: WebSocket, frame: unknown): void {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify(frame));
+  }
 }
 
 function clampInt(raw: string | null, fallback: number, min: number, max: number): number {
@@ -848,5 +944,5 @@ function snippet(text: string): string {
 }
 
 function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }

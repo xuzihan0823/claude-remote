@@ -56,6 +56,67 @@ test("assistant blocks split into thinking/text/tool_use with stable blockIndex"
   assert.equal(line2.every((m) => m.role === "assistant"), true);
 });
 
+test("assistant message.id is projected as apiMessageId on every block", () => {
+  const line = {
+    type: "assistant",
+    uuid: "a-api",
+    parentUuid: "u1",
+    message: {
+      id: "msg_01ABCdef",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "先确认目录。" },
+        { type: "text", text: "我看一下当前目录。" },
+        { type: "tool_use", id: "tu-9", name: "Bash", input: { command: "pwd" } },
+      ],
+    },
+  };
+  const blocks = parseTranscriptLine(JSON.stringify(line), 1);
+  assert.deepEqual(blocks.map((m) => m.blockIndex), [0, 1, 2]);
+  assert.deepEqual(blocks.map((m) => m.apiMessageId), [
+    "msg_01ABCdef",
+    "msg_01ABCdef",
+    "msg_01ABCdef",
+  ]);
+});
+
+test("assistant line without message.id omits apiMessageId and leaves user rows unchanged", () => {
+  const assistant = {
+    type: "assistant",
+    uuid: "a-no-api",
+    parentUuid: "u1",
+    message: { role: "assistant", content: [{ type: "text", text: "没有消息 ID。" }] },
+  };
+  const blocks = parseTranscriptLine(JSON.stringify(assistant), 2);
+  assert.equal(blocks.length, 1);
+  assert.equal("apiMessageId" in blocks[0]!, false);
+
+  const user = {
+    type: "user",
+    uuid: "u-api",
+    parentUuid: null,
+    message: { id: "msg_user_ignored", role: "user", content: "用户消息" },
+  };
+  const userMessages = parseTranscriptLine(JSON.stringify(user), 3);
+  assert.equal(userMessages.length, 1);
+  assert.equal(userMessages[0]?.role, "user");
+  assert.equal(userMessages[0]?.text, "用户消息");
+  assert.equal("apiMessageId" in userMessages[0]!, false);
+});
+
+test("assistant empty-string message.id is not projected", () => {
+  const line = {
+    type: "assistant",
+    uuid: "a-empty-api",
+    parentUuid: "u1",
+    message: { id: "", role: "assistant", content: "正文" },
+  };
+  const blocks = parseTranscriptLine(JSON.stringify(line), 4);
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0]?.text, "正文");
+  assert.equal("apiMessageId" in blocks[0]!, false);
+});
+
 test("user tool_result blocks keep role user and carry isError", async () => {
   const page = await readTail(toolsFile, 100);
   const line3 = page.messages.filter((m) => m.seq === 3);

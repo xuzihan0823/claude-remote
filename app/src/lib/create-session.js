@@ -1,6 +1,6 @@
 import { api, ApiError, baseUrl, token } from '../../../web/core/api.js';
 
-export async function createSession({ cwd, text, model, mode, files }) {
+export async function createSession({ cwd, text, model, mode, files, sessionId, clientMessageId }) {
   const requestBase = baseUrl;
   const requestToken = token;
   const checkConnection = () => {
@@ -20,7 +20,14 @@ export async function createSession({ cwd, text, model, mode, files }) {
     text = `${text}\n\n[手机端上传的附件，已保存在本机，可直接读取]\n${uploaded.map((p) => `- ${p}`).join('\n')}`;
   }
   checkConnection();
-  const body = { cwd, text, ...(model ? { model } : {}), ...(mode !== 'default' ? { permissionMode: mode } : {}) };
+  const body = {
+    cwd,
+    text,
+    ...(sessionId ? { sessionId } : {}),
+    ...(clientMessageId ? { clientMessageId } : {}),
+    ...(model ? { model } : {}),
+    ...(mode !== 'default' ? { permissionMode: mode } : {}),
+  };
   const result = await api('/api/sessions', { method: 'POST', body: JSON.stringify(body) });
   checkConnection();
   return { result, body };

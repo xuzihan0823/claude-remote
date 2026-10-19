@@ -22,7 +22,7 @@ import type { ProjectCatalog } from "../src/transcript/projects.js";
 import type { SessionSummary } from "../src/transcript/types.js";
 import { projectWorkspaces } from "./fixtures/project-workspaces.js";
 
-const SESSION_ID = "11111111-2222-3333-4444-555555555555";
+const SESSION_ID = "11111111-2222-3333-8444-555555555555";
 const SESSION_CWD = "/tmp/claude-remote-it";
 const TOKEN = "it-token";
 const PICKER_MODELS = Array.from({ length: 25 }, (_, index) => ({
@@ -55,12 +55,14 @@ type SdkQuery = ReturnType<QueryFactory>;
 interface FakeSdk {
   factory: QueryFactory;
   params: QueryParams | undefined;
+  /** 下一轮 SDK 消息流在默认 assistant 消息前先产出的脚本帧。 */
+  script: unknown[];
   /** resolve 后 SDK 消息流结束（run → done）。 */
   finish: () => void;
 }
 
 function fakeSdk(): FakeSdk {
-  const holder: FakeSdk = { factory: undefined as never, params: undefined, finish: () => {} };
+  const holder: FakeSdk = { factory: undefined as never, params: undefined, script: [], finish: () => {} };
   holder.factory = ((params: QueryParams): SdkQuery => {
     holder.params = params;
     let release: () => void = () => {};
@@ -69,6 +71,7 @@ function fakeSdk(): FakeSdk {
     });
     holder.finish = release;
     const generator = (async function* () {
+      for (const message of holder.script) yield message as never;
       yield {
         type: "assistant", uuid: "sdk-a1", session_id: SESSION_ID,
         message: { content: [{ type: "text", text: "done text" }] },
@@ -463,7 +466,7 @@ test("新会话/模型输入校验：未知 cwd、未知模型拒绝；abort 对
 
   const missing = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/abort`, authed({ method: "POST" }));
   assert.equal(missing.status, 200);
-  assert.deepEqual(await missing.json(), { runId: null, status: "idle" });
+  assert.deepEqual(await missing.json(), { status: "already_finished" });
 
   const malformed = await fetch(`${harness.base}/api/sessions/not-a-uuid/abort`, authed({ method: "POST" }));
   assert.equal(malformed.status, 400);
@@ -627,7 +630,7 @@ test("POST sessions：显式 UUID、模型覆盖、JSONL 延迟出现后 resync�
   }
   const duplicate = await fetch(`${harness.base}/api/sessions/${created.sessionId}/abort`, authed({ method: "POST" }));
   assert.equal(duplicate.status, 200);
-  assert.deepEqual(await duplicate.json(), { runId: null, status: "idle" });
+  assert.deepEqual(await duplicate.json(), { status: "already_finished" });
 });
 
 test("POST sessions：未选择模型时省略 SDK model 参数", async (t) => {
@@ -648,6 +651,235 @@ test("POST sessions：未选择模型时省略 SDK model 参数", async (t) => {
   await delay(30);
   harness.sdk.finish();
   await sink.waitFor((frame) => frame.type === "run" && frame.state === "done" && frame.runId === runId);
+});
+
+test("POST messages：clientMessageId 回显并写入 SDK 输入消息 uuid；非法值 400", async (t) => {
+  const invalid = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed({
+    method: "POST", body: JSON.stringify({ text: "bad id", clientMessageId: "not-a-uuid" }),
+  }));
+  assert.equal(invalid.status, 400);
+  assert.deepEqual(await invalid.json(), { error: "invalid_client_message_id" });
+  const nonString = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed({
+    method: "POST", body: JSON.stringify({ text: "bad id", clientMessageId: 42 }),
+  }));
+  assert.equal(nonString.status, 400);
+  assert.deepEqual(await nonString.json(), { error: "invalid_client_message_id" });
+
+  const sink = new FrameSink(harness.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  sink.send({ type: "subscribe", sessionId: SESSION_ID });
+  await sink.waitFor((frame) => frame.type === "subscribed" && frame.sessionId === SESSION_ID);
+
+  const clientMessageId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const res = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed({
+    method: "POST", body: JSON.stringify({ text: "reliable turn", clientMessageId }),
+  }));
+  assert.equal(res.status, 202);
+  const body = (await res.json()) as { runId: string; clientMessageId?: string };
+  assert.equal(body.clientMessageId, clientMessageId);
+  assert.ok(body.runId.length > 0);
+
+  const prompt = harness.sdk.params?.prompt as AsyncIterable<{ uuid?: string; message: { content: string } }>;
+  const first = await prompt[Symbol.asyncIterator]().next();
+  assert.equal(first.done, false);
+  assert.equal(first.value?.uuid, clientMessageId);
+  assert.equal(first.value?.message.content, "reliable turn");
+
+  harness.sdk.finish();
+  await sink.waitFor((frame) => frame.type === "run" && frame.state === "done" && frame.runId === body.runId);
+});
+
+test("POST sessions：预分配 sessionId 启动该会话；重复或已存在 409 session_exists；非法 400", async (t) => {
+  const sessionId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+  const res = await fetch(`${harness.base}/api/sessions`, authed({
+    method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, text: "preassigned turn", sessionId }),
+  }));
+  assert.equal(res.status, 202);
+  const created = (await res.json()) as { sessionId: string; runId: string };
+  assert.equal(created.sessionId, sessionId);
+  const sdkOptions = harness.sdk.params?.options as Record<string, unknown> | undefined;
+  assert.equal(sdkOptions?.sessionId, sessionId);
+  assert.equal(Object.hasOwn(sdkOptions ?? {}, "resume"), false);
+
+  const sink = new FrameSink(harness.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  sink.send({ type: "subscribe", sessionId });
+
+  const duplicate = await fetch(`${harness.base}/api/sessions`, authed({
+    method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, text: "again", sessionId }),
+  }));
+  assert.equal(duplicate.status, 409);
+  assert.deepEqual(await duplicate.json(), { error: "session_exists" });
+
+  const existingFile = await fetch(`${harness.base}/api/sessions`, authed({
+    method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, text: "existing", sessionId: SESSION_ID }),
+  }));
+  assert.equal(existingFile.status, 409);
+  assert.deepEqual(await existingFile.json(), { error: "session_exists" });
+
+  const malformed = await fetch(`${harness.base}/api/sessions`, authed({
+    method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, text: "bad id", sessionId: "not-a-uuid" }),
+  }));
+  assert.equal(malformed.status, 400);
+  assert.deepEqual(await malformed.json(), { error: "invalid_session_id" });
+
+  harness.sdk.finish();
+  await sink.waitFor((frame) => frame.type === "run" && frame.state === "done" && frame.runId === created.runId);
+});
+
+test("GET messages：活跃 run 时返回 status 与 activeRunId，结束后省略 activeRunId", async (t) => {
+  const sink = new FrameSink(harness.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  sink.send({ type: "subscribe", sessionId: SESSION_ID });
+  await sink.waitFor((frame) => frame.type === "subscribed" && frame.sessionId === SESSION_ID);
+
+  const started = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed({
+    method: "POST", body: JSON.stringify({ text: "status turn" }),
+  }));
+  assert.equal(started.status, 202);
+  const { runId } = (await started.json()) as { runId: string };
+
+  const active = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed());
+  assert.equal(active.status, 200);
+  const activeBody = (await active.json()) as Record<string, unknown>;
+  assert.equal(activeBody.status, "daemon-driving");
+  assert.equal(activeBody.activeRunId, runId);
+
+  harness.sdk.finish();
+  await sink.waitFor((frame) => frame.type === "run" && frame.state === "done" && frame.runId === runId);
+
+  const finished = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed());
+  const finishedBody = (await finished.json()) as Record<string, unknown>;
+  assert.equal(finishedBody.status, "idle");
+  assert.equal(Object.hasOwn(finishedBody, "activeRunId"), false);
+});
+
+test("WS：ping 无 sessionId 回 pong；subscribe 回 subscribed；未知会话 ok:false", async (t) => {
+  const sink = new FrameSink(harness.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+
+  sink.send({ type: "ping" });
+  assert.deepEqual(await sink.waitFor((frame) => frame.type === "pong"), { type: "pong" });
+
+  sink.send({ type: "subscribe", sessionId: SESSION_ID });
+  assert.deepEqual(
+    await sink.waitFor((frame) => frame.type === "subscribed" && frame.sessionId === SESSION_ID),
+    { type: "subscribed", sessionId: SESSION_ID },
+  );
+
+  const star = new FrameSink(harness.wsUrl());
+  t.after(() => star.close());
+  await star.open();
+  star.send({ type: "subscribe", sessionId: "*" });
+  assert.deepEqual(
+    await star.waitFor((frame) => frame.type === "subscribed" && frame.sessionId === "*"),
+    { type: "subscribed", sessionId: "*" },
+  );
+
+  const unknown = new FrameSink(harness.wsUrl());
+  t.after(() => unknown.close());
+  await unknown.open();
+  unknown.send({ type: "subscribe", sessionId: "missing-session" });
+  assert.deepEqual(
+    await unknown.waitFor((frame) => frame.type === "subscribed" && frame.sessionId === "missing-session"),
+    { type: "subscribed", sessionId: "missing-session", ok: false },
+  );
+});
+
+test("WS stream：assistant_delta 广播 stream 帧；后订阅者收到 stream_snapshot 累积文本", async (t) => {
+  const sink = new FrameSink(harness.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  sink.send({ type: "subscribe", sessionId: SESSION_ID });
+  await sink.waitFor((frame) => frame.type === "subscribed" && frame.sessionId === SESSION_ID);
+
+  const streamEvent = (event: Record<string, unknown>) => ({
+    type: "stream_event", uuid: "sdk-s1", session_id: SESSION_ID, event,
+  });
+  harness.sdk.script = [
+    streamEvent({ type: "message_start", message: { id: "msg_api_1" } }),
+    streamEvent({ type: "content_block_start", index: 0 }),
+    streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hel" } }),
+    streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "lo" } }),
+  ];
+
+  try {
+    const started = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed({
+      method: "POST", body: JSON.stringify({ text: "stream turn" }),
+    }));
+    assert.equal(started.status, 202);
+    const { runId } = (await started.json()) as { runId: string };
+
+    assert.deepEqual(
+      await sink.waitFor((frame) => frame.type === "stream" && frame.text === "Hel"),
+      { type: "stream", sessionId: SESSION_ID, runId, messageId: "msg_api_1", blockIndex: 0, text: "Hel" },
+    );
+    assert.deepEqual(
+      await sink.waitFor((frame) => frame.type === "stream" && frame.text === "lo"),
+      { type: "stream", sessionId: SESSION_ID, runId, messageId: "msg_api_1", blockIndex: 0, text: "lo" },
+    );
+
+    const second = new FrameSink(harness.wsUrl());
+    t.after(() => second.close());
+    await second.open();
+    second.send({ type: "subscribe", sessionId: SESSION_ID });
+    await second.waitFor((frame) => frame.type === "subscribed" && frame.sessionId === SESSION_ID);
+    assert.deepEqual(
+      await second.waitFor((frame) => frame.type === "stream_snapshot"),
+      {
+        type: "stream_snapshot", sessionId: SESSION_ID, runId,
+        blocks: [{ messageId: "msg_api_1", blockIndex: 0, text: "Hello" }],
+      },
+    );
+
+    harness.sdk.finish();
+    await sink.waitFor((frame) => frame.type === "run" && frame.state === "done" && frame.runId === runId);
+  } finally {
+    harness.sdk.script = [];
+  }
+});
+
+test("abort：runId 不匹配返回 run_mismatch 且不中止；匹配则中止；非法 400", async (t) => {
+  const sink = new FrameSink(harness.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  sink.send({ type: "subscribe", sessionId: SESSION_ID });
+  await sink.waitFor((frame) => frame.type === "subscribed" && frame.sessionId === SESSION_ID);
+
+  const started = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed({
+    method: "POST", body: JSON.stringify({ text: "abort turn" }),
+  }));
+  assert.equal(started.status, 202);
+  const { runId } = (await started.json()) as { runId: string };
+
+  const malformed = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/abort`, authed({
+    method: "POST", body: JSON.stringify({ runId: "not-a-uuid" }),
+  }));
+  assert.equal(malformed.status, 400);
+  assert.deepEqual(await malformed.json(), { error: "invalid_run_id" });
+
+  const staleRunId = "cccccccc-dddd-4eee-8fff-000000000000";
+  const mismatch = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/abort`, authed({
+    method: "POST", body: JSON.stringify({ runId: staleRunId }),
+  }));
+  assert.equal(mismatch.status, 200);
+  assert.deepEqual(await mismatch.json(), { runId, status: "run_mismatch" });
+
+  const stillActive = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed());
+  const stillActiveBody = (await stillActive.json()) as Record<string, unknown>;
+  assert.equal(stillActiveBody.status, "daemon-driving");
+  assert.equal(stillActiveBody.activeRunId, runId);
+
+  const aborted = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/abort`, authed({
+    method: "POST", body: JSON.stringify({ runId }),
+  }));
+  assert.equal(aborted.status, 200);
+  assert.deepEqual(await aborted.json(), { runId, status: "aborted" });
+  await sink.waitFor((frame) => frame.type === "run" && frame.state === "error" && frame.runId === runId);
 });
 
 test("审批闭环：approval 帧广播 → HTTP 决议 200 → resolved 帧；重复决议 409；未知 404", async (t) => {

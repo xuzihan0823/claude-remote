@@ -4,6 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { api } from '../../../../web/core/api.js';
 import { toast } from '../../../../web/core/bus.js';
+import { newClientMessageId } from '../../../../web/core/conversation-state.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useTheme } from '../../theme.js';
 import { Icon } from '../Icon.js';
@@ -14,11 +15,12 @@ import { AttachmentPicker } from './AttachmentPicker.js';
 import { ModelPicker } from './ModelPicker.js';
 
 // 聊天 composer（发送/停止/附件/模型 pill/模式 pill/bypass 确认）。
-// 契约（不得更改）：props { sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped }
+// 契约：props { sessionId, status, isRunning, activeRunId, mode, onModeChange, onQueue, onAccepted, onSendFailed }
 // 可选 prop：onStatusConflict(status) -- 409 占用时回传最新 status 给父层（ChatScreen 未接时可空）。
+// 发送状态由父层持有：onQueue 先落本地气泡，onAccepted/onSendFailed 再就地更新；本组件不重试。
 // 行为照抄 web/ui/screens/chat.js 的 composer 部分；视觉对齐 ios-ui-redesign 浮岛 24px 圆角。
 export function ChatComposer({
-  sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped, onStatusConflict,
+  sessionId, status, isRunning, activeRunId, mode, onModeChange, onQueue, onAccepted, onSendFailed, onStatusConflict,
 }) {
   const { colors, dark } = useTheme();
   const insets = useSafeAreaInsets();
@@ -29,6 +31,7 @@ export function ChatComposer({
   const [modelOverride, setModelOverride] = useState('');
   const [inputH, setInputH] = useState(36);
   const lastH = useRef(36);
+  const sendLock = useRef(false);
 
   const canSend = status === 'idle' && !sendBusy;
   const hasContent = draft.trim() !== '' || files.length > 0;
@@ -44,48 +47,57 @@ export function ChatComposer({
         method: 'POST',
         body: JSON.stringify({ runId: activeRunId || undefined }),
       });
-      onStopped?.();
       toast('已停止当前运行', 'info');
     } catch (e) {
       if (e.status === 404 || e.status === 409 || e.code === 'no_active_run' || e.code === 'already_finished') {
-        onStopped?.();
         toast('运行已结束', 'info');
       } else if (e.code !== 'unauthorized') {
         toast(`停止失败：${e.code}`, 'error');
       }
     }
-  }, [sessionId, activeRunId, isRunning, onStopped]);
+  }, [sessionId, activeRunId, isRunning]);
 
   const doSend = useCallback(async () => {
-    if (!hasContent || !canSend) return;
+    if (!hasContent || !canSend || sendLock.current) return;
+    sendLock.current = true;
     setSendBusy(true);
+    const clientMessageId = newClientMessageId();
+    const baseText = draft.trim();
+    const pendingFiles = files;
+    const localText = baseText || (pendingFiles.length ? '请查看我上传的附件。' : '');
+    onQueue?.({ clientMessageId, text: localText });
+    setDraft('');
+    setFiles([]);
     try {
       // 先传附件（存到 Mac 本地），再把路径写进消息文本让 Claude 直接读
       const uploaded = [];
-      for (const f of files) {
+      for (const f of pendingFiles) {
         const blob = await (await fetch(f.uri)).blob();
         const r = await api(`/api/sessions/${encodeURIComponent(sessionId)}/upload?filename=${encodeURIComponent(f.name)}`, {
           method: 'POST', body: blob, headers: { 'Content-Type': 'application/octet-stream' },
         });
         uploaded.push(r.path);
       }
-      let text = draft.trim();
+      let text = baseText;
       if (uploaded.length) {
         const list = uploaded.map((p) => `- ${p}`).join('\n');
         text = `${text || '请查看我上传的附件。'}\n\n[手机端上传的附件，已保存在本机，可直接读取]\n${list}`;
       }
-      await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      const body = await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
         method: 'POST',
         body: JSON.stringify({
           text,
+          clientMessageId,
           ...(modelOverride ? { model: modelOverride } : {}),
           ...(mode !== 'default' ? { permissionMode: mode } : {}),
         }),
       });
-      onSent?.(text);
-      setDraft('');
-      setFiles([]);
+      onAccepted?.(clientMessageId, body?.runId ?? null);
     } catch (e) {
+      const statusCode = e.status ?? 0;
+      const definite = (statusCode >= 400 && statusCode < 500 && statusCode !== 408 && statusCode !== 429)
+        || e.code === 'not_idle' || e.code === 'connection_changed';
+      onSendFailed?.(clientMessageId, definite);
       if (e.status === 409) {
         onStatusConflict?.(e.data?.status || null);
         const why = e.data?.status === 'terminal-driving' ? '会话正被终端驾驶'
@@ -96,8 +108,11 @@ export function ChatComposer({
       } else if (e.code !== 'unauthorized') {
         toast(`发送失败：${e.code}`, 'error');
       }
-    } finally { setSendBusy(false); }
-  }, [draft, files, hasContent, canSend, sessionId, modelOverride, mode, onSent, onStatusConflict]);
+    } finally {
+      sendLock.current = false;
+      setSendBusy(false);
+    }
+  }, [draft, files, hasContent, canSend, sessionId, modelOverride, mode, onQueue, onAccepted, onSendFailed, onStatusConflict]);
 
   const onContentSizeChange = (e) => {
     const h = Math.min(Math.max(Math.ceil(e.nativeEvent.contentSize.height), 36), 132);

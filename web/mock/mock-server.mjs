@@ -8,6 +8,14 @@
 // mock 专属（契约之外，仅本文件）：
 //   POST /__mock/drop-ws   强制断开所有 WS 连接，用于测试前端重连补缺口
 //   发送内容含「审批」或 "approve" 会在模拟 run 中途触发一张审批卡
+//
+// 验证开关（环境变量）：
+//   MOCK_STREAM=0             关闭流式增量（默认开启，约 20 字/片、每片 40ms）
+//   MOCK_ECHO_DELAY_MS=500    run 开始后回显用户消息的延迟
+//   MOCK_REPLY_DELAY_MS=1200  用户消息回显后到助手回复的延迟
+//   MOCK_STREAM_CHUNK_MS=40   流式分片之间的间隔
+//   MOCK_DROP_RESPONSE=1      POST /messages 启动 run 后直接断开响应（模拟丢失 202）
+//   MOCK_APPROVAL_INTERVAL_MS=0  关闭每 30s 的假审批推送（默认 30000）
 
 import http from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
@@ -20,12 +28,28 @@ const PORT = Number(process.env.BRIDGE_PORT || process.env.PORT || 8787);
 const HOST = process.env.BRIDGE_HOST || '127.0.0.1';
 const TOKEN = process.env.BRIDGE_TOKEN || 'mock-token';
 const APPROVAL_TTL_MS = Number(process.env.PERMISSION_TIMEOUT_MS || 90_000);
+const APPROVAL_INTERVAL_MS = Number(process.env.MOCK_APPROVAL_INTERVAL_MS || 30_000);
+
+const STREAM_ENABLED = process.env.MOCK_STREAM !== '0';
+const ECHO_DELAY_MS = envMs('MOCK_ECHO_DELAY_MS', 500);
+const REPLY_DELAY_MS = envMs('MOCK_REPLY_DELAY_MS', 1200);
+const STREAM_CHUNK_MS = envMs('MOCK_STREAM_CHUNK_MS', 40);
+const DROP_RESPONSE = process.env.MOCK_DROP_RESPONSE === '1';
+const STREAM_CHUNK_CHARS = 20;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function envMs(name, fallback) {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw >= 0 ? raw : fallback;
+}
 
 // ---------------------------------------------------------------- 假数据
 
 const now = Date.now();
 let uuidCounter = 0;
 const nextUuid = () => `u-${(++uuidCounter).toString(36).padStart(6, '0')}`;
+let apiMessageCounter = 0;
+const nextApiMessageId = () => `msg_mock_${++apiMessageCounter}`;
 
 const MD_SAMPLES = [
   '先说结论：**watcher 需要 mtime 轮询兜底**。\n\n`fs.watch` 在 macOS 上对 append 触发 `change`，但编辑器原子写会触发 `rename`，两类都要处理：\n\n- `change` → 增量 tail\n- `rename` → 重新 open + seek\n- 轮询兜底间隔建议 `2000ms`\n\n详见 [Node 文档](https://nodejs.org/api/fs.html#fswatchfilename-options-listener)。',
@@ -69,7 +93,7 @@ function genTranscript(turns, startAt) {
     if (withThinking) push({ seq, blockIndex: bi++, role: 'assistant', kind: 'thinking', text: THINKING_SAMPLES[i % THINKING_SAMPLES.length], timestamp: ts() });
     if (i % 3 === 1) {
       // 工具轮：assistant 同行 text+tool_use，随后 user 行 tool_result
-      push({ seq, blockIndex: bi++, role: 'assistant', kind: 'text', text: '我先看一下现在的实现。', timestamp: ts() });
+      push({ seq, blockIndex: bi++, role: 'assistant', kind: 'text', text: '我先看一下现在的实现。', apiMessageId: nextApiMessageId(), timestamp: ts() });
       const toolUseId = `toolu_${seq.toString(36)}`;
       const tools = [
         ['Bash', { command: `node --test packages/daemon/test/transcript.test.ts --reporter tap 2>&1 | tail -n 40`, description: '跑 transcript 测试' }],
@@ -88,9 +112,9 @@ function genTranscript(turns, startAt) {
         timestamp: ts(),
       });
       skip();
-      push({ seq, blockIndex: 0, role: 'assistant', kind: 'text', text: MD_SAMPLES[i % MD_SAMPLES.length], timestamp: ts() });
+      push({ seq, blockIndex: 0, role: 'assistant', kind: 'text', text: MD_SAMPLES[i % MD_SAMPLES.length], apiMessageId: nextApiMessageId(), timestamp: ts() });
     } else {
-      push({ seq, blockIndex: bi++, role: 'assistant', kind: 'text', text: MD_SAMPLES[i % MD_SAMPLES.length], timestamp: ts() });
+      push({ seq, blockIndex: bi++, role: 'assistant', kind: 'text', text: MD_SAMPLES[i % MD_SAMPLES.length], apiMessageId: nextApiMessageId(), timestamp: ts() });
     }
     if (i % 10 === 6) { skip(); push({ seq, blockIndex: 0, role: 'user', kind: 'meta', rawType: 'file-history-snapshot', timestamp: ts() }); }
   }
@@ -133,6 +157,13 @@ const MOCK_MODELS = [
   { id: 'claude-haiku-3-5-20241022', alias: 'haiku', displayName: 'Haiku' },
 ];
 const runRecords = new Map();
+/** @type {Map<string, { runId: string, blocks: { messageId: string, blockIndex: number, text: string }[] }>} */
+const streamStates = new Map();
+
+const activeRunId = (sessionId) => {
+  for (const [runId, record] of runRecords) if (record.sessionId === sessionId) return runId;
+  return null;
+};
 
 // ---------------------------------------------------------------- WS server（手写最小实现）
 
@@ -149,6 +180,18 @@ function wsEncode(str, opcode = 0x1) {
   else { header = Buffer.alloc(10); header[1] = 127; header.writeBigUInt64BE(BigInt(len), 2); }
   header[0] = 0x80 | opcode;
   return Buffer.concat([header, payload]);
+}
+
+function wsSend(client, obj) {
+  try { client.sock.write(wsEncode(JSON.stringify(obj))); } catch { /* 忽略写失败 */ }
+}
+
+function sendStreamSnapshot(client, sessionId) {
+  const runId = activeRunId(sessionId);
+  if (!runId) return;
+  const state = streamStates.get(sessionId);
+  const blocks = state && state.runId === runId ? state.blocks : [];
+  wsSend(client, { type: 'stream_snapshot', sessionId, runId, blocks });
 }
 
 function wsAttach(req, sock) {
@@ -181,7 +224,17 @@ function wsAttach(req, sock) {
       if (opcode !== 0x1) continue;
       try {
         const msg = JSON.parse(payload.toString('utf8'));
-        if (msg.type === 'subscribe' && typeof msg.sessionId === 'string') { client.subs.add(msg.sessionId); log(`  subscribe ${msg.sessionId}`); }
+        if (msg.type === 'ping') { wsSend(client, { type: 'pong' }); continue; }
+        if (msg.type === 'subscribe' && typeof msg.sessionId === 'string') {
+          client.subs.add(msg.sessionId);
+          log(`  subscribe ${msg.sessionId}`);
+          if (msg.sessionId === '*' || bySession(msg.sessionId)) {
+            wsSend(client, { type: 'subscribed', sessionId: msg.sessionId });
+            if (msg.sessionId !== '*') sendStreamSnapshot(client, msg.sessionId);
+          } else {
+            wsSend(client, { type: 'subscribed', sessionId: msg.sessionId, ok: false });
+          }
+        }
         if (msg.type === 'unsubscribe' && typeof msg.sessionId === 'string') client.subs.delete(msg.sessionId);
       } catch { /* 非 JSON 帧忽略 */ }
     }
@@ -196,7 +249,7 @@ function broadcast(event) {
   const json = JSON.stringify(event);
   for (const c of wsClients) {
     let want = false;
-    if (event.type === 'message' || event.type === 'run') want = c.subs.has(event.sessionId);
+    if (event.type === 'message' || event.type === 'run' || event.type === 'stream') want = c.subs.has(event.sessionId);
     else if (event.type === 'status') want = c.subs.has(event.sessionId) || c.subs.has('*');
     else if (event.type === 'approval') want = c.subs.has(event.interaction.sessionId) || c.subs.has('*');
     else if (event.type === 'approval.resolved') want = true;
@@ -275,10 +328,11 @@ const APPROVAL_TEMPLATES = [
 
 // ---------------------------------------------------------------- 模拟 run（POST messages 之后）
 
-async function simulateRun(sessionId, text, runId) {
+async function simulateRun(sessionId, text, runId, clientMessageId) {
   const s = bySession(sessionId);
   const record = runRecords.get(runId) || { sessionId, canceled: false };
   runRecords.set(runId, record);
+  streamStates.set(sessionId, { runId, blocks: [] });
   setStatus(sessionId, 'daemon-driving');
   broadcast({ type: 'run', sessionId, runId, state: 'started' });
   let seq = maxSeq(sessionId);
@@ -293,12 +347,27 @@ async function simulateRun(sessionId, text, runId) {
     broadcast({ type: 'run', sessionId, runId, state: 'error', error: 'aborted' });
     return true;
   };
+  const streamAssistantText = async (messageId, replyText) => {
+    if (!STREAM_ENABLED) return;
+    const state = streamStates.get(sessionId);
+    for (let i = 0; i < replyText.length; i += STREAM_CHUNK_CHARS) {
+      if (record.canceled) return;
+      const chunk = replyText.slice(i, i + STREAM_CHUNK_CHARS);
+      if (state && state.runId === runId) {
+        let block = state.blocks.find((b) => b.messageId === messageId);
+        if (!block) { block = { messageId, blockIndex: 0, text: '' }; state.blocks.push(block); }
+        block.text += chunk;
+      }
+      broadcast({ type: 'stream', sessionId, runId, messageId, blockIndex: 0, text: chunk });
+      await wait(STREAM_CHUNK_MS);
+    }
+  };
   try {
-    await wait(500);
+    await wait(ECHO_DELAY_MS);
     if (checkpoint()) return;
     seq += 2;
-    appendMsgs(sessionId, [{ seq, blockIndex: 0, uuid: nextUuid(), parentUuid: null, role: 'user', kind: 'text', text, timestamp: ts() }]);
-    await wait(1200);
+    appendMsgs(sessionId, [{ seq, blockIndex: 0, uuid: clientMessageId || nextUuid(), parentUuid: null, role: 'user', kind: 'text', text, timestamp: ts() }]);
+    await wait(REPLY_DELAY_MS);
     if (checkpoint()) return;
     seq += 1;
     const wantApproval = /审批|approve/i.test(text);
@@ -321,18 +390,22 @@ async function simulateRun(sessionId, text, runId) {
           { seq, blockIndex: 0, uuid: nextUuid(), parentUuid: null, role: 'user', kind: 'tool_result', toolUseId: `toolu_run_${seq}`, isError: false, text: '# pass 17\n# fail 0\n17 个测试全绿。', timestamp: ts() },
         ]);
         seq += 1;
-        appendMsgs(sessionId, [{ seq, blockIndex: 0, uuid: nextUuid(), parentUuid: null, role: 'assistant', kind: 'text', text: '你**允许**了这次执行，测试已跑完：`17 passed / 0 failed`。审批链路（卡片 → 决策 → 工具继续）打通了。', timestamp: ts() }]);
+        appendMsgs(sessionId, [{ seq, blockIndex: 0, uuid: nextUuid(), parentUuid: null, role: 'assistant', kind: 'text', text: '你**允许**了这次执行，测试已跑完：`17 passed / 0 failed`。审批链路（卡片 → 决策 → 工具继续）打通了。', apiMessageId: nextApiMessageId(), timestamp: ts() }]);
       } else {
         appendMsgs(sessionId, [
           { seq, blockIndex: 0, uuid: nextUuid(), parentUuid: null, role: 'user', kind: 'tool_result', toolUseId: `toolu_run_${seq}`, isError: true, text: decided === 'denied' ? 'User denied the tool call.' : 'Permission request expired.', timestamp: ts() },
         ]);
         seq += 1;
-        appendMsgs(sessionId, [{ seq, blockIndex: 0, uuid: nextUuid(), parentUuid: null, role: 'assistant', kind: 'text', text: decided === 'denied' ? '收到，这次执行被**拒绝**，我不跑测试了。拒绝路径验证 OK。' : '审批**超时**未决，按契约自动 deny。', timestamp: ts() }]);
+        appendMsgs(sessionId, [{ seq, blockIndex: 0, uuid: nextUuid(), parentUuid: null, role: 'assistant', kind: 'text', text: decided === 'denied' ? '收到，这次执行被**拒绝**，我不跑测试了。拒绝路径验证 OK。' : '审批**超时**未决，按契约自动 deny。', apiMessageId: nextApiMessageId(), timestamp: ts() }]);
       }
     } else {
+      const apiMessageId = nextApiMessageId();
+      const replyText = `收到：「${text.slice(0, 80)}」\n\n这是 **mock 的回复**，验证以下渲染：\n\n1. 同一 \`seq\` 的 thinking + text 两个 block\n2. 行内代码 \`readTail(100) = 49ms\`\n3. 代码块：\n\n\`\`\`bash\ncurl -s localhost:${PORT}/api/health -H "Authorization: Bearer ${TOKEN}"\n\`\`\`\n\n> 提示：发送内容里带「审批」两个字，可以触发一张审批卡走完整流程。`;
+      await streamAssistantText(apiMessageId, replyText);
+      if (checkpoint()) return;
       appendMsgs(sessionId, [
         { seq, blockIndex: 0, uuid: nextUuid(), parentUuid: null, role: 'assistant', kind: 'thinking', text: `收到手机端消息：「${text.slice(0, 60)}」。这是 mock 回复，演示 markdown 渲染与多 block 同 seq 去重。`, timestamp: ts() },
-        { seq, blockIndex: 1, uuid: nextUuid(), parentUuid: null, role: 'assistant', kind: 'text', text: `收到：「${text.slice(0, 80)}」\n\n这是 **mock 的回复**，验证以下渲染：\n\n1. 同一 \`seq\` 的 thinking + text 两个 block\n2. 行内代码 \`readTail(100) = 49ms\`\n3. 代码块：\n\n\`\`\`bash\ncurl -s localhost:${PORT}/api/health -H "Authorization: Bearer ${TOKEN}"\n\`\`\`\n\n> 提示：发送内容里带「审批」两个字，可以触发一张审批卡走完整流程。`, timestamp: ts() },
+        { seq, blockIndex: 1, uuid: nextUuid(), parentUuid: null, role: 'assistant', kind: 'text', text: replyText, apiMessageId, timestamp: ts() },
       ]);
     }
     if (checkpoint()) return;
@@ -340,6 +413,7 @@ async function simulateRun(sessionId, text, runId) {
   } catch (err) {
     if (!record.canceled) broadcast({ type: 'run', sessionId, runId, state: 'error', error: String(err) });
   } finally {
+    if (streamStates.get(sessionId)?.runId === runId) streamStates.delete(sessionId);
     runRecords.delete(runId);
     setStatus(sessionId, 'idle');
   }
@@ -357,7 +431,7 @@ setInterval(() => {
   const roll = Math.floor(Date.now() / 20_000) % 3;
   const msgs = roll === 0
     ? [{ seq, blockIndex: 0, uuid: nextUuid(), parentUuid: null, role: 'user', kind: 'text', text: '（终端里敲的）继续，把剩下的测试补完', timestamp: new Date().toISOString() }]
-    : [{ seq, blockIndex: 0, uuid: nextUuid(), parentUuid: null, role: 'assistant', kind: 'text', text: `终端驾驶中的实时消息 · ${new Date().toLocaleTimeString('zh-CN')}\n\n- watcher 每 20s 落一行\n- 网页端应当**同步滚出**这条`, timestamp: new Date().toISOString() }];
+    : [{ seq, blockIndex: 0, uuid: nextUuid(), parentUuid: null, role: 'assistant', kind: 'text', text: `终端驾驶中的实时消息 · ${new Date().toLocaleTimeString('zh-CN')}\n\n- watcher 每 20s 落一行\n- 网页端应当**同步滚出**这条`, apiMessageId: nextApiMessageId(), timestamp: new Date().toISOString() }];
   appendMsgs(TERMINAL_SESSION, msgs);
 }, 20_000);
 
@@ -374,10 +448,12 @@ setInterval(() => {
 }, 45_000);
 
 // 每 30s：推一张假审批（轮换四种模板）
-setInterval(() => {
-  const target = sessions[approvalRotation % 2 === 0 ? 0 : 2].sessionId;
-  createInteraction(target, APPROVAL_TEMPLATES[approvalRotation++ % APPROVAL_TEMPLATES.length]());
-}, 30_000);
+if (APPROVAL_INTERVAL_MS > 0) {
+  setInterval(() => {
+    const target = sessions[approvalRotation % 2 === 0 ? 0 : 2].sessionId;
+    createInteraction(target, APPROVAL_TEMPLATES[approvalRotation++ % APPROVAL_TEMPLATES.length]());
+  }, APPROVAL_INTERVAL_MS);
+}
 
 // ---------------------------------------------------------------- HTTP
 
@@ -435,6 +511,36 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { defaultModel: 'sonnet', models: MOCK_MODELS });
       }
 
+      if (req.method === 'GET' && p === '/api/projects') {
+        const byId = new Map();
+        let unclassifiedCount = 0;
+        for (const s of sessions) {
+          if (!s.cwd) { unclassifiedCount += 1; continue; }
+          let project = byId.get(s.cwd);
+          if (!project) {
+            project = {
+              id: s.cwd,
+              name: s.cwd.split('/').filter(Boolean).pop() || s.cwd,
+              cwd: s.cwd,
+              cwds: [s.cwd],
+              sessionCount: 0,
+              lastActiveAt: 0,
+            };
+            byId.set(s.cwd, project);
+          }
+          project.sessionCount += 1;
+          if (!project.cwds.includes(s.cwd)) project.cwds.push(s.cwd);
+          project.lastActiveAt = Math.max(project.lastActiveAt, s.lastActiveAt || 0);
+        }
+        const projects = [...byId.values()].sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+        return sendJson(res, 200, {
+          projects,
+          totalSessions: sessions.length,
+          unclassifiedCount,
+          homeCwd: '/Users/mac',
+        });
+      }
+
       if (req.method === 'GET' && p === '/api/sessions') {
         const limit = Math.min(Number(url.searchParams.get('limit') || 50), 500);
         const offset = Number(url.searchParams.get('offset') || 0);
@@ -448,7 +554,10 @@ const server = http.createServer(async (req, res) => {
         const knownCwds = new Set(sessions.map((session) => session.cwd).filter(Boolean));
         if (typeof body.cwd !== 'string' || !knownCwds.has(body.cwd)) return sendJson(res, 400, { error: 'unknown_cwd' });
         if (body.model && !MOCK_MODELS.some((model) => model.alias === body.model || model.id === body.model)) return sendJson(res, 400, { error: 'unknown_model' });
-        const sessionId = randomUUID();
+        const requestedId = typeof body.sessionId === 'string' && UUID_RE.test(body.sessionId) ? body.sessionId : null;
+        if (requestedId && bySession(requestedId)) return sendJson(res, 409, { error: 'session_exists' });
+        const sessionId = requestedId || randomUUID();
+        const clientMessageId = typeof body.clientMessageId === 'string' ? body.clientMessageId : undefined;
         transcripts.set(sessionId, []);
         sessions.push({
           sessionId, cwd: body.cwd, projectDirName: body.cwd.replaceAll('/', '-'),
@@ -456,8 +565,8 @@ const server = http.createServer(async (req, res) => {
           lastActiveAt: Date.now(), sizeBytes: 0, status: 'idle',
         });
         const runId = randomUUID();
-        simulateRun(sessionId, body.text.trim(), runId);
-        return sendJson(res, 202, { sessionId, runId });
+        simulateRun(sessionId, body.text.trim(), runId, clientMessageId);
+        return sendJson(res, 202, clientMessageId ? { sessionId, runId, clientMessageId } : { sessionId, runId });
       }
 
       let m = p.match(/^\/api\/sessions\/([^/]+)\/messages$/);
@@ -468,7 +577,12 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'GET') {
           const beforeSeq = url.searchParams.has('beforeSeq') ? Number(url.searchParams.get('beforeSeq')) : undefined;
           const limit = Math.min(Number(url.searchParams.get('limit') || 100), 500);
-          return sendJson(res, 200, pageMessages(list, beforeSeq, limit));
+          const activeRun = activeRunId(id);
+          return sendJson(res, 200, {
+            ...pageMessages(list, beforeSeq, limit),
+            status: bySession(id)?.status || 'idle',
+            ...(activeRun ? { activeRunId: activeRun } : {}),
+          });
         }
         if (req.method === 'POST') {
           const body = await readBody(req);
@@ -476,9 +590,15 @@ const server = http.createServer(async (req, res) => {
           if (body.model && !MOCK_MODELS.some((model) => model.alias === body.model || model.id === body.model)) return sendJson(res, 400, { error: 'unknown_model' });
           const s = bySession(id);
           if (s.status !== 'idle') return sendJson(res, 409, { error: 'not_idle', status: s.status });
+          const clientMessageId = typeof body.clientMessageId === 'string' ? body.clientMessageId : undefined;
           const runId = randomUUID();
-          simulateRun(id, body.text.trim(), runId); // 显式后台任务；内部自兜底，无未消费 rejection
-          return sendJson(res, 202, { runId });
+          simulateRun(id, body.text.trim(), runId, clientMessageId); // 显式后台任务；内部自兜底，无未消费 rejection
+          if (DROP_RESPONSE) {
+            log(`[mock] 丢弃 POST messages 响应（run ${runId.slice(0, 8)}）`);
+            res.destroy();
+            return;
+          }
+          return sendJson(res, 202, clientMessageId ? { runId, clientMessageId } : { runId });
         }
       }
 
@@ -486,9 +606,11 @@ const server = http.createServer(async (req, res) => {
       if (m && req.method === 'POST') {
         const id = decodeURIComponent(m[1]);
         if (!bySession(id)) return sendJson(res, 404, { error: 'session_not_found' });
-        const entry = [...runRecords.entries()].find(([, record]) => record.sessionId === id);
-        if (!entry) return sendJson(res, 200, { runId: null, status: 'idle' });
-        const [runId, record] = entry;
+        const body = (await readBody(req)) || {};
+        const runId = activeRunId(id);
+        if (!runId) return sendJson(res, 200, { status: 'already_finished' });
+        if (body.runId !== undefined && body.runId !== runId) return sendJson(res, 200, { runId, status: 'run_mismatch' });
+        const record = runRecords.get(runId);
         record.canceled = true;
         record.cancelWait?.();
         return sendJson(res, 200, { runId, status: 'aborted' });

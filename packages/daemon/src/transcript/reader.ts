@@ -79,6 +79,7 @@ interface MessageBase {
   uuid: string;
   parentUuid: string | null;
   timestamp?: string;
+  apiMessageId?: string;
 }
 
 function baseOf(o: Record<string, unknown>, seq: number): MessageBase | null {
@@ -186,7 +187,14 @@ export function parseTranscriptLine(line: string, seq: number): RenderMessage[] 
   if (base === null) return [];
 
   if (type === "user") return userMessages(base, message.content);
-  if (type === "assistant") return assistantMessages(base, message.content);
+  if (type === "assistant") {
+    const apiMessageId =
+      typeof message.id === "string" && message.id !== "" ? message.id : undefined;
+    return assistantMessages(
+      apiMessageId === undefined ? base : { ...base, apiMessageId },
+      message.content,
+    );
+  }
   if (KNOWN_META_TYPES.has(type) || type === "") return [];
 
   // 未知 type 兜底：折叠展示原始类型

@@ -4,6 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { createSession } from '../../lib/create-session.js';
 import { toast } from '../../../../web/core/bus.js';
+import { newClientMessageId } from '../../../../web/core/conversation-state.js';
 import { setSessionMode } from '../../../../web/core/modes.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useTheme } from '../../theme.js';
@@ -15,8 +16,9 @@ import { AttachmentPicker } from './AttachmentPicker.js';
 import { ModelPicker } from './ModelPicker.js';
 
 // 新建会话 composer：cwd 由父层显式传入（目录入口在顶栏三点菜单；未选目录时点发送也会调 onPickCwd），不做隐式回退；
-// 附件走 /api/upload（新建会话专用端点），POST /api/sessions {cwd, text, model?, permissionMode?}；
-// 成功 setSessionMode(result.sessionId, mode) + onCreated(result, body)。对应 web/ui/components/composer.js。
+// 附件走 /api/upload（新建会话专用端点），POST /api/sessions {cwd, text, sessionId, clientMessageId, model?, permissionMode?}；
+// 成功 setSessionMode(result.sessionId, mode) + onCreated(result, body)；网络/超时/5xx 结果不确定时也把预分配 sessionId
+// 交给父层打开并从历史对账（body.unconfirmed）。对应 web/ui/components/composer.js。
 export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onDraftChange, onCreated, mode }) {
   const { colors, dark } = useTheme();
   const insets = useSafeAreaInsets();
@@ -27,6 +29,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
   const [busy, setBusy] = useState(false);
   const [inputH, setInputH] = useState(44);
   const lastH = useRef(44);
+  const busyLock = useRef(false);
 
   const hasDraft = draft.trim() !== '' || files.length > 0;
   useEffect(() => {
@@ -36,23 +39,39 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
 
   const create = useCallback(async () => {
     const text = draft.trim();
-    if (!text || !cwd || !cwdKnown || busy) return;
+    if (!text || !cwd || !cwdKnown || busyLock.current) return;
+    busyLock.current = true;
     setBusy(true);
+    const sessionId = newClientMessageId();
+    const clientMessageId = newClientMessageId();
     try {
-      const { result, body } = await createSession({ cwd, text, model, mode, files });
+      const { result, body } = await createSession({
+        cwd, text, model, mode, files, sessionId, clientMessageId,
+      });
       setSessionMode(result.sessionId, mode);
       onCreated?.(result, body);
       setDraft('');
       setFiles([]);
     } catch (e) {
-      if (e.status === 409) toast('所选项目当前不可创建新会话', 'error');
+      const statusCode = e.status ?? 0;
+      const ambiguous = (statusCode === 0 && e.code !== 'connection_changed') || statusCode >= 500;
+      if (ambiguous) {
+        toast('发送结果待确认', 'info');
+        setSessionMode(sessionId, mode);
+        onCreated?.({ sessionId }, { cwd, text, clientMessageId, unconfirmed: true });
+        setDraft('');
+        setFiles([]);
+      } else if (e.status === 409) toast('所选项目当前不可创建新会话', 'error');
       else if (e.status === 413) toast('附件过大（上限 25MB）', 'error');
       else if (e.code === 'unknown_model') toast('该模型已不可用，请重新选择', 'error');
       else if (e.code === 'unknown_cwd') toast('该项目已不可用，请刷新后重试', 'error');
       else if (e.code === 'connection_changed') toast('连接已切换，请在当前连接重新发送', 'info');
       else if (e.code !== 'unauthorized') toast(`新建失败：${e.code}`, 'error');
-    } finally { setBusy(false); }
-  }, [draft, cwd, cwdKnown, model, mode, busy, files, onCreated]);
+    } finally {
+      busyLock.current = false;
+      setBusy(false);
+    }
+  }, [draft, cwd, cwdKnown, model, mode, files, onCreated]);
 
   const onContentSizeChange = (e) => {
     const h = Math.min(Math.max(Math.ceil(e.nativeEvent.contentSize.height), 44), 150);

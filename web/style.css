@@ -340,8 +340,15 @@ input, textarea { font: inherit; color: var(--ink-strong); }
   justify-self: start;
   max-width: 100%;
 }
-.msg.user .msg-time { grid-column: 2; }
-.msg.user.pending .bubble { opacity: .65; }
+.msg.user .msg-time { grid-column: 2; min-height: 16px; }
+/* 仅新插入的本地气泡做轻微上浮；状态变化不会重放动画 */
+.msg.user.local { animation: local-in 200ms ease-out both; }
+@keyframes local-in { from { opacity: 0; transform: translateY(8px); } }
+.retry-link { color: var(--accent-deep); }
+.retry-link:hover { text-decoration: underline; }
+@media (prefers-reduced-motion: reduce) {
+  .msg.user.local { animation: none; }
+}
 
 /* 助手：橙色星芒头像 + 正文（浅卡片） */
 .msg.assistant { display: grid; grid-template-columns: 28px 1fr; gap: 10px; }

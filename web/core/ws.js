@@ -1,5 +1,6 @@
 import { bus } from './bus.js';
 import { wsEndpoint } from './api.js';
+import { createHeartbeat } from './ws-heartbeat.js';
 
 export const ws = (() => {
   let sock = null;
@@ -20,6 +21,7 @@ export const ws = (() => {
   }
   function connect() {
     if (stopped) return;
+    heartbeat.stop();
     emitState('connecting');
     let s;
     try { s = new WebSocket(wsEndpoint()); } catch { scheduleRetry(); return; }
@@ -32,42 +34,55 @@ export const ws = (() => {
       attempt = 0;
       emitState('open');
       for (const id of subs) send({ type: 'subscribe', sessionId: id });
+      heartbeat.start();
       bus.emit('ws-open');
     };
     s.onmessage = (e) => {
       if (stale()) return;
       let m;
       try { m = JSON.parse(e.data); } catch { return; }
+      heartbeat.noteFrame();
+      if (m?.type === 'pong') heartbeat.notePong();
       if (m?.type) bus.emit(`ws:${m.type}`, m);
     };
     s.onerror = () => { if (!stale()) { try { s.close(); } catch { /* noop */ } } };
     s.onclose = () => {
       clearTimeout(connGuard);
-      if (stale() || stopped) return;
+      if (stale()) return;
+      heartbeat.stop();
+      if (stopped) return;
       scheduleRetry();
     };
   }
+  function reconnectNow() {
+    if (stopped) return;
+    clearTimeout(timer);
+    attempt = 0;
+    const s = sock;
+    sock = null;
+    try { s?.close(); } catch { /* noop */ }
+    connect();
+  }
+  const heartbeat = createHeartbeat({
+    send: (message) => send(message),
+    onDead: () => reconnectNow(),
+  });
   return {
     state,
     start() { if (!stopped) return; stopped = false; attempt = 0; connect(); },
     stop() {
       stopped = true;
       clearTimeout(timer);
+      heartbeat.stop();
       const s = sock;
       sock = null;
       try { s?.close(); } catch { /* noop */ }
       emitState('closed');
     },
-    reconnectNow() {
-      if (stopped) return;
-      clearTimeout(timer);
-      attempt = 0;
-      const s = sock;
-      sock = null;
-      try { s?.close(); } catch { /* noop */ }
-      connect();
-    },
+    reconnectNow,
     subscribe(id) { subs.add(id); send({ type: 'subscribe', sessionId: id }); },
     unsubscribe(id) { subs.delete(id); send({ type: 'unsubscribe', sessionId: id }); },
+    pauseHeartbeat() { heartbeat.pause(); },
+    resumeHeartbeat() { heartbeat.resume(); },
   };
 })();

@@ -4,9 +4,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { api, fetchSessions, pendingSessionMessages, sessionCache } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
+import { createConversationState, displayKey } from '../../../web/core/conversation-state.js';
 import { PERMISSION_MODES, getSessionMode, setSessionMode } from '../../../web/core/modes.js';
 import { ws } from '../../../web/core/ws.js';
-import { cmpMsg, msgKey } from '../lib/format.js';
 import { ConversationHeader } from '../components/ConversationHeader.js';
 import { GlassSurface } from '../components/GlassSurface.js';
 import { Icon } from '../components/Icon.js';
@@ -20,13 +20,15 @@ import { useTheme } from '../theme.js';
 // - 数据倒序（最新在 index 0），maintainVisibleContentPosition 原生实现「贴底跟随 + 翻页不跳」
 //   （minIndexForVisible:1 避免锚定到正在追加的最新条目，autoscrollToTopThreshold 即 web 的 stick 语义）
 // - 向上翻更早消息 = onEndReached（视觉顶部），追加到数据尾端，无需 web 的 prepend 滚动补偿
+// 消息身份、发送状态与流式合并由 web/core/conversation-state.js 统一维护。
 export function ChatScreen({ route }) {
   const sessionId = route.params.sessionId;
   const navigation = useNavigation();
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
 
-  const store = useRef({ map: new Map(), sorted: [] });
+  const stateRef = useRef(null);
+  if (!stateRef.current) stateRef.current = createConversationState();
   const [version, setVersion] = useState(0);
   const [meta, setMeta] = useState(sessionCache.get(sessionId) || null);
   const [status, setStatus] = useState(sessionCache.get(sessionId)?.status || null);
@@ -35,153 +37,299 @@ export function ChatScreen({ route }) {
   const [initLoading, setInitLoading] = useState(true);
   const [loadErr, setLoadErr] = useState('');
   const [runActive, setRunActive] = useState(() => sessionCache.get(sessionId)?.status === 'daemon-driving');
-  const [pending, setPending] = useState(null); // 已 POST、尚未从 WS 回显的用户消息
   const [mode, setMode] = useState(() => getSessionMode(sessionId));
   const [activeRunId, setActiveRunId] = useState(null);
   const [showJump, setShowJump] = useState(false);
+  const activeRunIdRef = useRef(null);
   const listRef = useRef(null);
   const loadingOlder = useRef(false);
+  const newIds = useRef(new Set());
+  const retryInFlight = useRef(new Set());
+  const bumpScheduled = useRef(false);
+  // ready=false 时把 live 帧排队，订阅确认后的快照合并完成再按序回放。
+  const syncRef = useRef({ ready: false, syncing: false, queue: [], gen: 0, timer: null });
 
-  const addMsgs = useCallback((list) => {
-    const st = store.current;
-    const fresh = [];
-    for (const m of list) {
-      const k = msgKey(m);
-      if (!st.map.has(k)) { st.map.set(k, m); fresh.push(m); }
+  const bump = useCallback(() => setVersion((v) => v + 1), []);
+  const bumpOnce = useCallback(() => {
+    if (bumpScheduled.current) return;
+    bumpScheduled.current = true;
+    queueMicrotask(() => {
+      bumpScheduled.current = false;
+      bump();
+    });
+  }, [bump]);
+
+  const applyFrame = useCallback((frame) => {
+    const st = stateRef.current;
+    if (frame.type === 'message') st.upsertOfficial(frame.message);
+    else if (frame.type === 'stream') {
+      st.applyStream({
+        runId: frame.runId, messageId: frame.messageId, blockIndex: frame.blockIndex, text: frame.text,
+      });
+    } else if (frame.type === 'stream_snapshot') {
+      st.applyStreamSnapshot({ runId: frame.runId, blocks: frame.blocks });
     }
-    if (fresh.length === 0) return false;
-    fresh.sort(cmpMsg);
-    const sorted = st.sorted;
-    // 快路径：fresh 整体 ≥ 当前尾部则直接追加，跳过全量 sort（web 同款）
-    const canAppend = sorted.length === 0 || cmpMsg(sorted[sorted.length - 1], fresh[0]) <= 0;
-    st.sorted = canAppend ? sorted.concat(fresh) : [...st.map.values()].sort(cmpMsg);
-    setVersion((v) => v + 1);
-    return true;
   }, []);
 
-  // ---- 初始加载：尾部 100 条 + 会话元信息（新会话落盘竞态重试 8 次）
+  const loadSnapshot = useCallback(async (gen) => {
+    const path = `/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=200`;
+    let d = null;
+    let error = null;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        d = await api(path);
+        error = null;
+        break;
+      } catch (e) {
+        error = e;
+        if (e.code !== 'session_not_found' || attempt === 7) break;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    if (gen !== syncRef.current.gen) return false;
+    if (!d) {
+      // 快照失败只报错，不清本地气泡（乐观消息仍可重试/等回显）。
+      setLoadErr(error?.code === 'session_not_found' ? '会话不存在' : `加载失败：${error?.code ?? 'unknown'}`);
+      setInitLoading(false);
+      return false;
+    }
+    stateRef.current.applySnapshot({ messages: d.messages, firstSeq: d.firstSeq, hasMore: d.hasMore });
+    setFirstSeq(d.firstSeq ?? null);
+    setHasMore(!!d.hasMore);
+    setLoadErr('');
+    if (d.status) setStatus(d.status);
+    const runId = d.activeRunId ?? null;
+    activeRunIdRef.current = runId;
+    setActiveRunId(runId);
+    setRunActive(d.status === 'daemon-driving' || runId != null);
+    setInitLoading(false);
+    bump();
+    return true;
+  }, [sessionId, bump]);
+
+  const startFetch = useCallback(async (gen) => {
+    const sync = syncRef.current;
+    if (sync.syncing || gen !== sync.gen) return;
+    sync.syncing = true;
+    clearTimeout(sync.timer);
+    sync.timer = null;
+    await loadSnapshot(gen);
+    if (gen !== sync.gen) return;
+    const queued = sync.queue;
+    sync.queue = [];
+    for (const frame of queued) applyFrame(frame);
+    sync.ready = true;
+    sync.syncing = false;
+    bump();
+  }, [loadSnapshot, applyFrame, bump]);
+
+  const waitForSubscribe = useCallback(() => {
+    const sync = syncRef.current;
+    clearTimeout(sync.timer);
+    sync.ready = false;
+    sync.syncing = false;
+    sync.queue = [];
+    const gen = ++sync.gen;
+    sync.timer = setTimeout(() => {
+      sync.timer = null;
+      if (gen === sync.gen) startFetch(gen);
+    }, 3000);
+  }, [startFetch]);
+
+  const restartSyncNow = useCallback(() => {
+    const sync = syncRef.current;
+    clearTimeout(sync.timer);
+    sync.timer = null;
+    sync.ready = false;
+    sync.syncing = false;
+    sync.queue = [];
+    startFetch(++sync.gen);
+  }, [startFetch]);
+
+  const onSubscribed = useCallback(() => {
+    const sync = syncRef.current;
+    clearTimeout(sync.timer);
+    sync.timer = null;
+    if (sync.syncing) return;
+    startFetch(sync.gen);
+  }, [startFetch]);
+
+  // ---- 挂载：重置状态、接管新会话待发文本、订阅并等待快照窗口
   useEffect(() => {
-    store.current = { map: new Map(), sorted: [] };
-    setVersion((v) => v + 1);
+    const st = stateRef.current;
+    st.reset();
+    newIds.current.clear();
+    activeRunIdRef.current = null;
+    setActiveRunId(null);
+    setFirstSeq(null);
+    setHasMore(false);
     setInitLoading(true);
     setLoadErr('');
-    const initialText = pendingSessionMessages.get(sessionId);
-    if (initialText) {
-      setPending(initialText);
+    setMeta(sessionCache.get(sessionId) || null);
+    setStatus(sessionCache.get(sessionId)?.status || null);
+    setRunActive(sessionCache.get(sessionId)?.status === 'daemon-driving');
+
+    const initial = pendingSessionMessages.get(sessionId);
+    if (initial) {
       pendingSessionMessages.delete(sessionId);
+      if (typeof initial === 'string') {
+        st.addLocal(initial);
+      } else {
+        const item = st.addLocal(initial.text, initial.clientMessageId);
+        if (initial.status === 'accepted') st.markAccepted(item.clientMessageId, initial.runId);
+        else if (initial.status === 'unconfirmed') st.markUnconfirmed(item.clientMessageId);
+      }
     }
+    bump();
+
     ws.subscribe(sessionId);
+    waitForSubscribe();
+
     (async () => {
-      try {
-        let d;
-        for (let attempt = 0; attempt < 8; attempt++) {
-          try {
-            d = await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=100`);
-            break;
-          } catch (error) {
-            if (error.code !== 'session_not_found' || attempt === 7) throw error;
-            await new Promise((resolve) => setTimeout(resolve, 250));
-          }
-        }
-        addMsgs(d.messages);
-        setFirstSeq(d.firstSeq);
-        setHasMore(d.hasMore);
-      } catch (e) {
-        setLoadErr(e.code === 'session_not_found' ? '会话不存在' : `加载失败：${e.code}`);
-      } finally { setInitLoading(false); }
       if (!sessionCache.has(sessionId)) { try { await fetchSessions(200); } catch { /* 列表拿不到就用兜底展示 */ } }
       const s = sessionCache.get(sessionId);
-      if (s) { setMeta(s); setStatus((st) => st ?? s.status); }
+      if (s) { setMeta(s); setStatus((cur) => cur ?? s.status); }
     })();
-    return () => ws.unsubscribe(sessionId);
-  }, [sessionId, addMsgs]);
 
-  // ---- WS 事件：同 tick 多条 message 微任务合并（web 同款）
-  const pendingBatch = useRef(null);
-  useBus('ws:message', (e) => {
-    if (e.sessionId !== sessionId) return;
-    const m = e.message;
-    if (m.role === 'user' && m.kind === 'text') {
-      setPending((p) => (p && m.text?.trim() === p.trim() ? null : p));
+    return () => {
+      ws.unsubscribe(sessionId);
+      const sync = syncRef.current;
+      clearTimeout(sync.timer);
+      sync.timer = null;
+      sync.gen += 1;
+      sync.ready = false;
+      sync.syncing = false;
+      sync.queue = [];
+    };
+  }, [sessionId, bump, waitForSubscribe]);
+
+  // ---- WS：订阅确认前缓存 live 帧，确认后快照 + 顺序回放
+  const onFrame = useCallback((frame) => {
+    const sync = syncRef.current;
+    if (!sync.ready) {
+      sync.queue.push(frame);
+      if (sync.queue.length > 1000) sync.queue.shift();
+      return;
     }
-    if (!pendingBatch.current) {
-      pendingBatch.current = [];
-      queueMicrotask(() => {
-        const batch = pendingBatch.current;
-        pendingBatch.current = null;
-        if (batch && batch.length) addMsgs(batch);
-      });
-    }
-    pendingBatch.current.push(m);
-  }, [sessionId, addMsgs]);
+    applyFrame(frame);
+    bumpOnce();
+  }, [applyFrame, bumpOnce]);
+
+  useBus('ws:subscribed', (e) => {
+    if (e.sessionId === sessionId && e.ok !== false) onSubscribed();
+  }, [sessionId, onSubscribed]);
+  useBus('ws:message', (e) => { if (e.sessionId === sessionId) onFrame(e); }, [sessionId, onFrame]);
+  useBus('ws:stream', (e) => { if (e.sessionId === sessionId) onFrame(e); }, [sessionId, onFrame]);
+  useBus('ws:stream_snapshot', (e) => { if (e.sessionId === sessionId) onFrame(e); }, [sessionId, onFrame]);
   useBus('ws:status', (e) => { if (e.sessionId === sessionId) setStatus(e.status); }, [sessionId]);
+
   useBus('ws:run', (e) => {
     if (e.sessionId !== sessionId) return;
     if (e.state === 'started') {
       setRunActive(true);
-      setActiveRunId(e.runId || null);
+      activeRunIdRef.current = e.runId ?? null;
+      setActiveRunId(e.runId ?? null);
       // 本轮显式指定过模式才随帧带 permissionMode；缺席≠default，不据此降级本地记忆
       if (e.permissionMode && PERMISSION_MODES.includes(e.permissionMode)) {
         setMode(e.permissionMode);
         setSessionMode(sessionId, e.permissionMode);
       }
-    } else {
-      setRunActive(false);
-      setActiveRunId(null);
-      setPending(null);
-      if (e.state === 'error') toast(`运行出错：${e.error || '未知错误'}`, 'error');
+      return;
     }
-  }, [sessionId]);
-  // ---- resync：daemon 侧链视图失效，清空全量重拉
-  useBus('ws:resync', async (e) => {
+    // 迟到的终态帧不得结算新一轮；仅当已跟踪到另一个非空 run 时忽略。
+    const runId = e.runId ?? null;
+    if (activeRunIdRef.current !== null && activeRunIdRef.current !== runId) return;
+    if (runId != null) stateRef.current.clearStream(runId);
+    activeRunIdRef.current = null;
+    setActiveRunId(null);
+    setRunActive(false);
+    bump();
+    if (e.state === 'error') toast(`运行出错：${e.error || '未知错误'}`, 'error');
+  }, [sessionId, bump]);
+
+  // ---- resync：daemon 侧链视图失效，清空后立即快照
+  useBus('ws:resync', (e) => {
     if (e.sessionId !== sessionId) return;
-    store.current = { map: new Map(), sorted: [] };
-    setVersion((v) => v + 1);
-    try {
-      const d = await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=100`);
-      addMsgs(d.messages);
-      setFirstSeq(d.firstSeq);
-      setHasMore(d.hasMore);
-    } catch { /* 拉取失败：等下次 ws-open 补缺口或用户翻页 */ }
-  }, [sessionId, addMsgs]);
-  // ---- 重连补缺口：拉尾部，无重叠则向前翻直到接上（最多 3 页）
-  useBus('ws-open', async () => {
-    const st = store.current;
-    if (st.map.size === 0) return;
-    try {
-      let d = await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=100`);
-      let overlap = d.messages.some((m) => st.map.has(msgKey(m)));
-      const pages = [d.messages];
-      let guard = 0;
-      let cursor = d.firstSeq;
-      while (!overlap && d.hasMore && guard++ < 3) {
-        d = await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=100&beforeSeq=${cursor}`);
-        overlap = d.messages.some((m) => st.map.has(msgKey(m)));
-        pages.push(d.messages);
-        cursor = d.firstSeq;
-      }
-      addMsgs(pages.flat());
-    } catch { /* 断线补拉失败，等下次重连 */ }
-    try {
-      await fetchSessions(200);
-      const s = sessionCache.get(sessionId);
-      if (s) { setMeta(s); setStatus(s.status); }
-    } catch { /* 状态刷新失败不阻塞 */ }
-  }, [sessionId, addMsgs]);
+    stateRef.current.reset();
+    activeRunIdRef.current = null;
+    setActiveRunId(null);
+    bump();
+    restartSyncNow();
+  }, [sessionId, bump, restartSyncNow]);
+
+  // ---- 重连：重新走订阅 + 快照（空 store 也要同步），并刷新会话元信息
+  useBus('ws-open', () => {
+    waitForSubscribe();
+    (async () => {
+      try {
+        await fetchSessions(200);
+        const s = sessionCache.get(sessionId);
+        if (s) { setMeta(s); setStatus(s.status); }
+      } catch { /* 状态刷新失败不阻塞同步 */ }
+    })();
+  }, [sessionId, waitForSubscribe]);
 
   // ---- 向上翻页（inverted 列表的视觉顶部 = onEndReached）
   const loadOlder = useCallback(async () => {
     if (loadingOlder.current || !hasMore || firstSeq == null) return;
     loadingOlder.current = true;
+    const gen = syncRef.current.gen;
     try {
       const d = await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=100&beforeSeq=${firstSeq}`);
-      setFirstSeq(d.firstSeq);
-      setHasMore(d.hasMore);
-      addMsgs(d.messages);
+      if (gen !== syncRef.current.gen) return;
+      for (const m of d.messages) stateRef.current.upsertOfficial(m);
+      setFirstSeq(d.firstSeq ?? null);
+      setHasMore(!!d.hasMore);
+      bump();
     } catch (e) {
       toast(`历史加载失败：${e.code}`, 'error');
     } finally { loadingOlder.current = false; }
-  }, [sessionId, hasMore, firstSeq, addMsgs]);
+  }, [sessionId, hasMore, firstSeq, bump]);
+
+  const retryLocal = useCallback(async (target) => {
+    const st = stateRef.current;
+    const item = typeof target === 'string'
+      ? st.pendingLocals().find((l) => l.clientMessageId === target)
+      : target;
+    if (!item?.clientMessageId || retryInFlight.current.has(item.clientMessageId)) return;
+    retryInFlight.current.add(item.clientMessageId);
+    try {
+      const d = await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          text: item.text,
+          clientMessageId: item.clientMessageId,
+          ...(mode !== 'default' ? { permissionMode: mode } : {}),
+        }),
+      });
+      st.markAccepted(item.clientMessageId, d.runId);
+    } catch (e) {
+      const statusCode = e.status ?? 0;
+      const definite = (statusCode >= 400 && statusCode < 500 && statusCode !== 408 && statusCode !== 429)
+        || e.code === 'not_idle' || e.code === 'connection_changed';
+      st.markFailed(item.clientMessageId, { definite });
+    } finally {
+      retryInFlight.current.delete(item.clientMessageId);
+      bump();
+    }
+  }, [sessionId, mode, bump]);
+
+  // ---- composer 契约：本地气泡先进列表，再按 202/失败回填状态
+  const onQueue = useCallback(({ clientMessageId, text }) => {
+    const item = stateRef.current.addLocal(text, clientMessageId);
+    newIds.current.add(displayKey(item));
+    bump();
+  }, [bump]);
+
+  const onAccepted = useCallback((clientMessageId, runId) => {
+    stateRef.current.markAccepted(clientMessageId, runId);
+    bump();
+  }, [bump]);
+
+  const onSendFailed = useCallback((clientMessageId, definite) => {
+    stateRef.current.markFailed(clientMessageId, { definite });
+    bump();
+  }, [bump]);
 
   const onScroll = useCallback((e) => {
     const y = e.nativeEvent.contentOffset.y;
@@ -193,43 +341,31 @@ export function ChatScreen({ route }) {
   }, []);
 
   // inverted 数据：最新在前
-  const msgsDesc = useMemo(() => [...store.current.sorted].reverse(), [version]);
-
+  const rows = useMemo(() => stateRef.current.items().reverse(), [version]);
+  const hasStream = rows.some((m) => m.key != null);
   const isRunning = runActive || status === 'daemon-driving';
+  const showRunning = isRunning && !hasStream;
   const title = meta?.title || sessionId.slice(0, 8);
+  const hasGap = stateRef.current.hasGap();
 
-  // 视觉底部（inverted 的 ListHeader）：pending 气泡 + 运行中打字点
-  const listHeader = (
-    <View>
-      {pending ? (
-        <View style={{ flexDirection: 'row', marginVertical: 6, gap: 8, opacity: 0.65 }}>
-          <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: colors.bubble, alignItems: 'center', justifyContent: 'center', marginTop: 2 }}>
-            <Text style={{ fontSize: 11, color: colors.ink }}>我</Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <View style={{ backgroundColor: colors.bubble, borderRadius: 18, borderTopLeftRadius: 8, paddingHorizontal: 12, paddingVertical: 8, alignSelf: 'flex-start' }}>
-              <Text style={{ color: colors.inkStrong, fontSize: 15, lineHeight: 22 }}>{pending}</Text>
-            </View>
-            <Text style={{ color: colors.ink3, fontSize: 11, marginTop: 2 }}>发送中…</Text>
-          </View>
-        </View>
-      ) : null}
-      {isRunning ? (
-        <View style={{ flexDirection: 'row', marginVertical: 6, gap: 8, alignItems: 'center' }}>
-          <View style={{ width: 26, alignItems: 'center' }}><Spark size={16} /></View>
-          <Text style={{ color: colors.ink2, fontSize: 18, letterSpacing: 2 }}>···</Text>
-        </View>
-      ) : null}
+  // 视觉底部（inverted 的 ListHeader）：运行中打字点（有流式文本时让位给正文）
+  const listHeader = showRunning ? (
+    <View style={{ flexDirection: 'row', marginVertical: 6, gap: 8, alignItems: 'center' }}>
+      <View style={{ width: 26, alignItems: 'center' }}><Spark size={16} /></View>
+      <Text style={{ color: colors.ink2, fontSize: 18, letterSpacing: 2 }}>···</Text>
     </View>
-  );
+  ) : null;
 
   // 视觉顶部（inverted 的 ListFooter）：更早消息入口 / 初始加载 / 错误 / 空态
   const listFooter = (
     <View style={{ paddingVertical: 8 }}>
       {initLoading ? <ActivityIndicator color={colors.ink2} /> : null}
       {loadErr ? <Text style={{ textAlign: 'center', color: colors.danger, fontSize: 13 }}>{loadErr}</Text> : null}
-      {!initLoading && !loadErr && msgsDesc.length === 0 ? (
+      {!initLoading && !loadErr && rows.length === 0 ? (
         <Text style={{ textAlign: 'center', color: colors.ink3, fontSize: 13 }}>（空会话）</Text>
+      ) : null}
+      {hasGap ? (
+        <Text style={{ textAlign: 'center', color: colors.ink3, fontSize: 12, marginBottom: 4 }}>部分历史未加载</Text>
       ) : null}
       {hasMore ? (
         <TouchableOpacity onPress={loadOlder} style={{ padding: 8 }}>
@@ -258,10 +394,17 @@ export function ChatScreen({ route }) {
       <View style={{ flex: 1 }}>
         <FlatList
           ref={listRef}
-          data={msgsDesc}
+          data={rows}
           inverted
-          keyExtractor={(m) => msgKey(m)}
-          renderItem={({ item }) => <MessageRow m={item} />}
+          keyExtractor={(m) => m.key ?? displayKey(m)}
+          renderItem={({ item }) => (
+            <MessageRow
+              m={item}
+              animate={newIds.current.has(displayKey(item))}
+              onAnimated={() => { newIds.current.delete(displayKey(item)); }}
+              onRetry={retryLocal}
+            />
+          )}
           maintainVisibleContentPosition={{ minIndexForVisible: 1, autoscrollToTopThreshold: 100 }}
           onEndReached={loadOlder}
           onEndReachedThreshold={0.6}
@@ -311,8 +454,10 @@ export function ChatScreen({ route }) {
         mode={mode}
         onModeChange={(m) => { setMode(m); setSessionMode(sessionId, m); }}
         onStatusConflict={(s) => setStatus(s)}
-        onSent={(text) => setPending(text)}
-        onStopped={() => { setRunActive(false); setActiveRunId(null); setStatus('idle'); }}
+        onQueue={onQueue}
+        onAccepted={onAccepted}
+        onSendFailed={onSendFailed}
+        onRetry={retryLocal}
       />
     </View>
   );

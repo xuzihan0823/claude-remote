@@ -358,6 +358,72 @@ test("watch 不存在的会话：抛 ENOENT 供 HTTP 层转 404", async () => {
   }
 });
 
+test("并发 watch：共享同一次初始化，两个调用都 resolve 且只建立一个会话状态", async () => {
+  const scheduler = new FakeScheduler();
+  const created: string[] = [];
+  const factory: DirWatchFactory = (dir) => {
+    created.push(dir);
+    return { close: () => {} };
+  };
+  const { projectsDir, sessionId } = await makeProject(baseLines);
+  const watcher = new SessionWatcher({ projectsDir, scheduler, now: scheduler.now, dirWatchFactory: factory });
+  try {
+    await Promise.all([watcher.watch(sessionId), watcher.watch(sessionId)]);
+    assert.deepEqual(watcher.watched, [sessionId]);
+    assert.equal(created.length, 1); // 只扫描/建立一次
+    assert.equal(scheduler.pending, 1); // 轮询 tick 只挂一次
+  } finally {
+    watcher.close();
+  }
+});
+
+test("并发 watch 初始化失败：两个调用都 reject，随后重试可成功", async () => {
+  const { projectsDir } = await makeProject(baseLines);
+  const sessionId = "sid-later";
+  const watcher = makeWatcher(projectsDir);
+  try {
+    const results = await Promise.allSettled([
+      watcher.watch(sessionId),
+      watcher.watch(sessionId),
+    ]);
+    for (const result of results) {
+      assert.equal(result.status, "rejected");
+      if (result.status === "rejected") {
+        assert.equal((result.reason as NodeJS.ErrnoException).code, "ENOENT");
+      }
+    }
+    assert.deepEqual(watcher.watched, []);
+
+    await writeFile(
+      join(projectsDir, "-tmp-demo", `${sessionId}.jsonl`),
+      `${userLine("x1", null, "后来出现")}\n`,
+    );
+    await watcher.watch(sessionId);
+    assert.deepEqual(watcher.watched, [sessionId]);
+  } finally {
+    watcher.close();
+  }
+});
+
+test("初始化未完成时 close：watch 正常 resolve 且不留下会话状态", async () => {
+  const scheduler = new FakeScheduler();
+  const created: string[] = [];
+  const factory: DirWatchFactory = (dir) => {
+    created.push(dir);
+    return { close: () => {} };
+  };
+  const { projectsDir, sessionId } = await makeProject(baseLines);
+  const watcher = new SessionWatcher({ projectsDir, scheduler, now: scheduler.now, dirWatchFactory: factory });
+
+  const watching = watcher.watch(sessionId);
+  watcher.close();
+  await watching;
+
+  assert.deepEqual(watcher.watched, []);
+  assert.equal(created.length, 0); // 关闭后不再建立目录监听
+  assert.equal(scheduler.pending, 0);
+});
+
 test("unwatch/close 释放全部 timer 与目录监听，进程可退出", async () => {
   const scheduler = new FakeScheduler();
   const created: string[] = [];

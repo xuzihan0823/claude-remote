@@ -73,6 +73,19 @@ R7 verification completed: mobile tests 29/29, workspace typecheck and full base
 
 Home-default verification: daemon server tests assert `homeCwd` in the catalog and successful creation in the home directory; mobile tests and `pnpm typecheck` pass; full workspace tests pass (Web 5, mobile 29, interactions 7, agent-bridge 13, daemon 102). A clean simulator install connected to the fixture daemon defaulted Home to `主目录 (~)` with the home picker option selected (`testHomeTargetDefaultsToHomeDirectory`, 1/1). No model turn was submitted. The running daemon still needs a restart, and the new app build needs authorization before commit/push/device install.
 
+## Chat Reliability And Streaming (approved 2026-10-19)
+
+Coding is dispatched to the Haiku tier (`coder-deepseek`); the main session owns design, integration, and final verification. Each block owns disjoint files and must be dispatched with a prompt starting `Active task: .trellis/tasks/07-19-mobile-session-features`.
+
+1. A1 transcript: `packages/daemon/src/transcript/{types.ts,reader.ts}` project optional `apiMessageId`; extend reader tests.
+2. A2 agent-bridge: `packages/agent-bridge/src/{types.ts,event-adapter.ts,sdk-bridge.ts}` add `StreamTracker`, `assistant_delta` identity, and SDK input `uuid`; tests for multiple blocks/wrappers.
+3. A3 runner: `packages/daemon/src/run/runner.ts` accept `clientMessageId`, keep the bounded per-run stream buffer, expose a snapshot reader.
+4. A4 server: `packages/daemon/src/server.ts` — optional `clientMessageId`/`sessionId` on POST, abort runId guard, `GET messages` `status`/`activeRunId`, ping/pong, subscribe ack, stream broadcast and snapshot. Extend `packages/daemon/__tests__/server.test.ts`.
+5. A5 watcher: `packages/daemon/src/watch/watcher.ts` shared initialization Promise with ready semantics; tests for concurrent subscribe/unsubscribe/close.
+6. B shared client: `web/core/{api.js,ws.js}`, new `web/core/conversation-state.js` (send state machine, reconciliation, transient stream items), and `web/ui/screens/chat.js`; node regressions.
+7. C native UI: `app/src/screens/ChatScreen.js`, `app/src/components/MessageRow.js`, `app/src/components/composer/{ChatComposer.js,NewChatComposer.js}`, `app/src/screens/HomeScreen.js`, `app/src/lib/format.js`; reuse `theme.js` and RN `Animated`, no new dependency.
+8. Integration review: protocol round-trip, generation/run guards, stream replacement, no double bubbles, Reduce Motion, safe-area/keyboard behavior preserved. Then run workspace tests/typecheck, mock streaming scenarios, Expo export, and an iOS simulator build with native evidence under `output/chat-message-verification/`. No paid model request, no commit without explicit authorization.
+
 ## Validation Commands
 
 ```bash
@@ -96,3 +109,16 @@ xcodebuild -project ios/App/App.xcodeproj -scheme App \
 - Abort must settle the same completion/event path as normal and error runs.
 - The new composer must respect safe-area insets and mobile keyboard resizing.
 - The marketing icon must be opaque before the final archive check.
+
+### Chat Reliability And Streaming — Verification (2026-10-19)
+
+- Workspace checks: `pnpm test` passed — web 28/28, mobile 29/29, interactions 7/7, agent-bridge 18/18, daemon 119/119; `pnpm typecheck` clean.
+- Web end-to-end (mock daemon): local bubble appears immediately, 202 switches it to accepted, official echo replaces the same key in place (always one bubble); real streaming text grew 50 → 114 → 189 → 213 chars and the run bar disappeared at the end; forced WS drop reconnected and resumed streaming without duplicates; dropped 202 showed "发送结果待确认" and was reconciled by the echo without resending.
+- Native XCTest (iPhone 17, iOS 26.5, Release build, mock daemon):
+  - `testUserBubbleDirectionAndSingleConfirmation` passed — user bubble right-aligned with status subtitle, exactly one bubble after confirmation, reply left-aligned; timed screenshots at 2 s / 3 s / 4 s show the reply growing (`同一 seq 的 thi` while "Claude 正在运行…" is still visible, later the full body with code block).
+  - `testIdenticalTextSentTwiceStaysTwoBubbles` passed — sending the identical text twice keeps exactly two distinct bubbles.
+  - `testLargeTextDarkLayout` passed — dark mode at accessibility-extra-extra-extra-large: composer hittable, user bubble right-aligned, not clipped by screen edges or composer.
+  - Reduce Motion enabled (simulator `ReduceMotionEnabled=1`): the duplicate-send test still passed (no crash, no duplicate, correct layout).
+- Test-harness notes: XCTest element queries wait for app quiescence, so mid-stream content is sampled with timed screenshots instead of element queries. The RN accessibility tree duplicates each text node (outer/inner StaticText), so bubble counts de-duplicate by frame. Mock session state persists per process, so each run uses a unique message text.
+- Mock fixture additions (test-only): `GET /api/projects`, `MOCK_APPROVAL_INTERVAL_MS=0` to disable the fake approval ticker during UI tests.
+- No real paid model request was issued. Git commit remains pending explicit user authorization.

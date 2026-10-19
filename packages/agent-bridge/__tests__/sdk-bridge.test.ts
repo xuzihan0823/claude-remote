@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { QueryFactory } from "../src/sdk-bridge.js";
 import { startSdkQuery } from "../src/sdk-bridge.js";
 
@@ -20,7 +21,7 @@ function fakeQuery(): { factory: QueryFactory; params: () => QueryParams | undef
   return { factory, params: () => captured };
 }
 
-function options(factory: QueryFactory, extra: { resume?: string; sessionId?: string; model?: string; permissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions" } = {}) {
+function options(factory: QueryFactory, extra: { resume?: string; sessionId?: string; model?: string; clientMessageId?: string; permissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions" } = {}) {
   const handle = startSdkQuery({
     cwd: "/tmp/project",
     prompt: "hello",
@@ -116,4 +117,24 @@ test("CLAUDE_BIN set injects pathToClaudeCodeExecutable; unset omits it", () => 
     if (previous === undefined) delete process.env.CLAUDE_BIN;
     else process.env.CLAUDE_BIN = previous;
   }
+});
+
+test("client message id becomes the first input user message uuid", async () => {
+  const fake = fakeQuery();
+  const handle = options(fake.factory, { clientMessageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
+  const prompt = fake.params()?.prompt as AsyncIterable<SDKUserMessage>;
+  const first = await prompt[Symbol.asyncIterator]().next();
+  assert.equal(first.done, false);
+  assert.equal((first.value as SDKUserMessage).uuid, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  handle.close();
+});
+
+test("omitted client message id leaves the first input user message uuid absent", async () => {
+  const fake = fakeQuery();
+  const handle = options(fake.factory, {});
+  const prompt = fake.params()?.prompt as AsyncIterable<SDKUserMessage>;
+  const first = await prompt[Symbol.asyncIterator]().next();
+  assert.equal(first.done, false);
+  assert.equal(Object.hasOwn(first.value as object, "uuid"), false);
+  handle.close();
 });

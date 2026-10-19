@@ -20,17 +20,45 @@ function contentText(value: unknown): string {
   return typeof item?.text === "string" ? item.text : "";
 }
 
-export function adaptSdkMessage(message: SDKMessage): WorkerEvent[] {
+export interface StreamTracker {
+  apiMessageId?: string;
+  blockIndex: number;
+}
+
+export function createStreamTracker(): StreamTracker {
+  return { blockIndex: 0 };
+}
+
+export function adaptSdkMessage(message: SDKMessage, tracker?: StreamTracker): WorkerEvent[] {
   const source = message as unknown as Record<string, unknown>;
   const sessionId = typeof source.session_id === "string" ? source.session_id : undefined;
   const events: WorkerEvent[] = sessionId === undefined ? [] : [{ type: "session", sessionId }];
 
   if (message.type === "stream_event") {
+    const parentToolUseId = source.parent_tool_use_id;
+    if (typeof parentToolUseId === "string" && parentToolUseId.length > 0) return events;
     const event = message.event as unknown as Record<string, unknown>;
+    if (tracker !== undefined) {
+      if (event.type === "message_start") {
+        const apiMessage = record(event.message);
+        if (typeof apiMessage?.id === "string" && apiMessage.id.length > 0) tracker.apiMessageId = apiMessage.id;
+        tracker.blockIndex = 0;
+      } else if (event.type === "content_block_start") {
+        if (typeof event.index === "number" && Number.isInteger(event.index) && event.index >= 0) tracker.blockIndex = event.index;
+      }
+    }
     if (event.type === "content_block_delta") {
       const delta = record(event.delta);
       if (delta?.type === "text_delta" && typeof delta.text === "string") {
-        events.push({ type: "assistant_delta", text: delta.text, messageId: message.uuid });
+        events.push(tracker === undefined
+          ? { type: "assistant_delta", text: delta.text, messageId: message.uuid }
+          : {
+            type: "assistant_delta",
+            text: delta.text,
+            messageId: message.uuid,
+            ...(tracker.apiMessageId === undefined ? {} : { apiMessageId: tracker.apiMessageId }),
+            blockIndex: tracker.blockIndex,
+          });
       }
     }
     return events;

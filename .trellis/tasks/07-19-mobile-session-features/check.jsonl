@@ -8,3 +8,5 @@
 {"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Review responsive layout, accessibility labels, and no-overlap behavior."}
 {"file":".trellis/spec/frontend/type-safety.md","reason":"Review shared payload typing and boundary validation."}
 {"file":".trellis/spec/frontend/project-conversations.md","reason":"Check explicit workspace targeting, pagination, draft stability, and connection/filter races."}
+{"file":".trellis/tasks/07-19-mobile-session-features/research/chat-reliability-streaming-2026-10-19.md","reason":"Verify no duplicate user bubble, correct send states, stream replacement, heartbeat, and abort runId guard."}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"Review bubble direction, animation restraint, accessibility, and keyboard/safe-area preservation."}

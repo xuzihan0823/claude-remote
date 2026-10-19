@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import {
   adaptSdkMessage,
   createPermissionAdapter,
+  createStreamTracker,
   startSdkQuery,
   type PermissionBroker,
   type QueryFactory,
@@ -47,6 +48,8 @@ export interface StartTurnOptions {
   model?: string;
   /** Start a new persisted SDK session with sessionId instead of resuming it. */
   newSession?: boolean;
+  /** Client-generated id persisted as the initial user message UUID. */
+  clientMessageId?: string;
   /** 权限模式覆盖；省略时由 SDK 走 "default"。 */
   permissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions";
 }
@@ -100,10 +103,19 @@ class EventQueue<T extends object> implements AsyncIterable<T> {
   }
 }
 
+export interface StreamBlock {
+  messageId: string;
+  blockIndex: number;
+  text: string;
+}
+
+const STREAM_BUFFER_LIMIT = 32768;
+
 interface ActiveRun {
   sessionId: string;
   controller: AbortController;
   aborted: boolean;
+  stream: Map<string, StreamBlock>;
 }
 
 export class TurnRunner {
@@ -124,7 +136,7 @@ export class TurnRunner {
   }
 
   startTurn(options: StartTurnOptions): TurnHandle {
-    const { sessionId, cwd, text, model, newSession = false, permissionMode } = options;
+    const { sessionId, cwd, text, model, newSession = false, clientMessageId, permissionMode } = options;
     if (typeof text !== "string" || text.trim() === "") {
       throw new TypeError("text must be a non-empty string");
     }
@@ -155,6 +167,7 @@ export class TurnRunner {
           signal: controller.signal,
           ...(newSession ? { sessionId } : { resume: sessionId }),
           ...(model === undefined ? {} : { model }),
+          ...(clientMessageId === undefined ? {} : { clientMessageId }),
           ...(permissionMode === undefined ? {} : { permissionMode }),
         },
         this.#queryFactory,
@@ -165,7 +178,7 @@ export class TurnRunner {
     }
 
     const runId = randomUUID();
-    const run: ActiveRun = { sessionId, controller, aborted: false };
+    const run: ActiveRun = { sessionId, controller, aborted: false, stream: new Map() };
     this.#runs.set(runId, run);
     this.#sessionRuns.set(sessionId, runId);
 
@@ -189,6 +202,15 @@ export class TurnRunner {
     return this.#sessionRuns.get(sessionId);
   }
 
+  /** Latest streamed text per block for a session's active run, in insertion order. */
+  streamSnapshot(sessionId: string): StreamBlock[] | undefined {
+    const runId = this.#sessionRuns.get(sessionId);
+    if (runId === undefined) return undefined;
+    const run = this.#runs.get(runId);
+    if (run === undefined) return undefined;
+    return [...run.stream.values()].map((block) => ({ ...block }));
+  }
+
   async #consume(
     runId: string,
     run: ActiveRun,
@@ -196,13 +218,15 @@ export class TurnRunner {
     queue: EventQueue<RunEvent>,
   ): Promise<RunOutcome> {
     const { sessionId } = run;
+    const tracker = createStreamTracker();
     let outcome: RunOutcome;
     try {
       // 流式输入 + persistSession 下，CLI 在 result 后保持存活等待下一条输入，
       // iterator 不会自然耗尽（真机实测，06 集成期修复）——一轮以 result 事件为终点。
       let sawResult = false;
       for await (const message of sdk.messages) {
-        for (const event of adaptSdkMessage(message)) {
+        for (const event of adaptSdkMessage(message, tracker)) {
+          if (event.type === "assistant_delta") appendStreamBlock(run.stream, event);
           queue.push({ type: "worker", runId, sessionId, event });
           if (event.type === "result") sawResult = true;
         }
@@ -243,4 +267,32 @@ export class TurnRunner {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function appendStreamBlock(
+  stream: Map<string, StreamBlock>,
+  event: Extract<WorkerEvent, { type: "assistant_delta" }>,
+): void {
+  if (typeof event.text !== "string") return;
+  const messageId = event.apiMessageId ?? event.messageId;
+  const blockIndex = event.blockIndex ?? 0;
+  const key = `${messageId}:${blockIndex}`;
+  const existing = stream.get(key);
+  if (existing === undefined) stream.set(key, { messageId, blockIndex, text: event.text });
+  else existing.text += event.text;
+
+  let total = 0;
+  for (const block of stream.values()) total += block.text.length;
+  while (total > STREAM_BUFFER_LIMIT) {
+    const oldestKey = stream.keys().next().value;
+    if (oldestKey === undefined) break;
+    const oldest = stream.get(oldestKey);
+    if (oldest === undefined) break;
+    if (stream.size === 1) {
+      oldest.text = oldest.text.slice(total - STREAM_BUFFER_LIMIT);
+      break;
+    }
+    stream.delete(oldestKey);
+    total -= oldest.text.length;
+  }
 }

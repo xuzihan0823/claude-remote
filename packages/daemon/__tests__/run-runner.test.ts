@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import process from "node:process";
 
-import { adaptSdkMessage, type PermissionBroker, type QueryFactory } from "@claude-remote/agent-bridge";
+import { adaptSdkMessage, type PermissionBroker, type QueryFactory, type WorkerEvent } from "@claude-remote/agent-bridge";
 import { NotIdleError, TurnRunner, type ActivityGate, type RunEvent } from "../src/run/runner.js";
 
 type QueryParams = Parameters<QueryFactory>[0];
@@ -49,6 +49,23 @@ function assistantMessage(text: string, uuid: string, sessionId: string): AnySdk
 
 function resultMessage(result: string, uuid: string, sessionId: string): AnySdkMessage {
   return sdkMessage({ type: "result", subtype: "success", is_error: false, result, uuid, session_id: sessionId });
+}
+
+function streamEvent(uuid: string, sessionId: string, event: Record<string, unknown>): AnySdkMessage {
+  return sdkMessage({ type: "stream_event", uuid, session_id: sessionId, event });
+}
+
+async function nextDeltas(
+  iterator: AsyncIterator<RunEvent>,
+  count: number,
+): Promise<Array<Extract<WorkerEvent, { type: "assistant_delta" }>>> {
+  const deltas: Array<Extract<WorkerEvent, { type: "assistant_delta" }>> = [];
+  while (deltas.length < count) {
+    const next = await iterator.next();
+    if (next.done) assert.fail("event stream ended before expected deltas");
+    if (next.value.type === "worker" && next.value.event.type === "assistant_delta") deltas.push(next.value.event);
+  }
+  return deltas;
 }
 
 function stubGate(isIdle: (sessionId: string) => boolean = () => true): {
@@ -276,4 +293,140 @@ test("endRun 抛错也不影响 completion settle 与终态事件", async (t) =>
   assert.deepEqual(await handle.completion, { state: "done" });
   const events = await collect(handle.events);
   assert.deepEqual(events.at(-1), { type: "run", runId: handle.runId, sessionId: "s", state: "done" });
+});
+
+test("clientMessageId 透传为 SDK 输入消息 uuid；省略时不设置", async () => {
+  const clientMessageId = "11111111-1111-4111-8111-111111111111";
+  const first = fakeFactory(async function* () {
+    yield resultMessage("ok", "r1", "sess-cm");
+  });
+  const runner = new TurnRunner({ gate: stubGate().gate, permissions: denyAll, queryFactory: first.factory });
+  const handle = runner.startTurn({ sessionId: "sess-cm", cwd: "/tmp", text: "hi", clientMessageId });
+  await handle.completion;
+
+  const input = first.state.params?.prompt as AsyncIterable<{ uuid?: string }>;
+  const sent = await input[Symbol.asyncIterator]().next();
+  assert.equal(sent.value.uuid, clientMessageId);
+
+  const second = fakeFactory(async function* () {
+    yield resultMessage("ok", "r2", "sess-nocm");
+  });
+  const runner2 = new TurnRunner({ gate: stubGate().gate, permissions: denyAll, queryFactory: second.factory });
+  await runner2.startTurn({ sessionId: "sess-nocm", cwd: "/tmp", text: "hi" }).completion;
+
+  const input2 = second.state.params?.prompt as AsyncIterable<{ uuid?: string }>;
+  const sent2 = await input2[Symbol.asyncIterator]().next();
+  assert.equal(Object.hasOwn(sent2.value, "uuid"), false);
+});
+
+test("stream：delta 携带 apiMessageId/blockIndex，snapshot 按块拼接文本", async () => {
+  const release = deferred();
+  const { factory } = fakeFactory(async function* () {
+    yield streamEvent("u1", "sess-stream", { type: "message_start", message: { id: "msg_A" } });
+    yield streamEvent("u1", "sess-stream", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    yield streamEvent("u1", "sess-stream", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hel" } });
+    yield streamEvent("u1", "sess-stream", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "lo" } });
+    await release.promise;
+    yield resultMessage("完成", "r1", "sess-stream");
+  });
+  const runner = new TurnRunner({ gate: stubGate().gate, permissions: denyAll, queryFactory: factory });
+  const handle = runner.startTurn({ sessionId: "sess-stream", cwd: "/tmp", text: "hi" });
+  const iterator = handle.events[Symbol.asyncIterator]();
+
+  const deltas = await nextDeltas(iterator, 2);
+  assert.deepEqual(deltas, [
+    { type: "assistant_delta", text: "Hel", messageId: "u1", apiMessageId: "msg_A", blockIndex: 0 },
+    { type: "assistant_delta", text: "lo", messageId: "u1", apiMessageId: "msg_A", blockIndex: 0 },
+  ]);
+  assert.deepEqual(runner.streamSnapshot("sess-stream"), [{ messageId: "msg_A", blockIndex: 0, text: "Hello" }]);
+
+  release.resolve();
+  assert.deepEqual(await handle.completion, { state: "done" });
+});
+
+test("stream：blockIndex 递增形成独立 snapshot 条目", async () => {
+  const release = deferred();
+  const { factory } = fakeFactory(async function* () {
+    yield streamEvent("u2", "sess-blocks", { type: "message_start", message: { id: "msg_B" } });
+    yield streamEvent("u2", "sess-blocks", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    yield streamEvent("u2", "sess-blocks", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "第一块" } });
+    yield streamEvent("u2", "sess-blocks", { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } });
+    yield streamEvent("u2", "sess-blocks", { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "第二块" } });
+    await release.promise;
+    yield resultMessage("完成", "r1", "sess-blocks");
+  });
+  const runner = new TurnRunner({ gate: stubGate().gate, permissions: denyAll, queryFactory: factory });
+  const handle = runner.startTurn({ sessionId: "sess-blocks", cwd: "/tmp", text: "hi" });
+  const iterator = handle.events[Symbol.asyncIterator]();
+
+  await nextDeltas(iterator, 2);
+  assert.deepEqual(runner.streamSnapshot("sess-blocks"), [
+    { messageId: "msg_B", blockIndex: 0, text: "第一块" },
+    { messageId: "msg_B", blockIndex: 1, text: "第二块" },
+  ]);
+
+  release.resolve();
+  assert.deepEqual(await handle.completion, { state: "done" });
+});
+
+test("stream snapshot：run 结束后与未知会话均返回 undefined", async () => {
+  const { factory } = fakeFactory(async function* () {
+    yield streamEvent("u3", "sess-settled", { type: "message_start", message: { id: "msg_C" } });
+    yield streamEvent("u3", "sess-settled", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    yield streamEvent("u3", "sess-settled", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "x" } });
+    yield resultMessage("完成", "r1", "sess-settled");
+  });
+  const runner = new TurnRunner({ gate: stubGate().gate, permissions: denyAll, queryFactory: factory });
+  const handle = runner.startTurn({ sessionId: "sess-settled", cwd: "/tmp", text: "hi" });
+
+  assert.deepEqual(await handle.completion, { state: "done" });
+  assert.equal(runner.streamSnapshot("sess-settled"), undefined);
+  assert.equal(runner.streamSnapshot("unknown-session"), undefined);
+});
+
+test("stream buffer 超过 32768：先删最旧块，单块仍超长则从头裁剪", async () => {
+  const release = deferred();
+  const { factory } = fakeFactory(async function* () {
+    yield streamEvent("u4", "sess-bound", { type: "message_start", message: { id: "msg_D" } });
+    yield streamEvent("u4", "sess-bound", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    yield streamEvent("u4", "sess-bound", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "a".repeat(17000) } });
+    yield streamEvent("u4", "sess-bound", { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } });
+    yield streamEvent("u4", "sess-bound", { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "b".repeat(17000) } });
+    yield streamEvent("u4", "sess-bound", { type: "content_block_start", index: 2, content_block: { type: "text", text: "" } });
+    yield streamEvent("u4", "sess-bound", { type: "content_block_delta", index: 2, delta: { type: "text_delta", text: "c".repeat(10000) } });
+    await release.promise;
+    yield resultMessage("完成", "r1", "sess-bound");
+  });
+  const runner = new TurnRunner({ gate: stubGate().gate, permissions: denyAll, queryFactory: factory });
+  const handle = runner.startTurn({ sessionId: "sess-bound", cwd: "/tmp", text: "hi" });
+  await nextDeltas(handle.events[Symbol.asyncIterator](), 3);
+
+  const snapshot = runner.streamSnapshot("sess-bound");
+  assert.deepEqual(snapshot, [
+    { messageId: "msg_D", blockIndex: 1, text: "b".repeat(17000) },
+    { messageId: "msg_D", blockIndex: 2, text: "c".repeat(10000) },
+  ]);
+  assert.ok(snapshot !== undefined && snapshot.reduce((sum, block) => sum + block.text.length, 0) <= 32768);
+
+  release.resolve();
+  assert.deepEqual(await handle.completion, { state: "done" });
+
+  const releaseSingle = deferred();
+  const single = fakeFactory(async function* () {
+    yield streamEvent("u5", "sess-slice", { type: "message_start", message: { id: "msg_E" } });
+    yield streamEvent("u5", "sess-slice", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    yield streamEvent("u5", "sess-slice", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "a".repeat(1000) + "b".repeat(39000) } });
+    await releaseSingle.promise;
+    yield resultMessage("完成", "r2", "sess-slice");
+  });
+  const runner2 = new TurnRunner({ gate: stubGate().gate, permissions: denyAll, queryFactory: single.factory });
+  const handle2 = runner2.startTurn({ sessionId: "sess-slice", cwd: "/tmp", text: "hi" });
+  await nextDeltas(handle2.events[Symbol.asyncIterator](), 1);
+
+  assert.deepEqual(runner2.streamSnapshot("sess-slice"), [
+    { messageId: "msg_E", blockIndex: 0, text: "b".repeat(32768) },
+  ]);
+
+  releaseSingle.resolve();
+  assert.deepEqual(await handle2.completion, { state: "done" });
 });

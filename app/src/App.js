@@ -127,10 +127,15 @@ export default function App() {
     else tryConnect(baseUrl, token);
   }, []);
 
-  // RN 后台会挂起 timer，回前台必须主动重连（迁移计划 §4）
+  // RN 后台会挂起 timer：后台暂停心跳，回前台恢复并主动重连（迁移计划 §4）
   useEffect(() => {
     const sub = AppState.addEventListener('change', (s) => {
-      if (s === 'active' && authRef.current === 'ok') ws.reconnectNow();
+      if (s === 'active') {
+        ws.resumeHeartbeat();
+        if (authRef.current === 'ok') ws.reconnectNow();
+      } else if (s === 'background' || s === 'inactive') {
+        ws.pauseHeartbeat();
+      }
     });
     return () => sub.remove();
   }, []);

@@ -11,6 +11,8 @@ export interface StartQueryOptions {
   model?: string;
   /** Explicit session id for a new session. Mutually exclusive with resume. */
   sessionId?: string;
+  /** Client-generated id persisted as the initial user message UUID. */
+  clientMessageId?: string;
   /** 权限模式覆盖；省略时由 SDK 走 "default"。 */
   permissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions";
   signal: AbortSignal;
@@ -57,7 +59,7 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
     throw new TypeError("resume and sessionId are mutually exclusive");
   }
   const input = new InputStream();
-  input.push(userMessage(options.prompt));
+  input.push(userMessage(options.prompt, options.clientMessageId));
   const sdkOptions = {
     cwd: options.cwd,
     canUseTool: options.canUseTool,
@@ -91,10 +93,12 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
   };
 }
 
-function userMessage(prompt: string): SDKUserMessage {
-  return {
+function userMessage(prompt: string, uuid?: string): SDKUserMessage {
+  const message: SDKUserMessage = {
     type: "user",
     message: { role: "user", content: prompt },
     parent_tool_use_id: null,
   };
+  if (uuid !== undefined && uuid.length > 0) message.uuid = uuid as NonNullable<SDKUserMessage["uuid"]>;
+  return message;
 }

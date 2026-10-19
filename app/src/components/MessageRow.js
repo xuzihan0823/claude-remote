@@ -1,9 +1,10 @@
-import { useState } from 'react';
-import { ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { Animated, Easing, Pressable, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
 import { MarkdownView } from './markdown/MarkdownView.js';
 import { Icon } from './Icon.js';
 import { Spark } from './Spark.js';
 import { fmtClock, toolSummary } from '../lib/format.js';
+import { useReduceMotion } from '../lib/use-reduce-motion.js';
 import { useTheme } from '../theme.js';
 
 // 折叠块：thinking / tool_use / tool_result 共用（web 的 <details> 对应物）
@@ -52,7 +53,76 @@ function MonoBody({ text, err }) {
   );
 }
 
-export function MessageRow({ m }) {
+function UserBubble({ m, onRetry }) {
+  const { colors } = useTheme();
+  const status = m.status;
+  const failed = status === 'failed';
+  let label;
+  if (status === 'sending') label = '发送中…';
+  else if (status === 'accepted') label = fmtClock(m.timestamp) || '已发送';
+  else if (failed) label = '发送失败 · 重试';
+  else if (status === 'unconfirmed') label = '发送结果待确认';
+  else label = fmtClock(m.timestamp);
+
+  const statusText = (
+    <Text numberOfLines={1} style={{ color: colors.ink3, fontSize: 12, lineHeight: 16 }}>{label}</Text>
+  );
+
+  return (
+    <>
+      <View style={{ backgroundColor: colors.bubble, borderRadius: 26, borderCurve: 'continuous',
+        paddingHorizontal: 18, paddingVertical: 12, maxWidth: '88%' }}>
+        <Text style={{ color: colors.inkStrong, fontSize: 17, lineHeight: 26 }} selectable>{m.text}</Text>
+      </View>
+      <View style={{ height: 16, marginTop: 2, justifyContent: 'center', alignItems: 'flex-end' }}>
+        {failed && onRetry ? (
+          <Pressable accessibilityRole="button" accessibilityLabel="发送失败，重试"
+            onPress={() => onRetry(m.clientMessageId)}
+            hitSlop={{ top: 14, bottom: 14, left: 12, right: 12 }}>
+            {statusText}
+          </Pressable>
+        ) : statusText}
+      </View>
+    </>
+  );
+}
+
+function AnimatedUserRow({ m, animate, onAnimated, onRetry }) {
+  const reduceMotion = useReduceMotion();
+  const progress = useRef(new Animated.Value(animate ? 0 : 1)).current;
+  const started = useRef(false);
+
+  useEffect(() => {
+    if (!animate || started.current || reduceMotion === null) return;
+    started.current = true;
+    if (reduceMotion) {
+      progress.setValue(1);
+      onAnimated?.();
+      return;
+    }
+    Animated.timing(progress, {
+      toValue: 1,
+      duration: 200,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+    onAnimated?.();
+  }, [animate, reduceMotion, onAnimated, progress]);
+
+  return (
+    <Animated.View style={{
+      alignItems: 'flex-end',
+      marginTop: 12,
+      marginBottom: 20,
+      opacity: progress,
+      transform: [{ translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }],
+    }}>
+      <UserBubble m={m} onRetry={onRetry} />
+    </Animated.View>
+  );
+}
+
+export function MessageRow({ m, animate, onAnimated, onRetry }) {
   const { colors } = useTheme();
 
   if (m.kind === 'meta') {
@@ -89,15 +159,8 @@ export function MessageRow({ m }) {
       </Block>
     );
   }
-  if (m.role === 'user') {
-    return (
-      <View style={{ alignItems: 'flex-end', marginTop: 12, marginBottom: 20 }}>
-        <View style={{ backgroundColor: colors.bubble, borderRadius: 26, borderCurve: 'continuous',
-          paddingHorizontal: 18, paddingVertical: 12, maxWidth: '88%' }}>
-          <Text style={{ color: colors.inkStrong, fontSize: 17, lineHeight: 26 }} selectable>{m.text}</Text>
-        </View>
-      </View>
-    );
+  if (m.role === 'user' && m.kind === 'text') {
+    return <AnimatedUserRow m={m} animate={animate} onAnimated={onAnimated} onRetry={onRetry} />;
   }
   return (
     <View style={{ marginTop: 8, marginBottom: 20 }}>
