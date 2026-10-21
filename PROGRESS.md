@@ -268,6 +268,7 @@ agent team：explorer-opus47 审计完成度正常；**coder-glm（glm-5.2[1m]�
 - 修 App 自身守护的退避 bug：原先每次 `run()` 成功就把 `restartAttempt` 清零，启动即崩会永远 1 秒重启一次；改为稳定运行 ≥30s 才清零。
 - 未在真机验证（编写环境无 macOS/swift）：需本机 `swift build` + `install.sh install` 实测。
 - 按用户决定，不再用 launchd 托管 cloudflared 隧道（已从脚本移除）。
+- 按用户决定去掉 Cloudflare 接入方式：删除 `BRIDGE_PUBLIC_BASES` / `config.publicBases`，配对候选只剩自动枚举的 Tailscale / 局域网 / mDNS 地址；pair-info 对代理特征头（含 cf-*）一律 403 的防护保留。
 
 ## 2026-07-31 晚·Named Tunnel 落地（claude.example.com 固定地址已通）+ Home 顶栏精简
 
