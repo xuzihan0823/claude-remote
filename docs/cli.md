@@ -8,7 +8,7 @@
 
 | | npm 安装（给其他人用） | 源码运行（开发） |
 |---|---|---|
-| 安装 | `npm i -g @xuzihan0823/claude-remote` | `pnpm install && node packages/cli/bin/cr.mjs setup` |
+| 安装 | `npm i -g @anyu/claude-remote` | `pnpm install && node packages/cli/bin/cr.mjs setup` |
 | 配置 | `~/.claude-remote/config.env` | 仓库根目录 `.env` |
 | 数据 | `~/.claude-remote/.data/`、`~/.claude-remote/uploads` | 仓库 `.data/` |
 | launchd 启动 | `node <包>/dist/daemon.js`（PATH 显式包含 node 与 claude 目录） | `zsh -l scripts/launchd/run-daemon.sh` → tsx |
@@ -30,7 +30,7 @@ cd dist/npm && npm publish --access public
 ```
 
 workspace 包打进 bundle，第三方依赖（ink、react、ws、qrcode、Agent SDK）保持 external 作为 dependencies。
-包名默认 `@xuzihan0823/claude-remote`，可用 `--name` 或 `NPM_NAME` 覆盖（scope 必须是自己的 npm 用户名或组织）。
+包名默认 `@anyu/claude-remote`，可用 `--name` 或 `NPM_NAME` 覆盖（npm 包名只能小写，scope 必须是自己的 npm 用户名或组织）。
 
 ## 全屏控制台
 
