@@ -20,6 +20,14 @@ final class DaemonManager: ObservableObject {
     private var restartTask: Task<Void, Never>?
     private var restartAttempt = 0
     private var shouldRun = false
+    /// 最近一次拉起子进程的时间：只有稳定运行超过 `stableUptime` 才把退避计数清零，
+    /// 否则「一启动就崩」会被每次都当成第一次失败，永远 1 秒重启一次刷爆日志。
+    private var launchedAt: Date?
+    private static let stableUptime: TimeInterval = 30
+
+    /// 装了 LaunchAgent（scripts/launchd/install.sh）时由 launchd 常驻托管，
+    /// 本类只把按钮转成 launchctl 操作，不再自己拉子进程。
+    var isLaunchdManaged: Bool { LaunchAgentControl.isDaemonInstalled }
 
     init(settings: AppSettings, claudeLocator: ClaudeLocator) {
         self.settings = settings
@@ -31,6 +39,10 @@ final class DaemonManager: ObservableObject {
     }
 
     func start() {
+        if isLaunchdManaged {
+            runLaunchctl { LaunchAgentControl.startDaemon() }
+            return
+        }
         guard !isManagedProcessRunning else { return }
         restartTask?.cancel()
         shouldRun = true
@@ -38,6 +50,10 @@ final class DaemonManager: ObservableObject {
     }
 
     func restart() {
+        if isLaunchdManaged {
+            runLaunchctl { LaunchAgentControl.restartDaemon() }
+            return
+        }
         restartTask?.cancel()
         shouldRun = true
         Task {
@@ -56,6 +72,11 @@ final class DaemonManager: ObservableObject {
     /// 停止「任何」占着端口的 daemon：托管子进程走正常路径；
     /// 外部实例（如终端手工启动、或上次 app 未清理的遗留）按端口找 pid 发信号。
     func stopAny() {
+        if isLaunchdManaged {
+            // KeepAlive 下直接 kill 会被 launchd 立刻拉起，必须 bootout。
+            runLaunchctl(nextState: .stopped) { LaunchAgentControl.stopDaemon() }
+            return
+        }
         if isManagedProcessRunning {
             stop()
             return
@@ -71,6 +92,10 @@ final class DaemonManager: ObservableObject {
 
     /// 重启：先停掉托管或外部实例，再以托管方式拉起。
     func restartAny() {
+        if isLaunchdManaged {
+            runLaunchctl { LaunchAgentControl.restartDaemon() }
+            return
+        }
         restartTask?.cancel()
         Task {
             if isManagedProcessRunning {
@@ -86,6 +111,27 @@ final class DaemonManager: ObservableObject {
             }
             shouldRun = true
             launch()
+        }
+    }
+
+    /// launchctl 是同步子进程调用，放到后台线程，避免卡住菜单栏 UI。
+    private func runLaunchctl(nextState: State = .starting, _ action: @escaping @Sendable () -> LaunchAgentControl.Result) {
+        shouldRun = false
+        restartTask?.cancel()
+        restartTask = nil
+        state = nextState
+        Task.detached {
+            let result = action()
+            await MainActor.run {
+                if result.status != 0 {
+                    let message = "launchctl 失败（\(result.status)）：\(result.output.trimmingCharacters(in: .whitespacesAndNewlines))"
+                    NSLog("[DaemonManager] \(message)")
+                    self.lastError = message
+                    self.state = .failed(message)
+                } else {
+                    self.lastError = nil
+                }
+            }
         }
     }
 
@@ -147,6 +193,10 @@ final class DaemonManager: ObservableObject {
                 Task { @MainActor in
                     guard let self, self.process === shell else { return }
                     self.process = nil
+                    if let launchedAt = self.launchedAt,
+                       Date().timeIntervalSince(launchedAt) >= Self.stableUptime {
+                        self.restartAttempt = 0
+                    }
                     if self.shouldRun {
                         self.scheduleRestart(afterExitStatus: process.terminationStatus)
                     } else {
@@ -157,7 +207,7 @@ final class DaemonManager: ObservableObject {
             state = .starting
             try shell.run()
             process = shell
-            restartAttempt = 0
+            launchedAt = Date()
         } catch {
             NSLog("[DaemonManager] launch 失败: \(error)")
             lastError = error.localizedDescription

@@ -260,6 +260,14 @@ agent team：explorer-opus47 审计完成度正常；**coder-glm（glm-5.2[1m]�
 
 **选型结论（讨论所得）**：面向最终用户，Cloudflare 显著优于 Tailscale——`cloudflared` 跑在 Mac 侧，可被菜单栏 App 内置并自动管理，用户全程零配置且无需知道 CF 存在；Tailscale 要求双端安装、注册、登录同一账号，这部分复杂度无法替用户吸收。用户自己日常使用仍用 Tailscale（已装好，按需开关）。
 
+## 2026-10-21·进程守护修复（分支 fix/daemon-supervision）
+
+针对「nohup 起的 cloudflared / daemon 会随会话消失」（7-31 坑 3）：
+- 新增 `scripts/launchd/`：`install.sh install [--tunnel] | uninstall | restart | status | logs` 生成 `com.claude-remote.daemon` / `com.claude-remote.tunnel` 两个 LaunchAgent（RunAtLoad + KeepAlive + ThrottleInterval 10s + ExitTimeOut 15s），日志 `~/Library/Logs/claude-remote/`；`run-daemon.sh` 补 PATH、按 env → .env → Keychain 取 token、直接 exec tsx（SIGTERM 直达 daemon 优雅退出）。
+- 菜单栏 App：检测到 LaunchAgent 时按钮改走 launchctl（停止用 bootout，否则 KeepAlive 立即拉起），不再自拉子进程抢端口。
+- 修 App 自身守护的退避 bug：原先每次 `run()` 成功就把 `restartAttempt` 清零，启动即崩会永远 1 秒重启一次；改为稳定运行 ≥30s 才清零。
+- 未在真机验证（编写环境无 macOS/swift）：需本机 `swift build` + `install.sh install --tunnel` 实测。
+
 ## 2026-07-31 晚·Named Tunnel 落地（claude.example.com 固定地址已通）+ Home 顶栏精简
 
 **Named Tunnel 搭建完成，全链路实测通过**。这是本项目第一个**固定的、免疫 IP 漂移与 Tailscale 开关状态**的接入地址。
