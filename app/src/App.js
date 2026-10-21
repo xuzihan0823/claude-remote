@@ -4,7 +4,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
-import { DarkTheme, DefaultTheme, NavigationContainer } from '@react-navigation/native';
+import { createNavigationContainerRef, DarkTheme, DefaultTheme, NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createDrawerNavigator } from '@react-navigation/drawer';
 import * as Linking from 'expo-linking';
@@ -13,9 +13,9 @@ import {
   baseUrl, BASE_KEY, clearToken, connErrMsg, connHost, loadBases, normalizeBase,
   pendingSessionMessages, probeBase, probeBases, saveBases, saveConn, sessionCache, token, TOKEN_KEY,
 } from '../../web/core/api.js';
-import { toast, useBus } from '../../web/core/bus.js';
+import { bus, toast, useBus } from '../../web/core/bus.js';
 import { ws } from '../../web/core/ws.js';
-import { parseSetupLink } from './lib/pairing.js';
+import { parseDeepLink } from './lib/deep-link.js';
 import { ConnActions } from './lib/conn-context.js';
 import { ProjectsProvider } from './lib/projects-context.js';
 import { useTheme } from './theme.js';
@@ -29,6 +29,7 @@ import { ApprovalLayer } from './components/ApprovalLayer.js';
 import { ToastLayer } from './components/Toast.js';
 
 const Stack = createNativeStackNavigator();
+const navigationRef = createNavigationContainerRef();
 const Drawer = createDrawerNavigator();
 
 function MainStack() {
@@ -135,15 +136,30 @@ export default function App() {
     return () => sub.remove();
   }, []);
 
-  // claude-remote://setup 深链（冷启动 + 运行中）
+  // claude-remote:// 深链（冷启动 + 运行中）：
+  //   setup    → 配对确认
+  //   approval → 打开所属会话并把这条审批顶到最前（推送点击）
+  //   session  → 打开会话（运行完成 / 出错推送）
+  // 导航类链接要等连上 daemon 且导航容器就绪，先存起来再 flush。
   const [pairReq, setPairReq] = useState(null);
   const [pairBusy, setPairBusy] = useState(false);
+  const pendingLinkRef = useRef(null);
+  const flushLink = useCallback(() => {
+    const link = pendingLinkRef.current;
+    if (!link || authRef.current !== 'ok' || !navigationRef.isReady()) return;
+    pendingLinkRef.current = null;
+    if (link.sessionId) navigationRef.navigate('Main', { screen: 'Chat', params: { sessionId: link.sessionId } });
+    if (link.type === 'approval') bus.emit('approval-focus', { interactionId: link.interactionId });
+  }, []);
   const handleUrl = useCallback((url) => {
     if (!url || !url.startsWith('claude-remote:')) return;
-    const req = parseSetupLink(url);
-    if (req) setPairReq(req);
-    else toast('无法识别的配对链接', 'error');
-  }, []);
+    const link = parseDeepLink(url);
+    if (!link) { toast('无法识别的链接', 'error'); return; }
+    if (link.type === 'setup') { setPairReq({ token: link.token, bases: link.bases }); return; }
+    pendingLinkRef.current = link;
+    flushLink();
+  }, [flushLink]);
+  useEffect(() => { if (auth === 'ok') flushLink(); }, [auth, flushLink]);
   useEffect(() => {
     const sub = Linking.addEventListener('url', ({ url }) => handleUrl(url));
     Linking.getInitialURL().then(handleUrl).catch(() => { /* noop */ });
@@ -190,7 +206,7 @@ export default function App() {
                 <ConnectScreen busy={auth === 'checking'} error={authErr} onSubmit={tryConnect} />
               ) : (
                 <ProjectsProvider key={conn.key} base={conn.base}>
-                <NavigationContainer theme={navTheme}>
+                <NavigationContainer ref={navigationRef} theme={navTheme} onReady={flushLink}>
                   <Drawer.Navigator
                     drawerContent={(props) => <DrawerContent {...props} />}
                     screenOptions={{

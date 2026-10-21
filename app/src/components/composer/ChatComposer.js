@@ -12,6 +12,7 @@ import { ComposerCard } from './ComposerCard.js';
 import { AttachmentChips } from './AttachmentChips.js';
 import { AttachmentPicker } from './AttachmentPicker.js';
 import { ModelPicker } from './ModelPicker.js';
+import { haptics } from '../../lib/haptics.js';
 
 // 聊天 composer（发送/停止/附件/模型 pill/模式 pill/bypass 确认）。
 // 契约（不得更改）：props { sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped }
@@ -45,6 +46,7 @@ export function ChatComposer({
         body: JSON.stringify({ runId: activeRunId || undefined }),
       });
       onStopped?.();
+      haptics.reject();
       toast('已停止当前运行', 'info');
     } catch (e) {
       if (e.status === 404 || e.status === 409 || e.code === 'no_active_run' || e.code === 'already_finished') {
@@ -83,9 +85,11 @@ export function ChatComposer({
         }),
       });
       onSent?.(text);
+      haptics.success();
       setDraft('');
       setFiles([]);
     } catch (e) {
+      haptics.error();
       if (e.status === 409) {
         onStatusConflict?.(e.data?.status || null);
         const why = e.data?.status === 'terminal-driving' ? '会话正被终端驾驶'

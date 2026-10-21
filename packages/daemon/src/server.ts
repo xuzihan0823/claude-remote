@@ -22,7 +22,7 @@ import type { DaemonConfig } from "./config.js";
 import { enumeratePairBases, isLoopbackAddress, looksProxied, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
 import { readSessionCwd, resolveSessionFile } from "./session-files.js";
-import { NotIdleError, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
+import { approvalLink, NotIdleError, sessionLink, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
 import { listSessions } from "./transcript/indexer.js";
 import { buildProjectIndex } from "./transcript/projects.js";
 import { readBefore, readTail } from "./transcript/reader.js";
@@ -145,7 +145,12 @@ export class DaemonServer {
     this.#broadcastAll(event);
     if (event.type === "approval") {
       const card = event.interaction;
-      void this.#options.notifier("Claude 待审批", `${card.toolName}: ${card.prompt}`.slice(0, 120));
+      const what = card.kind === "approval" ? `${card.toolName}: ${card.prompt}` : `提问：${card.questions?.[0]?.question ?? ""}`;
+      void this.#options.notifier(card.kind === "approval" ? "Claude 待审批" : "Claude 有问题要问你", what.slice(0, 120), {
+        url: approvalLink(card.interactionId, card.sessionId),
+        group: "approval",
+        urgent: true,
+      });
     }
   }
 
@@ -555,9 +560,12 @@ export class DaemonServer {
         if (event.permissionMode !== undefined) frame.permissionMode = event.permissionMode;
         this.#broadcastToSubscribers(sessionId, frame);
         if (event.state === "done") {
-          void this.#options.notifier("Claude 已完成", snippet(text));
+          void this.#options.notifier("Claude 已完成", snippet(text), { url: sessionLink(sessionId), group: "run" });
         } else if (event.state === "error") {
-          void this.#options.notifier("Claude 运行出错", `${event.error ?? "unknown"} · ${snippet(text)}`);
+          void this.#options.notifier("Claude 运行出错", `${event.error ?? "unknown"} · ${snippet(text)}`, {
+            url: sessionLink(sessionId),
+            group: "run",
+          });
         }
       }
     } catch (error) {

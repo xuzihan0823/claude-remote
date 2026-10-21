@@ -71,3 +71,12 @@ const config: CapacitorConfig = {
 
 - iOS 后台 WebSocket 会被挂起：切后台靠 Bark/ntfy 推送补位（daemon 已支持），回前台 ws 自动重连补缺口（前端已实现）。
 - 若未来走 HTTPS（Tailscale cert / 反代），前端 `wsEndpoint()` 已按协议自动切 wss。
+
+## 审批不漏 / 推送直达（2026-10）
+
+- **补拉**：ApprovalLayer 挂载时、以及每次 WS 连上（包括回前台的重连）都会 `GET /api/interactions/pending` 与服务端对账：补上手机在后台或断线期间产生的审批，去掉已在别处处理或已超时的。
+- **推送深链**：daemon 推送（Bark / ntfy）带上点击链接：
+  - 待审批 / 提问：`claude-remote://approval/<interactionId>?session=<sessionId>`，Bark 用 `level=timeSensitive`（可穿透专注模式），ntfy 用 `Priority: high`
+  - 运行完成 / 出错：`claude-remote://session/<sessionId>`
+  点通知打开 App → 进入对应会话，并把这条审批顶到最前；已处理则提示「这条审批已处理或已超时」。
+- **触感反馈**（expo-haptics）：新审批到达、允许 / 拒绝、发送成功、停止运行、失败。expo-haptics 是原生模块，**需要重新编译 dev client**（`npx expo run:ios` 或重新打包）；旧 client 上自动降级为无震动，不会崩。
