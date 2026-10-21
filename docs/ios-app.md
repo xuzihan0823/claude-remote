@@ -89,3 +89,10 @@ const config: CapacitorConfig = {
 - Write：整个文件按新增显示（最多 400 行）
 - Bash：说明 + `$ 命令`；TodoWrite：勾选清单；Read/Grep/Glob/WebFetch 等：关键字段表
 - 审批卡片里直接展开（最高 260pt，内部滚动）；右下「原始参数」可切回 JSON
+
+## 开屏动画（2026-10）
+
+- 原生启动屏改为纯底色（`assets/splash-blank.png` 透明图，浅色 `#FAF9F6`、深色 `#141414`，与 App 背景一致），保持到连接校验结束（最多 2.5s）后淡出。改了 app.json 的 splash 配置，需要重新编译 dev client 才生效。
+- 首页芒星（`BloomSpark`）原位绽放：15 条光芒顺时针依次长出并回弹，整体放大到 1.35 倍再回落、轻转，约 1s，停下后就是首页的静态图标。
+- 问候语 600ms、副标题 700ms、顶部按钮 800ms、底部输入框 850ms 依次渐入（`components/FadeIn.js`）。
+- 每次冷启动只播一次（`lib/intro.js`）；系统开启「减弱动态效果」时不播。
