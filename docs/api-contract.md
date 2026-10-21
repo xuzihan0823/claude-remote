@@ -125,6 +125,11 @@ Body 三选一：`{"type":"allow_once"}` | `{"type":"deny","message?":"…"}` | 
 ### server → client
 ```jsonc
 {"type":"message","sessionId":"…","message":RenderMessage}          // watcher 增量（含 daemon 自跑轮次落盘的行）
+{"type":"stream","sessionId":"…","key":"<apiMessageId>:<blockIndex>","offset":0,"text":"…","done?":true}
+    // daemon 自跑轮次的逐字草稿（约 40ms 合一帧）。offset = 本帧之前已发字符数；offset 0 为整段替换（订阅时补发的快照）。
+    // 草稿只用于「正在输出」显示，正文以随后的 message 帧为准：同文本的 assistant text 到达即删草稿。
+    // 仅 daemon 自己跑的轮次有；终端里跑的会话仍只有 message 帧。子代理的流不推。
+{"type":"stream","sessionId":"…","clear":true}   // 本轮结束，客户端稍候（~1.5s）清掉未被替换的草稿
 {"type":"resync","sessionId":"…"}   // daemon 侧链视图失效（终端 rewind/fork、文件截断）；客户端清空本地列表并重新 GET messages
 {"type":"status","sessionId":"…","status":"idle|terminal-driving|daemon-driving"}
 {"type":"run","sessionId":"…","runId":"…","state":"started|done|error","error?":"…"}

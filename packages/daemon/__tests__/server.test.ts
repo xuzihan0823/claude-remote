@@ -69,6 +69,11 @@ function fakeSdk(): FakeSdk {
     });
     holder.finish = release;
     const generator = (async function* () {
+      const ev = (event: unknown) => ({ type: "stream_event", uuid: "e", session_id: SESSION_ID, parent_tool_use_id: null, event }) as never;
+      yield ev({ type: "message_start", message: { id: "msg_t" } });
+      yield ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "done " } });
+      yield ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "text" } });
+      yield ev({ type: "content_block_stop", index: 0 });
       yield {
         type: "assistant", uuid: "sdk-a1", session_id: SESSION_ID,
         message: { content: [{ type: "text", text: "done text" }] },
@@ -545,6 +550,16 @@ test("POST messages：202 起 run、cwd 来自 JSONL、run 帧广播、完成通
 
   await sink.waitFor((frame) => frame.type === "run" && frame.state === "started" && frame.runId === runId);
   await sink.waitFor((frame) => frame.type === "status" && frame.status === "daemon-driving");
+  // 流式草稿：增量合帧后推给订阅者，block 结束带 done
+  await sink.waitFor((frame) => frame.type === "stream" && frame.done === true);
+  const all = sink.frames.filter((f) => f.type === "stream" && f.key === "msg_t:0");
+  assert.equal(all.map((f) => f.text).join(""), "done text");
+  // 中途订阅的客户端拿到完整快照
+  const late = new FrameSink(harness.wsUrl());
+  t.after(() => late.close());
+  await late.open();
+  late.send({ type: "subscribe", sessionId: SESSION_ID });
+  await late.waitFor((frame) => frame.type === "stream" && frame.offset === 0 && frame.text === "done text");
 
   // run 未结束时再次发送 → 409 daemon-driving
   const busy = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed({
@@ -555,6 +570,7 @@ test("POST messages：202 起 run、cwd 来自 JSONL、run 帧广播、完成通
 
   harness.sdk.finish();
   await sink.waitFor((frame) => frame.type === "run" && frame.state === "done" && frame.runId === runId);
+  await sink.waitFor((frame) => frame.type === "stream" && frame.clear === true);
   await sink.waitFor((frame) => frame.type === "status" && frame.status === "idle");
   assert.ok(harness.notifications.some((n) => n.title === "Claude 已完成" && n.body === "web turn"));
 });

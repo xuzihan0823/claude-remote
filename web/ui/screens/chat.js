@@ -3,6 +3,7 @@ import { api, fetchSessions, pendingSessionMessages, sessionCache } from "../../
 import { toast, useBus } from "../../core/bus.js";
 import { PERMISSION_MODES, getSessionMode, setSessionMode } from "../../core/modes.js";
 import { ws } from "../../core/ws.js";
+import { applyStreamFrame, reconcileDrafts } from "../../core/stream-drafts.js";
 import { useModelCatalog } from "../hooks.js";
 import { cmpMsg, cwdTail, fmtBytes, fmtClock, msgKey, toolSummary, truncate } from "../utils.js";
 import { StatusBadge } from "../components/conn-bar.js";
@@ -142,6 +143,7 @@ export function Chat({ sessionId, goList }) {
     if (m.role === 'user' && m.kind === 'text') {
       setPending((p) => (p && m.text?.trim() === p.trim() ? null : p));
     }
+    if (m.role === 'assistant' && m.kind === 'text') setDrafts((d) => reconcileDrafts(d, m));
     if (!pendingBatch.current) {
       pendingBatch.current = [];
       queueMicrotask(() => {
@@ -152,6 +154,17 @@ export function Chat({ sessionId, goList }) {
     }
     pendingBatch.current.push(m);
   }, [sessionId, addMsgs]);
+  // ---- 流式草稿：daemon 的逐字增量，JSONL 落盘后被正式消息替换
+  const [drafts, setDrafts] = useState([]);
+  const clearTimer = useRef(null);
+  useEffect(() => { setDrafts([]); }, [sessionId]);
+  useEffect(() => () => clearTimeout(clearTimer.current), []);
+  useBus('ws:stream', (e) => {
+    if (e.sessionId !== sessionId) return;
+    clearTimeout(clearTimer.current);
+    if (e.clear) { clearTimer.current = setTimeout(() => setDrafts([]), 1500); return; }
+    setDrafts((d) => applyStreamFrame(d, e));
+  }, [sessionId]);
   useBus('ws:status', (e) => { if (e.sessionId === sessionId) setStatus(e.status); }, [sessionId]);
   useBus('ws:run', (e) => {
     if (e.sessionId !== sessionId) return;
@@ -233,7 +246,7 @@ export function Chat({ sessionId, goList }) {
     } else if (stick.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [version, runActive, pending, initLoading]);
+  }, [version, runActive, pending, initLoading, drafts]);
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -361,7 +374,12 @@ export function Chat({ sessionId, goList }) {
               <div class="bubble">${pending}</div>
               <div class="msg-time">发送中…</div>
             </div>`}
-          ${runActive && html`
+          ${drafts.map((d) => html`
+            <div class="msg assistant streaming" key=${d.key}>
+              <span class="avatar ai-avatar"><${Spark} /></span>
+              <div class="msg-body"><${Markdown} text=${d.text} /></div>
+            </div>`)}
+          ${runActive && !drafts.some((d) => !d.done) && html`
             <div class="msg assistant typing">
               <span class="avatar ai-avatar"><${Spark} /></span>
               <div class="msg-body"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></div>

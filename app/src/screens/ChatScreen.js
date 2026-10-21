@@ -6,11 +6,13 @@ import { api, fetchSessions, pendingSessionMessages, sessionCache } from '../../
 import { toast, useBus } from '../../../web/core/bus.js';
 import { PERMISSION_MODES, getSessionMode, setSessionMode } from '../../../web/core/modes.js';
 import { ws } from '../../../web/core/ws.js';
+import { applyStreamFrame, reconcileDrafts } from '../../../web/core/stream-drafts.js';
 import { cmpMsg, msgKey } from '../lib/format.js';
 import { ConversationHeader } from '../components/ConversationHeader.js';
 import { GlassSurface } from '../components/GlassSurface.js';
 import { Icon } from '../components/Icon.js';
 import { MessageRow } from '../components/MessageRow.js';
+import { MarkdownView } from '../components/markdown/MarkdownView.js';
 import { StatusBadge } from '../components/StatusBadge.js';
 import { Spark } from '../components/Spark.js';
 import { ChatComposer } from '../components/composer/ChatComposer.js';
@@ -41,6 +43,9 @@ export function ChatScreen({ route }) {
   const [showJump, setShowJump] = useState(false);
   const listRef = useRef(null);
   const loadingOlder = useRef(false);
+  // 流式草稿：daemon 的逐字增量，JSONL 落盘后被正式消息替换
+  const [drafts, setDrafts] = useState([]);
+  const clearTimer = useRef(null);
 
   const addMsgs = useCallback((list) => {
     const st = store.current;
@@ -63,6 +68,7 @@ export function ChatScreen({ route }) {
   useEffect(() => {
     store.current = { map: new Map(), sorted: [] };
     setVersion((v) => v + 1);
+    setDrafts([]);
     setInitLoading(true);
     setLoadErr('');
     const initialText = pendingSessionMessages.get(sessionId);
@@ -104,6 +110,7 @@ export function ChatScreen({ route }) {
     if (m.role === 'user' && m.kind === 'text') {
       setPending((p) => (p && m.text?.trim() === p.trim() ? null : p));
     }
+    if (m.role === 'assistant' && m.kind === 'text') setDrafts((d) => reconcileDrafts(d, m));
     if (!pendingBatch.current) {
       pendingBatch.current = [];
       queueMicrotask(() => {
@@ -114,6 +121,18 @@ export function ChatScreen({ route }) {
     }
     pendingBatch.current.push(m);
   }, [sessionId, addMsgs]);
+  useBus('ws:stream', (e) => {
+    if (e.sessionId !== sessionId) return;
+    if (e.clear) {
+      // run 结束：落盘的消息通常紧跟着到，留一点时间让它先替换，再清残留
+      clearTimeout(clearTimer.current);
+      clearTimer.current = setTimeout(() => setDrafts([]), 1500);
+      return;
+    }
+    clearTimeout(clearTimer.current);
+    setDrafts((d) => applyStreamFrame(d, e));
+  }, [sessionId]);
+  useEffect(() => () => clearTimeout(clearTimer.current), []);
   useBus('ws:status', (e) => { if (e.sessionId === sessionId) setStatus(e.status); }, [sessionId]);
   useBus('ws:run', (e) => {
     if (e.sessionId !== sessionId) return;
@@ -214,7 +233,12 @@ export function ChatScreen({ route }) {
           </View>
         </View>
       ) : null}
-      {isRunning ? (
+      {drafts.map((d) => (
+        <View key={d.key} style={{ marginTop: 8, marginBottom: 20 }}>
+          <MarkdownView text={d.text} />
+        </View>
+      ))}
+      {isRunning && !drafts.some((d) => !d.done) ? (
         <View style={{ flexDirection: 'row', marginVertical: 6, gap: 8, alignItems: 'center' }}>
           <View style={{ width: 26, alignItems: 'center' }}><Spark size={16} /></View>
           <Text style={{ color: colors.ink2, fontSize: 18, letterSpacing: 2 }}>···</Text>
