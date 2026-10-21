@@ -49,6 +49,14 @@
             "backgroundColor": "#141414"
           }
         }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "扫描 Mac 上的配对二维码",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
       ]
     ]
   }

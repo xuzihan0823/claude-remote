@@ -93,12 +93,14 @@ export default function App() {
     setAuthErr('');
   }, []);
 
-  const tryConnect = useCallback(async (base, tok) => {
+  // opts.beforeCommit：探测成功后、切到首页前调用（登录页借此播放「已连接」衔接动画）
+  const tryConnect = useCallback(async (base, tok, opts) => {
     setAuth((a) => (a === 'ok' ? 'ok' : 'checking'));
     setAuthErr('');
     const nextBase = normalizeBase(base);
     try {
       await probeBase(nextBase, tok);
+      if (opts?.beforeCommit) await opts.beforeCommit();
       saveConn(nextBase, tok);
       commitConn();
       setAuth('ok');
@@ -113,11 +115,12 @@ export default function App() {
     }
   }, [commitConn]);
 
-  const tryConnectBases = useCallback(async (bases, tok) => {
+  const tryConnectBases = useCallback(async (bases, tok, opts) => {
     setAuth((a) => (a === 'ok' ? 'ok' : 'checking'));
     setAuthErr('');
     try {
       const base = await probeBases(bases, tok);
+      if (opts?.beforeCommit) await opts.beforeCommit();
       saveBases(bases);
       saveConn(base, tok);
       commitConn();
@@ -216,7 +219,7 @@ export default function App() {
             <ConnActions.Provider value={{ tryConnect, tryConnectBases }}>
               <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
               {auth !== 'ok' ? (
-                <ConnectScreen busy={auth === 'checking'} error={authErr} onSubmit={tryConnect} />
+                <ConnectScreen busy={auth === 'checking'} error={authErr} onSubmit={tryConnect} onScan={tryConnectBases} />
               ) : (
                 <ProjectsProvider key={conn.key} base={conn.base}>
                 <NavigationContainer ref={navigationRef} theme={navTheme} onReady={flushLink}>
