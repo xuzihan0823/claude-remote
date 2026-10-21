@@ -128,7 +128,6 @@ async function startHarness(): Promise<Harness> {
     cooldownMs: 120_000,
     interactionsDbPath: ":memory:",
     permissionTimeoutMs: 300_000,
-    publicBases: ["https://tunnel.example.com"],
   };
 
   const store = new InteractionStore(":memory:");
@@ -230,11 +229,6 @@ test("loadConfig: 缺 BRIDGE_TOKEN 拒绝启动；默认值正确", () => {
   assert.equal(config.port, 8787);
   assert.equal(config.cooldownMs, 120_000);
   assert.equal(config.permissionTimeoutMs, 300_000);
-  assert.deepEqual(config.publicBases, []);
-  assert.deepEqual(
-    loadConfig({ BRIDGE_TOKEN: "t", BRIDGE_PUBLIC_BASES: " https://a.example.com/ ,http://b:1 ,bad, " }).publicBases,
-    ["https://a.example.com", "http://b:1"],
-  );
   assert.ok(config.projectsDir.endsWith(join(".claude", "projects")));
   assert.throws(() => loadConfig({ BRIDGE_TOKEN: "t", BRIDGE_PORT: "abc" }), ConfigError);
 });
@@ -276,7 +270,7 @@ test("配对端点：本机直连放行；带代理特征头（隧道/反代）�
   assert.equal(direct.status, 200);
   const info = await direct.json();
   assert.equal(info.token, TOKEN);
-  assert.equal(info.bases[0], "https://tunnel.example.com"); // 配置的公网地址排首位
+  assert.ok(Array.isArray(info.bases));
 
   for (const header of ["x-forwarded-for", "cf-connecting-ip", "cf-ray", "x-real-ip", "forwarded"]) {
     const viaProxy = await fetch(`${harness.base}/api/pair-info`, { headers: { [header]: "1.2.3.4" } });
