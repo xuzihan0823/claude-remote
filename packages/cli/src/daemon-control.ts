@@ -3,38 +3,102 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { enumeratePairBases, pairPayload, type PairInfo } from "@claude-remote/daemon/pair";
 
 import { Api, ApiError, type ApprovalCard, type SessionSummary } from "./api.js";
+import { AttachedDaemon } from "./attached.js";
 import { readDotenv, type CliEnv } from "./env.js";
-import { Launchd, packageProgram, repoProgram, type LaunchdState } from "./launchd.js";
+import { Launchd, packageProgram, repoProgram, type LaunchdState, type LaunchProgram } from "./launchd.js";
 
 export interface Context {
   env: CliEnv;
   launchd: Launchd;
+  /** 开机自启关闭时：daemon 随 cr 运行。 */
+  attached: AttachedDaemon;
   api: Api | undefined;
 }
 
+/** 开机自启（launchd 托管）是否打开：.env 的 AUTOSTART=on；默认关，daemon 随 cr 启停。非 macOS 永远随 cr。 */
+export function autostartEnabled(env: CliEnv): boolean {
+  return process.platform === "darwin" && readDotenv(env.envFile).AUTOSTART === "on";
+}
+
+// 同一个 cr 进程里 ctx 会因 reload 重建，但子进程归属必须延续：按 pidFile 复用实例
+const attachedByPidFile = new Map<string, AttachedDaemon>();
+
 export function makeContext(env: CliEnv): Context {
+  const program = (): LaunchProgram =>
+    env.mode === "repo"
+      ? repoProgram(env.repoDir)
+      : packageProgram({
+          nodePath: process.execPath,
+          daemonEntry: env.daemonEntry,
+          dataDir: env.dataDir,
+          envFile: env.envFile,
+          claudeBin: readDotenv(env.envFile).CLAUDE_BIN,
+          home: homedir(),
+        });
+  const pidFile = join(env.logDir, "daemon.pid");
+  let attached = attachedByPidFile.get(pidFile);
+  if (attached === undefined) {
+    attached = new AttachedDaemon({
+      program,
+      logFile: env.logFile,
+      pidFile,
+      healthy: () => probeHealth(env.baseUrl),
+      waitHealthy: () => waitHealthyUrl(env.baseUrl),
+    });
+    attachedByPidFile.set(pidFile, attached);
+  }
   return {
     env,
-    launchd: new Launchd({
-      logFile: env.logFile,
-      program: () =>
-        env.mode === "repo"
-          ? repoProgram(env.repoDir)
-          : packageProgram({
-              nodePath: process.execPath,
-              daemonEntry: env.daemonEntry,
-              dataDir: env.dataDir,
-              envFile: env.envFile,
-              claudeBin: readDotenv(env.envFile).CLAUDE_BIN,
-              home: homedir(),
-            }),
-    }),
+    launchd: new Launchd({ logFile: env.logFile, program }),
+    attached,
     api: env.token === undefined ? undefined : new Api(env.baseUrl, env.token),
   };
+}
+
+/**
+ * 进 TUI 前按开机自启开关把 daemon 摆到对的状态：
+ *  - 开：交给 launchd（先停掉本进程拉起的子进程，避免抢端口）；
+ *  - 关：launchd 若还装着就卸掉（不再开机自启），再由 cr 拉起子进程，cr 退出时一起停。
+ * 返回一句给用户看的说明（无事发生时为 undefined）。
+ */
+export async function ensureDaemon(ctx: Context): Promise<string | undefined> {
+  if (autostartEnabled(ctx.env)) {
+    if (ctx.attached.ownedPid !== undefined) await ctx.attached.stop();
+    const { alreadyRunning } = await ctx.launchd.up();
+    if (!alreadyRunning) await waitHealthy(ctx);
+    return alreadyRunning ? undefined : "daemon 已交给 launchd（开机自启）";
+  }
+  let note: string | undefined;
+  if (process.platform === "darwin" && (ctx.launchd.isLoaded() || existsSync(ctx.launchd.plistPath))) {
+    await ctx.launchd.uninstall();
+    note = "已取消开机自启，daemon 改为随 cr 运行";
+  }
+  const how = await ctx.attached.ensure();
+  if (how === "started") return note ?? "daemon 已随 cr 启动，退出 cr 时一起停止";
+  return note;
+}
+
+async function probeHealth(baseUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${baseUrl}/api/health`, { signal: AbortSignal.timeout(1000) });
+    return res.status === 200 || res.status === 401;
+  } catch {
+    return false;
+  }
+}
+
+async function waitHealthyUrl(baseUrl: string, timeoutMs = 20_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await probeHealth(baseUrl)) return true;
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return false;
 }
 
 /** ps etime（[[dd-]hh:]mm:ss）→ 毫秒。 */
@@ -70,8 +134,9 @@ export interface DaemonSnapshot {
 export async function snapshot(ctx: Context, opts: { withSessions?: boolean } = {}): Promise<DaemonSnapshot> {
   const launchd = process.platform === "darwin" ? ctx.launchd.status() : { loaded: false, installed: false };
   const snap: DaemonSnapshot = { launchd, reachable: false, unauthorized: false, sessions: [], pending: [] };
-  if (launchd.pid !== undefined) {
-    const up = processUptime(launchd.pid);
+  const pid = launchd.pid ?? ctx.attached.ownedPid;
+  if (pid !== undefined) {
+    const up = processUptime(pid);
     if (up !== undefined) snap.uptimeMs = up;
   }
   if (ctx.api === undefined) {
@@ -154,12 +219,15 @@ export function claudeBin(envFile: string): string {
  */
 export function resumeInTerminal(session: Pick<SessionSummary, "sessionId" | "cwd">, envFile: string): Promise<number> {
   const cwd = session.cwd !== "" && existsSync(session.cwd) ? session.cwd : process.cwd();
-  return new Promise((resolvePromise) => {
+  AttachedDaemon.foregroundChild = true;
+  return new Promise<number>((resolvePromise) => {
     const child = spawn(claudeBin(envFile), ["--resume", session.sessionId], { cwd, stdio: "inherit" });
     child.on("error", (error) => {
       console.error(`无法启动 claude：${error.message}（可用 CLAUDE_BIN 指定路径）`);
       resolvePromise(127);
     });
     child.on("exit", (code) => resolvePromise(code ?? 0));
+  }).finally(() => {
+    AttachedDaemon.foregroundChild = false;
   });
 }

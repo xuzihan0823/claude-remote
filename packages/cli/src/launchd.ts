@@ -185,6 +185,11 @@ export class Launchd {
     }
   }
 
+  /** 当前配置下要运行的程序（随 cr 运行模式也用它拉起 daemon）。 */
+  program(): LaunchProgram {
+    return this.#opts.program();
+  }
+
   isLoaded(): boolean {
     return this.#try("launchctl", ["print", this.target]) !== undefined;
   }

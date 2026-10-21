@@ -300,7 +300,7 @@ export function App({
   const runControl = useCallback(
     async (label: string, action: () => Promise<unknown>, done: string) => {
       if (!deps.control.available) {
-        flash("启停只支持 macOS（launchd）");
+        flash("这台机器上不能控制 daemon");
         return;
       }
       setBusy(label);
@@ -375,6 +375,11 @@ export function App({
         return false;
       }
       const label = raw.trim() === "" ? `${entry.field.label} 已恢复默认` : `${entry.field.label} 已保存`;
+      if (entry.field.hosting === true) {
+        // 托管方式变了：退出 TUI，由 main 按新设置切换 launchd / 随 cr 运行后再回来
+        quit({ kind: "reload", then: "settings" });
+        return true;
+      }
       void applyConfig({
         restart: true,
         reload: entry.field.affectsCli === true,
@@ -383,7 +388,7 @@ export function App({
       });
       return true;
     },
-    [deps.config, flash, applyConfig],
+    [deps.config, flash, applyConfig, quit],
   );
 
   // -- 键盘 ---------------------------------------------------------------------
@@ -435,8 +440,10 @@ export function App({
       else if (key.upArrow || input === "k") setConfigIdx((i) => Math.max(0, i - 1));
       else if (key.downArrow || input === "j") setConfigIdx((i) => Math.min(config.length, i + 1));
       else if (key.return) {
+        const entry = config[configIdx];
         if (tokenRow) setConfirmToken(true);
-        else setEditing(config[configIdx]?.value ?? "");
+        else if (entry?.field.hosting === true) saveField(entry, (entry.value ?? entry.field.fallback) === "on" ? "off" : "on"); // 开关：Enter 直接切换
+        else setEditing(entry?.value ?? "");
       } else if (input === "d" && !tokenRow) {
         const entry = config[configIdx];
         if (entry !== undefined && entry.value !== undefined) saveField(entry, "");

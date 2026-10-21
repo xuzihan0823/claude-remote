@@ -1,12 +1,13 @@
 // 子命令实现。不带参数运行 cr 进入全屏 TUI（tui/），这里的子命令供脚本与快速操作使用。
 
 import { spawn } from "node:child_process";
-import { closeSync, lstatSync, mkdirSync, openSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { ApiError, type SessionSummary } from "./api.js";
 import {
+  autostartEnabled,
   copyToClipboard,
   openUrl,
   pairInfo,
@@ -35,13 +36,16 @@ export const HELP = `cr — Claude Remote 控制台
 
 用法：
   cr                    打开全屏控制台（会话 / 搜索 / 审批 / 配对 / 日志）
-  cr setup              首次安装：生成 token、自动查找 claude、注册 launchd 并启动（首次运行 cr 会自动执行）
-  cr up | down | restart  启动（并开机自启）/ 停止（并取消自启）/ 重启 daemon
+  cr setup              首次安装：生成 token、自动查找 claude（首次运行 cr 会自动执行）
+                        默认 daemon 随 cr 启停：打开 cr 就启动，退出 cr / 关终端一起停
+                        cr config set autostart on 改为 launchd 托管（开机自启、关终端也不停）
+  cr up | down | restart  开机自启时：启动 / 停止（并取消自启）/ 重启 daemon
+                        随 cr 运行时：cr up 在前台运行 daemon（Ctrl-C 停止），cr down 停止 daemon
   cr status             daemon 状态、配对地址、会话与待审批数量
   cr logs               跟随 daemon 日志
   cr pair               终端打印配对二维码
   cr config             查看配置；cr config set <项> <值> / unset <项> / reset-token
-                        项：host port bark ntfy timeout cooldown claude uploads（改完自动重启 daemon）
+                        项：host port bark ntfy timeout cooldown claude uploads autostart（改完自动重启 daemon）
   cr web                浏览器打开 Web 界面（token 复制到剪贴板）
   cr ls [-n 20]         最近会话
   cr search <词> [--full]  搜标题/项目路径；--full 连对话全文一起搜
@@ -81,7 +85,39 @@ function sessionRow(s: SessionSummary, columns = process.stdout.columns ?? 100):
   ].join("  ");
 }
 
+/** 随 cr 运行模式下的 cr up：daemon 在当前终端前台跑，Ctrl-C / 关终端即停。 */
+async function foregroundDaemon(ctx: Context): Promise<void> {
+  if (await waitHealthyQuick(ctx)) {
+    console.log(`daemon 已经在运行（${ctx.env.baseUrl}），不重复启动`);
+    return;
+  }
+  const program = ctx.launchd.program();
+  console.log(`前台运行 daemon（Ctrl-C 停止）：${program.args.join(" ")}\n`);
+  await new Promise<void>((resolvePromise) => {
+    const child = spawn(program.args[0] as string, program.args.slice(1), {
+      cwd: program.workingDir,
+      env: { ...process.env, ...program.env },
+      stdio: "inherit",
+    });
+    child.on("error", (error) => {
+      console.error(`✗ 无法启动 daemon：${error.message}`);
+      resolvePromise();
+    });
+    child.on("exit", () => resolvePromise());
+  });
+}
+
+async function waitHealthyQuick(ctx: Context): Promise<boolean> {
+  try {
+    const res = await fetch(`${ctx.env.baseUrl}/api/health`, { signal: AbortSignal.timeout(1000) });
+    return res.status === 200 || res.status === 401;
+  } catch {
+    return false;
+  }
+}
+
 export async function cmdUp(ctx: Context): Promise<void> {
+  if (!autostartEnabled(ctx.env)) return foregroundDaemon(ctx);
   requireDarwin();
   if (!ctx.launchd.isLoaded()) {
     const strays = ctx.launchd.strayListeners(ctx.env.port);
@@ -107,12 +143,22 @@ export async function cmdUp(ctx: Context): Promise<void> {
 }
 
 export async function cmdDown(ctx: Context): Promise<void> {
+  if (!autostartEnabled(ctx.env)) {
+    const stopped = await ctx.attached.stop();
+    if (process.platform === "darwin" && ctx.launchd.isLoaded()) await ctx.launchd.down();
+    console.log(stopped ? "✓ daemon 已停止" : "daemon 没有在随 cr 运行");
+    return;
+  }
   requireDarwin();
   await ctx.launchd.down();
   console.log("✓ daemon 已停止，并取消开机自启（cr up 恢复）");
 }
 
 export async function cmdRestart(ctx: Context): Promise<void> {
+  if (!autostartEnabled(ctx.env)) {
+    console.log("daemon 随 cr 运行：退出 cr 再打开即重启（在 cr 设置页改配置会自动重启）");
+    return;
+  }
   requireDarwin();
   await ctx.launchd.restart();
   console.log("✓ 已重启");
@@ -285,7 +331,9 @@ export async function cmdSetup(ctx: Context, binPath: string): Promise<void> {
 
   // token / claude 路径可能刚写入，重新加载环境再起 daemon
   const fresh = makeContext(loadCliEnv());
-  if (process.platform === "darwin") {
+  if (!autostartEnabled(fresh.env)) {
+    console.log("✓ daemon 随 cr 启停（打开 cr 启动，退出一起停）；想开机自启：cr config set autostart on");
+  } else if (process.platform === "darwin") {
     await cmdUp(fresh);
   } else {
     const run = fresh.env.mode === "repo" ? "pnpm dev" : `CLAUDE_REMOTE_ENV_FILE=${fresh.env.envFile} node ${fresh.env.daemonEntry}`;
@@ -328,6 +376,10 @@ function printConfig(ctx: Context): void {
 /** 配置写入后：launchd 在跑就重启让它生效，否则提示。返回重启后（可能已换端口/token）的新上下文。 */
 async function applyConfig(ctx: Context, opts: { restart: boolean }): Promise<Context> {
   const next = makeContext(loadCliEnv());
+  if (!autostartEnabled(next.env) && !ctx.launchd.isLoaded()) {
+    console.log(opts.restart ? "已保存。daemon 随 cr 运行：在 cr 设置页保存或重开 cr 后生效" : "已保存，重开 cr 后生效");
+    return next;
+  }
   if (!opts.restart) {
     console.log("已保存，重启 daemon 后生效（cr restart）");
     return next;
@@ -368,6 +420,16 @@ export async function cmdConfig(ctx: Context, args: string[]): Promise<void> {
     if (sub === "set" && raw.trim() === "") throw new Error(`用法：cr config set ${field.alias} <值>（恢复默认用 unset）`);
     setConfig(ctx.env.envFile, field, raw);
     console.log(sub === "unset" ? `✓ ${field.label} 已恢复默认（${field.fallback}）` : `✓ ${field.label} = ${raw.trim()}`);
+    if (field.hosting === true) {
+      const next = makeContext(loadCliEnv());
+      if (autostartEnabled(next.env)) {
+        await cmdUp(next);
+      } else if (process.platform === "darwin" && (next.launchd.isLoaded() || existsSync(next.launchd.plistPath))) {
+        await next.launchd.uninstall();
+        console.log("✓ 已取消开机自启，launchd 服务已移除；之后打开 cr 时启动 daemon");
+      }
+      return;
+    }
     if (field.key === "BRIDGE_PORT" || field.key === "BRIDGE_HOST") console.log("  已配对的手机需要重新扫码（cr pair）");
     await applyConfig(ctx, { restart });
     return;

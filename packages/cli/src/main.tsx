@@ -20,7 +20,7 @@ import {
   describeError,
   HELP,
 } from "./commands.js";
-import { makeContext, resumeInTerminal, type Context } from "./daemon-control.js";
+import { ensureDaemon, makeContext, resumeInTerminal, type Context } from "./daemon-control.js";
 import { loadCliEnv } from "./env.js";
 import { App, type TuiExit, type View } from "./tui/App.js";
 import { realDeps } from "./tui/deps.js";
@@ -32,7 +32,17 @@ const LEAVE_ALT = "\x1b[?1049l";
 async function runTui(initial: Context): Promise<void> {
   let ctx = initial;
   let view: View = "main";
+  let prepare = true;
   for (;;) {
+    if (prepare) {
+      prepare = false;
+      try {
+        const note = await ensureDaemon(ctx);
+        if (note !== undefined) console.log(`✓ ${note}`);
+      } catch (error) {
+        console.error(`✗ 启动 daemon 失败：${describeError(error)}`);
+      }
+    }
     let result = { kind: "quit" } as TuiExit;
     process.stdout.write(ENTER_ALT);
     const instance = render(<App deps={realDeps(ctx)} initialView={view} onExit={(r) => (result = r)} />, { exitOnCtrlC: false });
@@ -47,6 +57,7 @@ async function runTui(initial: Context): Promise<void> {
       // 设置页改了地址/端口/token：daemon 已重启，换用新的连接参数再进 TUI
       ctx = makeContext(loadCliEnv());
       view = result.then;
+      prepare = true;
       continue;
     }
     view = "main";

@@ -17,7 +17,8 @@ export type ConfigKey =
   | "PERMISSION_TIMEOUT_MS"
   | "ACTIVITY_COOLDOWN_MS"
   | "CLAUDE_BIN"
-  | "UPLOADS_DIR";
+  | "UPLOADS_DIR"
+  | "AUTOSTART";
 
 export interface ConfigField {
   key: ConfigKey;
@@ -31,6 +32,8 @@ export interface ConfigField {
   seconds?: boolean;
   /** 改了之后 cr 连接 daemon 的方式会变，需要重新加载。 */
   affectsCli?: boolean;
+  /** 不是 daemon 读的配置，而是 cr 怎么托管 daemon：改完不重启 daemon，由 cr 切换托管方式。 */
+  hosting?: boolean;
   validate: (value: string) => string | undefined;
 }
 
@@ -117,6 +120,15 @@ export const CONFIG_FIELDS: ConfigField[] = [
     hint: "手机端上传的图片/文件落盘位置",
     fallback: "~/.claude-remote/uploads",
     validate: (v) => (isAbsolute(v) ? undefined : "需要绝对路径（daemon 不展开 ~）"),
+  },
+  {
+    key: "AUTOSTART",
+    alias: "autostart",
+    label: "开机自启",
+    hint: "off（默认）：打开 cr 时启动 daemon，退出 cr / 关掉终端一起停；on：交给 launchd，开机自启、关终端也不停",
+    fallback: "off",
+    hosting: true,
+    validate: (v) => (v === "on" || v === "off" ? undefined : "填 on 或 off"),
   },
 ];
 
