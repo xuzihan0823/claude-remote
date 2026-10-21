@@ -39,7 +39,9 @@ export interface SearchResult {
   truncated: boolean;
 }
 
-const SNIPPET_RADIUS = 30;
+// 命中词前只留少量上下文：客户端列表宽度有限，命中词必须落在可见范围内
+const SNIPPET_BEFORE = 12;
+const SNIPPET_AFTER = 40;
 const DEFAULT_BYTE_BUDGET = 256 * 1024 * 1024;
 
 /** 以命中位置为中心截取单行片段（按 code point 计）。 */
@@ -51,8 +53,8 @@ export function makeSnippet(text: string, needleLower: string): string {
   const idx = lower.length === collapsed.length ? lower.indexOf(needleLower) : -1;
   const at = idx < 0 ? 0 : Array.from(collapsed.slice(0, idx)).length;
   const needleLen = Array.from(needleLower).length;
-  const start = Math.max(0, at - SNIPPET_RADIUS);
-  const end = Math.min(chars.length, at + needleLen + SNIPPET_RADIUS);
+  const start = Math.max(0, at - SNIPPET_BEFORE);
+  const end = Math.min(chars.length, at + needleLen + SNIPPET_AFTER);
   return `${start > 0 ? "…" : ""}${chars.slice(start, end).join("")}${end < chars.length ? "…" : ""}`;
 }
 

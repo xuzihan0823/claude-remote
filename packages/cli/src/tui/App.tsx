@@ -536,7 +536,9 @@ export function App({ deps, onExit }: { deps: TuiDeps; onExit: (exit: TuiExit) =
   }
 
   if (view === "session" && detailSession !== undefined) {
-    const lines = messageLines(detail, inner, Math.max(5, rows - 9));
+    // 顶栏 4 + 标题 1 + 输入框 3 + 底栏 1，再减掉可选的审批横幅/提示行；超出终端高度会把顶栏挤出屏幕
+    const msgHeight = Math.max(3, rows - 10 - (approvalBanner ? 1 : 0) - (toastLine ? 1 : 0));
+    const lines = messageLines(detail, inner, msgHeight);
     const canSend = detailSession.status === "idle";
     return (
       <Box flexDirection="column" width={width}>
@@ -547,7 +549,7 @@ export function App({ deps, onExit }: { deps: TuiDeps; onExit: (exit: TuiExit) =
           <Text bold>{fit(`${projectName(detailSession.cwd)} · ${detailSession.title}`, inner - 14, false)}</Text>
           <Text color="gray">  {STATUS_LABEL[detailSession.status]}</Text>
         </Box>
-        <Box flexDirection="column" paddingX={1} height={Math.max(5, rows - 9)}>
+        <Box flexDirection="column" paddingX={1} height={msgHeight}>
           {lines.map((l, i) => (
             <Text key={i} color={l.color}>
               <Text color="gray">{fit(l.who, 7)}</Text>
