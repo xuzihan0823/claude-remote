@@ -685,3 +685,80 @@ test("审批闭环：approval 帧广播 → HTTP 决议 200 → resolved 帧；�
   }));
   assert.equal(invalid.status, 400);
 });
+
+test("GET /api/sessions/search：默认只搜标题/路径；full=1 搜全文并给片段；空 q 400", async () => {
+  const empty = await fetch(`${harness.base}/api/sessions/search?q=`, authed());
+  assert.equal(empty.status, 400);
+
+  const byTitle = await fetch(`${harness.base}/api/sessions/search?q=HELLO`, authed());
+  assert.equal(byTitle.status, 200);
+  const titleBody = (await byTitle.json()) as { results: Array<Record<string, unknown>>; truncated: boolean };
+  assert.equal(titleBody.results.length, 1);
+  assert.equal(titleBody.results[0]?.sessionId, SESSION_ID);
+  assert.deepEqual((titleBody.results[0]?.match as Record<string, unknown>).field, "title");
+
+  const byCwd = (await (await fetch(`${harness.base}/api/sessions/search?q=claude-remote-it`, authed())).json()) as {
+    results: Array<{ match: { field: string } }>;
+  };
+  assert.equal(byCwd.results[0]?.match.field, "cwd");
+
+  // "human" 只出现在 assistant 回复正文：默认搜不到，full=1 搜到
+  const metaOnly = (await (await fetch(`${harness.base}/api/sessions/search?q=nonexistent-zzz`, authed())).json()) as {
+    results: unknown[];
+  };
+  assert.equal(metaOnly.results.length, 0);
+
+  // 再追加一条，保证命中行不是 lastPreview（否则默认档也会从预览命中）
+  await appendFile(harness.sessionFile,
+    assistantLine("a-search", "a1", "这里提到 git filter-repo 重写历史") + assistantLine("a-search-2", "a-search", "收尾"));
+  const noFull = (await (await fetch(`${harness.base}/api/sessions/search?q=filter-repo`, authed())).json()) as {
+    results: unknown[];
+  };
+  assert.equal(noFull.results.length, 0);
+  const full = (await (await fetch(`${harness.base}/api/sessions/search?q=FILTER-REPO&full=1`, authed())).json()) as {
+    results: Array<{ sessionId: string; status: string; match: { field: string; snippet: string; seq: number } }>;
+  };
+  assert.equal(full.results.length, 1);
+  assert.equal(full.results[0]?.match.field, "content");
+  assert.match(full.results[0]?.match.snippet ?? "", /filter-repo/);
+  assert.equal(typeof full.results[0]?.match.seq, "number");
+  assert.equal(full.results[0]?.status, "idle");
+
+  const unauthorized = await fetch(`${harness.base}/api/sessions/search?q=hello`);
+  assert.equal(unauthorized.status, 401);
+});
+
+test("GET /api/interactions/pending：后连上的客户端能补到待决审批，决议后消失", async () => {
+  const before = (await (await fetch(`${harness.base}/api/interactions/pending`, authed())).json()) as {
+    interactions: unknown[];
+  };
+  assert.equal(before.interactions.length, 0);
+
+  const decision = harness.bridge.request({
+    requestId: "req-pending", sessionKey: SESSION_ID, userId: "web", kind: "approval",
+    toolName: "Bash", input: { command: "rm -rf build" }, prompt: "Run Bash?",
+  }, new AbortController().signal);
+
+  let listed: Array<{ interactionId: string; toolName: string; sessionId: string }> = [];
+  for (let i = 0; i < 50 && listed.length === 0; i += 1) {
+    listed = ((await (await fetch(`${harness.base}/api/interactions/pending`, authed())).json()) as {
+      interactions: typeof listed;
+    }).interactions;
+    if (listed.length === 0) await delay(20);
+  }
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]?.toolName, "Bash");
+  assert.equal(listed[0]?.sessionId, SESSION_ID);
+
+  const id = listed[0]?.interactionId ?? "";
+  const deny = await fetch(`${harness.base}/api/interactions/${id}/decision`, authed({
+    method: "POST", body: JSON.stringify({ type: "deny", message: "no" }),
+  }));
+  assert.equal(deny.status, 200);
+  assert.equal((await decision).type, "deny");
+
+  const after = (await (await fetch(`${harness.base}/api/interactions/pending`, authed())).json()) as {
+    interactions: unknown[];
+  };
+  assert.equal(after.interactions.length, 0);
+});

@@ -65,6 +65,22 @@
 }
 ```
 
+### GET /api/sessions/search?q=&full=&limit=50
+会话检索（2026-10-21 增补，cr 控制台用）。`q` 必填（空 → `400 {"error":"invalid_query"}`），大小写不敏感的子串匹配。
+
+- 默认只匹配 `title` / `cwd` / `lastPreview`，零额外 IO；
+- `full=1` 额外流式扫描 JSONL 原文（text / tool_result），按 `lastActiveAt` 降序，凑够 `limit`（≤200）即停；总读取量超过 256MB 预算时提前停止并返回 `truncated:true`。
+
+```jsonc
+{
+  "results": [{ /* SessionSummary 全部字段 */, "match": { "field": "title|cwd|preview|content", "snippet": "…命中前后文…", "seq": 42 /* 仅 content */ } }],
+  "truncated": false
+}
+```
+
+### GET /api/interactions/pending
+当前待决审批卡片（2026-10-21 增补）：`200 {"interactions":[ApprovalCard]}`，载荷同 WS `approval` 帧的 `interaction`。WS 广播只覆盖在线连接，后连上的客户端（如 cr 控制台）靠它补齐。
+
 ### GET /api/sessions/:id/messages?beforeSeq=&limit=100
 消息按 `seq` 升序返回主链消息（`offChain` 行不返回）。`beforeSeq` 缺省 = 从尾部取最新 `limit` 条。
 
