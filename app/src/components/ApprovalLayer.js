@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, sessionCache } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
 import { truncate } from '../lib/format.js';
+import { haptics } from '../lib/haptics.js';
 import { useTheme } from '../theme.js';
 
 // 移植 web/ui/components/approval.js：
@@ -13,6 +14,9 @@ import { useTheme } from '../theme.js';
 // - 只渲染 items[0]，多余显示「还有 N 个待处理」
 // - decide 乐观更新（点击立即打戳；HTTP 后台 POST /decision）；409/404 仅 toast 不回滚；其它失败回滚 + toast
 // - 键盘弹出时 KeyboardStickyView 把整层托起，骑在键盘上方
+// - 补拉：挂载时与每次 WS 连上（含回前台重连）GET /api/interactions/pending，
+//   手机在后台 / 断线期间产生的审批不会丢；服务端已不存在的未决卡片（别处处理或超时）静默移除
+// - 'approval-focus'（推送深链）把指定审批顶到最前；本地没有就先补拉，仍没有则提示已处理
 // 渲染顺序（App 根保证）：Approval -> PairConfirm -> Toast，本层 zIndex 50（低于 PairConfirm 100、高于 sheet）。
 
 const RESOLVED_LABEL = { allowed: '已允许', denied: '已拒绝', answered: '已作答', expired: '已超时' };
@@ -111,11 +115,13 @@ function ApprovalCard({ item, onDecide }) {
         { method: 'POST', body: JSON.stringify(body) }
       );
       if (data && data.status) onDecide(it.interactionId, 'resolve', data.status);
+      if (status === 'denied') haptics.reject(); else haptics.success();
     } catch (e) {
       if (e.status === 409) toast('该审批已在别处处理', 'info');
       else if (e.status === 404) toast('审批已不存在', 'info');
       else {
         onDecide(it.interactionId, 'rollback');
+        haptics.error();
         if (e.code !== 'unauthorized') toast(`提交失败：${e.code}`, 'error');
       }
     } finally {
@@ -417,13 +423,52 @@ export function ApprovalLayer() {
     if (t) { clearTimeout(t); removalTimers.current.delete(id); }
   }, []);
 
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const has = (id) => itemsRef.current.some((x) => x.interaction.interactionId === id);
+
   useBus('ws:approval', ({ interaction }) => {
+    if (!has(interaction.interactionId)) haptics.attention();
     setItems((xs) => (
       xs.some((x) => x.interaction.interactionId === interaction.interactionId)
         ? xs
         : [...xs, { interaction }]
     ));
   }, []);
+
+  // 与服务端对账：补上漏掉的，去掉已不存在的未决项。返回服务端待审批 id 集合（失败返回 null）。
+  const syncPending = useCallback(async () => {
+    let data;
+    try {
+      data = await api('/api/interactions/pending');
+    } catch {
+      return null; // 断线 / 旧 daemon 无此端点：保持现状，等下次 ws-open
+    }
+    const list = (data?.interactions || []).slice().sort((a, b) => a.expiresAt - b.expiresAt);
+    const ids = new Set(list.map((c) => c.interactionId));
+    if (list.some((c) => !has(c.interactionId))) haptics.attention();
+    setItems((xs) => {
+      const kept = xs.filter((x) => x.resolved || ids.has(x.interaction.interactionId));
+      const known = new Set(kept.map((x) => x.interaction.interactionId));
+      const fresh = list.filter((c) => !known.has(c.interactionId)).map((interaction) => ({ interaction }));
+      return fresh.length === 0 && kept.length === xs.length ? xs : [...kept, ...fresh];
+    });
+    return ids;
+  }, []);
+  useEffect(() => { syncPending(); }, [syncPending]);
+  useBus('ws-open', () => { syncPending(); }, [syncPending]);
+
+  const moveToFront = (id) => setItems((xs) => {
+    const i = xs.findIndex((x) => x.interaction.interactionId === id);
+    return i <= 0 ? xs : [xs[i], ...xs.slice(0, i), ...xs.slice(i + 1)];
+  });
+  useBus('approval-focus', ({ interactionId }) => {
+    if (has(interactionId)) { moveToFront(interactionId); return; }
+    syncPending().then((ids) => {
+      if (ids?.has(interactionId)) moveToFront(interactionId);
+      else if (ids) toast('这条审批已处理或已超时', 'info');
+    });
+  }, [syncPending]);
   useBus('ws:approval.resolved', ({ interactionId, status }) => {
     setItems((xs) => xs.map((x) => (
       x.interaction.interactionId === interactionId ? { ...x, resolved: status } : x
