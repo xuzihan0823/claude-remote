@@ -99,7 +99,7 @@ const config: CapacitorConfig = {
 
 ## 登录页与连接衔接（2026-10）
 
-- 芒星改为 11 条光芒、长短参差（`components/Spark.js` 的 `RAYS`）。web 端和 App 图标仍是旧版 15 条。
+- 芒星按参考图改为 12 条锥形光芒 + 实心中心（`components/Spark.js` 的 `RAYS` + `rayPath`，填充 path，端部平头小圆角）。web 端和 App 图标仍是旧版 15 条。
 - 登录页：芒星绽放 + 标题；主按钮「扫码连接」打开 App 内相机（`components/QrScanner.js`，expo-camera，读 `cr` 配对页二维码里的 `claude-remote://setup` 链接）；次按钮「输入地址和令牌」展开表单。
 - 连接中：芒星旋转、光芒依次伸缩，显示「正在连接 <host>…」。失败：芒星左右抖一下 + 错误文案 + 触感。
 - 成功：变绿「✓ 已连接」+ 触感 → 标题淡出 → 登录页把芒星的窗口位置交给首页（`lib/intro.js` 的 handoff），首页芒星从那里平移缩放到自己的位置，其它元素提前渐入；不再二次绽放。
