@@ -14,6 +14,7 @@ import {
   type DaemonSnapshot,
 } from "../daemon-control.js";
 import { connectEvents } from "../api.js";
+import { readConfig, rotateToken, setConfig, type ConfigField, type ConfigValue } from "../config.js";
 
 export type ApiLike = Pick<Api, "search" | "messages" | "send" | "abort" | "decide" | "pending">;
 
@@ -31,6 +32,12 @@ export interface TuiDeps {
   pair: () => Promise<{ qr: string; bases: string[] } | undefined>;
   openWeb: () => string;
   readLogTail: (maxLines: number) => string[];
+  config: {
+    read: () => ConfigValue[];
+    /** raw 为展示单位；空字符串恢复默认。校验失败抛错。 */
+    set: (field: ConfigField, raw: string) => void;
+    rotateToken: () => void;
+  };
 }
 
 /** 读文件尾部若干行（只读最后 256KB，日志再大也不卡）。 */
@@ -86,7 +93,12 @@ export function realDeps(ctx: Context): TuiDeps {
       return copied ? "已打开浏览器，token 已复制到剪贴板" : `已打开 ${url}`;
     },
     readLogTail: (n) => readTailLines(ctx.env.logFile, n),
+    config: {
+      read: () => readConfig(ctx.env.envFile),
+      set: (field, raw) => setConfig(ctx.env.envFile, field, raw),
+      rotateToken: () => void rotateToken(ctx.env.envFile),
+    },
   };
 }
 
-export type { DaemonSnapshot, SessionSummary };
+export type { ConfigField, ConfigValue, DaemonSnapshot, SessionSummary };
