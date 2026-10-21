@@ -11,7 +11,10 @@ import { isKnownCwd, pathTail, projectForCwd, projectTitles } from '../lib/proje
 import { ConversationHeader } from '../components/ConversationHeader.js';
 import { Icon } from '../components/Icon.js';
 import { ProjectPicker } from '../components/ProjectPicker.js';
-import { Spark } from '../components/Spark.js';
+import { useReducedMotion } from 'react-native-reanimated';
+import { BloomSpark } from '../components/Spark.js';
+import { FadeIn } from '../components/FadeIn.js';
+import { takeIntro } from '../lib/intro.js';
 import { NewChatComposer } from '../components/composer/NewChatComposer.js';
 import { useTheme } from '../theme.js';
 
@@ -24,6 +27,10 @@ export function HomeScreen() {
   const route = useRoute();
   const hour = new Date().getHours();
   const greet = hour < 5 ? '夜深了。' : hour < 12 ? '早上好。' : hour < 18 ? '下午好。' : '晚上好。';
+
+  // 冷启动第一次进入首页时播放开屏：芒星原位绽放，其余元素依次渐入（系统开了「减弱动态效果」则跳过）
+  const reduceMotion = useReducedMotion();
+  const [intro] = useState(() => takeIntro() && !reduceMotion);
 
   const { catalog, catalogLoaded, catalogError, target, setTarget, inheritCwd, noteCreated, setDraftActive, refresh } = useProjects();
   const [mode, setMode] = useState(getNewSessionMode);
@@ -68,6 +75,7 @@ export function HomeScreen() {
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
     <View style={{ flex: 1, backgroundColor: colors.bg, paddingTop: insets.top, paddingLeft: insets.left, paddingRight: insets.right }}>
+      <FadeIn play={intro} delay={800} dy={-6}>
       <ConversationHeader
         mode={mode}
         onModeChange={(m) => { setMode(m); setNewSessionMode(m); }}
@@ -83,14 +91,19 @@ export function HomeScreen() {
           </View>
         ) : null}
       />
+      </FadeIn>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 24 }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-        <Spark size={48} style={{ marginBottom: 20 }} />
-        <Text style={{ color: colors.inkStrong, fontSize: 32, fontWeight: '400', letterSpacing: -0.8 }}>{greet}</Text>
-        <Text style={{ color: colors.ink2, fontSize: 15, marginTop: 12 }}>在手机上，继续你的工作。</Text>
+        <BloomSpark size={48} play={intro} style={{ marginBottom: 20 }} />
+        <FadeIn play={intro} delay={600}>
+          <Text style={{ color: colors.inkStrong, fontSize: 32, fontWeight: '400', letterSpacing: -0.8 }}>{greet}</Text>
+        </FadeIn>
+        <FadeIn play={intro} delay={700}>
+          <Text style={{ color: colors.ink2, fontSize: 15, marginTop: 12 }}>在手机上，继续你的工作。</Text>
+        </FadeIn>
       </ScrollView>
 
-      <View>
+      <FadeIn play={intro} delay={850} dy={18} duration={420}>
         {catalogError && !catalogLoaded ? (
           <TouchableOpacity onPress={refresh} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 20, paddingBottom: 6 }}>
             <Text style={{ color: colors.danger, fontSize: 13, textAlign: 'center' }}>{catalogError} · 点击重试</Text>
@@ -105,7 +118,7 @@ export function HomeScreen() {
           onCreated={created}
           mode={mode}
         />
-      </View>
+      </FadeIn>
       <ProjectPicker
         sheetRef={pickerRef}
         variant="target"

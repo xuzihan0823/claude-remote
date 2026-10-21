@@ -8,6 +8,7 @@ import { createNavigationContainerRef, DarkTheme, DefaultTheme, NavigationContai
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createDrawerNavigator } from '@react-navigation/drawer';
 import * as Linking from 'expo-linking';
+import * as SplashScreen from 'expo-splash-screen';
 
 import {
   baseUrl, BASE_KEY, clearToken, connErrMsg, connHost, loadBases, normalizeBase,
@@ -27,6 +28,11 @@ import { DrawerContent } from './components/DrawerContent.js';
 import { PairConfirm } from './components/PairConfirm.js';
 import { ApprovalLayer } from './components/ApprovalLayer.js';
 import { ToastLayer } from './components/Toast.js';
+
+// 原生启动屏只是纯底色（无图标），保持到连接校验结束，再淡出交给首页的芒星绽放动画。
+SplashScreen.preventAutoHideAsync().catch(() => { /* noop */ });
+try { SplashScreen.setOptions({ duration: 200, fade: true }); } catch { /* 旧版本无此 API */ }
+const SPLASH_MAX_MS = 2500; // 网络慢时最多等这么久，之后照常显示「连接中」
 
 const Stack = createNativeStackNavigator();
 const navigationRef = createNavigationContainerRef();
@@ -63,6 +69,13 @@ export default function App() {
     pendingSessionMessages.clear();
     setConn({ key, base: baseUrl });
   }, []);
+
+  useEffect(() => {
+    const hide = () => SplashScreen.hideAsync().catch(() => { /* noop */ });
+    if (auth !== 'checking') { hide(); return undefined; }
+    const timer = setTimeout(hide, SPLASH_MAX_MS);
+    return () => clearTimeout(timer);
+  }, [auth]);
 
   useBus('unauthorized', () => {
     ws.stop();
