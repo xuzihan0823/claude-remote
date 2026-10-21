@@ -26,9 +26,12 @@ claude-remote/
 Mac 端只有一个命令行入口 `cr`（原菜单栏 App 已删除）。daemon 交给 launchd 常驻：登录即起、崩溃自动拉起。
 
 ```sh
+npm install -g @xuzihan0823/claude-remote   # 给其他人用：npm 安装
+cr                                           # 首次运行自动初始化（token、查找 claude、注册 launchd），然后进入控制台
+
+# 或者从源码运行（开发）
 pnpm install
-node packages/cli/bin/cr.mjs setup   # 生成/迁移 token → 链接 ~/.local/bin/cr → 注册 launchd 并启动
-cr                                   # 全屏控制台：会话 / 搜索 / 审批 / 配对 / 日志 / 启停
+node packages/cli/bin/cr.mjs setup
 ```
 
 常用子命令：`cr status`、`cr up|down|restart`、`cr logs`、`cr pair`、`cr web`、`cr search <词> [--full]`、`cr open <id>`。详见 [docs/cli.md](docs/cli.md)。

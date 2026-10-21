@@ -52,7 +52,7 @@ async function runTui(initial: Context): Promise<void> {
     view = "main";
     const { session } = result;
     console.log(`接管会话 ${session.sessionId}（${session.cwd || "未知目录"}），退出 claude 后回到 cr\n`);
-    await resumeInTerminal(session);
+    await resumeInTerminal(session, ctx.env.envFile);
   }
 }
 
@@ -73,6 +73,14 @@ export async function main(argv: string[], binPath: string): Promise<void> {
       case undefined:
         if (!process.stdin.isTTY || !process.stdout.isTTY) {
           process.stdout.write(HELP);
+          return;
+        }
+        if (ctx.env.token === undefined) {
+          // 首次运行：还没有 token，先走一遍 setup（生成 token、找 claude、注册 launchd）
+          console.log("首次运行，先完成初始化（之后可随时 cr setup 重新执行）\n");
+          await cmdSetup(ctx, binPath);
+          console.log("");
+          await runTui(makeContext(loadCliEnv()));
           return;
         }
         await runTui(ctx);

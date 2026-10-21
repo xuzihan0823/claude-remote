@@ -6,16 +6,29 @@
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type TokenSource = "env" | "dotenv" | "keychain" | "none";
 
+/**
+ * 运行形态：
+ *   repo     从 git 仓库源码运行（开发者 / 老用户）：配置在仓库 .env，launchd 走 scripts/launchd/run-daemon.sh + tsx
+ *   package  npm 全局安装的编译产物：配置与数据在 ~/.claude-remote（CLAUDE_REMOTE_HOME 可改），launchd 直接 node dist/daemon.js
+ */
+export type InstallMode = "repo" | "package";
+
 export interface CliEnv {
+  mode: InstallMode;
+  /** repo 模式：仓库根目录；package 模式：npm 包根目录（含 dist/、web/）。 */
   repoDir: string;
+  /** 配置与数据目录（package 模式 ~/.claude-remote；repo 模式即仓库根目录）。 */
+  dataDir: string;
   envFile: string;
+  /** package 模式下 launchd 直接运行的 daemon 入口。 */
+  daemonEntry: string;
   /** daemon 监听端口（BRIDGE_PORT，默认 8787）。 */
   port: number;
   /** CLI 访问 daemon 的地址（总是走本机）。 */
@@ -29,11 +42,23 @@ export interface CliEnv {
 export const KEYCHAIN_SERVICE = "claude-remote";
 export const KEYCHAIN_ACCOUNT = "bridge-token";
 
-/** 仓库根目录：CLAUDE_REMOTE_REPO 优先，否则由本文件位置推出（packages/cli/src → 仓库根）。 */
-export function findRepoDir(env: NodeJS.ProcessEnv = process.env): string {
+/**
+ * 定位运行形态与根目录：
+ *   CLAUDE_REMOTE_REPO 显式指定 → repo；
+ *   源码运行（packages/cli/src，上三级有 pnpm-workspace.yaml）→ repo；
+ *   否则是 npm 包里的 dist/cli.js → package，包根目录是上一级。
+ */
+export function findInstall(env: NodeJS.ProcessEnv = process.env, here = dirname(fileURLToPath(import.meta.url))): { mode: InstallMode; root: string } {
   const fromEnv = env.CLAUDE_REMOTE_REPO?.trim();
-  if (fromEnv) return resolve(fromEnv);
-  return resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+  if (fromEnv) return { mode: "repo", root: resolve(fromEnv) };
+  const repo = resolve(here, "../../..");
+  if (existsSync(join(repo, "pnpm-workspace.yaml"))) return { mode: "repo", root: repo };
+  return { mode: "package", root: resolve(here, "..") };
+}
+
+/** @deprecated 兼容旧调用：返回 findInstall().root。 */
+export function findRepoDir(env: NodeJS.ProcessEnv = process.env): string {
+  return findInstall(env).root;
 }
 
 /** 极简 dotenv 解析：KEY=VALUE、可选 export 前缀、单/双引号、# 注释。 */
@@ -84,12 +109,16 @@ export interface LoadEnvDeps {
   env?: NodeJS.ProcessEnv;
   keychain?: () => string | undefined;
   home?: string;
+  /** 测试用：覆盖 findInstall 的结果。 */
+  install?: { mode: InstallMode; root: string };
 }
 
 export function loadCliEnv(deps: LoadEnvDeps = {}): CliEnv {
   const env = deps.env ?? process.env;
-  const repoDir = findRepoDir(env);
-  const envFile = join(repoDir, ".env");
+  const home = deps.home ?? homedir();
+  const { mode, root: repoDir } = deps.install ?? findInstall(env);
+  const dataDir = mode === "repo" ? repoDir : resolve(env.CLAUDE_REMOTE_HOME?.trim() || join(home, ".claude-remote"));
+  const envFile = mode === "repo" ? join(repoDir, ".env") : join(dataDir, "config.env");
   const dotenv = readDotenv(envFile);
 
   let token: string | undefined;
@@ -120,11 +149,13 @@ export function loadCliEnv(deps: LoadEnvDeps = {}): CliEnv {
   const reachable = host === "0.0.0.0" || host === "::" || host === "" ? "127.0.0.1" : host;
   const hostPart = reachable.includes(":") ? `[${reachable}]` : reachable;
 
-  const home = deps.home ?? homedir();
   const logDir = join(home, "Library", "Logs", "claude-remote");
   return {
+    mode,
     repoDir,
+    dataDir,
     envFile,
+    daemonEntry: join(repoDir, "dist", "daemon.js"),
     port,
     baseUrl: `http://${hostPart}:${port}`,
     token,
@@ -167,6 +198,7 @@ export function ensureToken(cliEnv: CliEnv): { token: string; action: "kept" | "
   const migrated = cliEnv.tokenSource === "keychain" ? cliEnv.token : undefined;
   const token = migrated ?? generateToken();
   const current = existsSync(cliEnv.envFile) ? readFileSync(cliEnv.envFile, "utf8") : "";
+  mkdirSync(dirname(cliEnv.envFile), { recursive: true, mode: 0o700 });
   writeFileSync(cliEnv.envFile, upsertDotenv(current, "BRIDGE_TOKEN", token), { mode: 0o600 });
   return { token, action: migrated === undefined ? "generated" : "migrated" };
 }

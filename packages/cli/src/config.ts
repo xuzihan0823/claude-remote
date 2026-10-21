@@ -3,9 +3,9 @@
 // daemon 启动时用 process.loadEnvFile() 读 .env，所以改完需要重启 daemon 才生效；
 // 改监听地址/端口/token 还会影响 cr 自己怎么连 daemon，调用方要重新加载 CliEnv。
 
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 
 import { generateToken, readDotenv, upsertDotenv } from "./env.js";
 
@@ -106,7 +106,7 @@ export const CONFIG_FIELDS: ConfigField[] = [
     key: "CLAUDE_BIN",
     alias: "claude",
     label: "claude 路径",
-    hint: "cr open / 按 o 接管时用的 claude；留空则按 PATH 查找",
+    hint: "daemon 驱动会话和 cr open 接管都用它；cr setup 会自动探测，留空则按 PATH 查找",
     fallback: "（PATH 中的 claude）",
     validate: (v) => (!isAbsolute(v) ? "需要绝对路径" : existsSync(v) ? undefined : "文件不存在"),
   },
@@ -158,6 +158,7 @@ function readText(envFile: string): string {
 }
 
 function writeText(envFile: string, text: string): void {
+  mkdirSync(dirname(envFile), { recursive: true, mode: 0o700 });
   writeFileSync(envFile, text, { mode: 0o600 });
   chmodSync(envFile, 0o600); // mode 只在新建文件时生效；.env 里有 token，已有文件也收紧权限
 }

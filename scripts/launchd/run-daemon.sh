@@ -40,7 +40,8 @@ if [[ -z "${BRIDGE_TOKEN:-}" ]] && ! grep -Eq '^[[:space:]]*BRIDGE_TOKEN=[^[:spa
   fi
 fi
 
-if [[ -z "${CLAUDE_BIN:-}" ]] && command -v claude >/dev/null 2>&1; then
+# claude 路径：环境变量 > .env 的 CLAUDE_BIN（cr setup 自动探测写入）> login shell PATH
+if [[ -z "${CLAUDE_BIN:-}" ]] && ! grep -Eq '^[[:space:]]*CLAUDE_BIN=[^[:space:]]+' .env 2>/dev/null && command -v claude >/dev/null 2>&1; then
   export CLAUDE_BIN="$(command -v claude)"
 fi
 

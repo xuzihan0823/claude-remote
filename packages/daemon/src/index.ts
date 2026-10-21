@@ -7,6 +7,7 @@
 //   DaemonServer 持有全部只读/驱动入口（HTTP + WS + 静态托管）
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
@@ -28,17 +29,31 @@ const pkg = require("../package.json") as { name: string; version: string };
 
 /** 启动时异步探测 claude CLI 版本；失败保持 "unknown"（health 端点用）。 */
 function probeClaudeCliVersion(onResult: (version: string) => void): void {
-  execFile("claude", ["--version"], { timeout: 10_000 }, (error, stdout) => {
+  execFile(process.env.CLAUDE_BIN?.trim() || "claude", ["--version"], { timeout: 10_000 }, (error, stdout) => {
     if (error !== null) return;
     const version = stdout.trim();
     if (version !== "") onResult(version);
   });
 }
 
+/** Web 静态资源目录：源码运行在仓库 web/（src → ../../../web），npm 包里在包根 web/（dist → ../web）。 */
+function findWebRoot(): string {
+  const fromEnv = process.env.CLAUDE_REMOTE_WEB_ROOT?.trim();
+  if (fromEnv) return resolve(fromEnv);
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [resolve(here, "../web"), resolve(here, "../../../web")];
+  return candidates.find((dir) => existsSync(resolve(dir, "index.html"))) ?? (candidates[1] as string);
+}
+
 async function main(): Promise<void> {
+  // 配置文件：npm 安装形态由 launchd 传 CLAUDE_REMOTE_ENV_FILE（~/.claude-remote/config.env）；源码运行读 cwd 的 .env。
+  // loadEnvFile 不覆盖已有环境变量，所以进程环境优先。
+  const envFile = process.env.CLAUDE_REMOTE_ENV_FILE?.trim();
   try {
-    process.loadEnvFile();
-  } catch {
+    if (envFile) process.loadEnvFile(envFile);
+    else process.loadEnvFile();
+  } catch (error) {
+    if (envFile) console.warn(`无法读取配置文件 ${envFile}：${(error as Error).message}`);
     // 无 .env 时直接用进程环境
   }
   const config = loadConfig();
@@ -80,7 +95,7 @@ async function main(): Promise<void> {
 
   server = new DaemonServer({
     config,
-    webRoot: resolve(dirname(fileURLToPath(import.meta.url)), "../../../web"),
+    webRoot: findWebRoot(),
     watcher,
     tracker,
     runner,

@@ -12,7 +12,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export const DAEMON_LABEL = "com.claude-remote.daemon";
 
@@ -20,16 +20,24 @@ export function xmlEscape(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** launchd 要运行的程序。repo 模式走 run-daemon.sh（login shell + tsx），package 模式直接 node dist/daemon.js。 */
+export interface LaunchProgram {
+  args: string[];
+  workingDir: string;
+  env: Record<string, string>;
+}
+
 export interface PlistInput {
-  runner: string;
-  repoDir: string;
+  program: LaunchProgram;
   logFile: string;
 }
 
-export function renderPlist({ runner, repoDir, logFile }: PlistInput): string {
-  const r = xmlEscape(runner);
-  const repo = xmlEscape(repoDir);
+export function renderPlist({ program, logFile }: PlistInput): string {
   const log = xmlEscape(logFile);
+  const args = program.args.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
+  const env = Object.entries(program.env)
+    .map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`)
+    .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -38,17 +46,13 @@ export function renderPlist({ runner, repoDir, logFile }: PlistInput): string {
   <string>${DAEMON_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <!-- 以 login shell 运行，加载 ~/.zprofile 里的 Homebrew 等 PATH -->
-    <string>/bin/zsh</string>
-    <string>-l</string>
-    <string>${r}</string>
+${args}
   </array>
   <key>WorkingDirectory</key>
-  <string>${repo}</string>
+  <string>${xmlEscape(program.workingDir)}</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>CLAUDE_REMOTE_REPO</key>
-    <string>${repo}</string>
+${env}
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -70,6 +74,45 @@ export function renderPlist({ runner, repoDir, logFile }: PlistInput): string {
 </dict>
 </plist>
 `;
+}
+
+/** repo 模式：以 login shell 运行 run-daemon.sh（加载 ~/.zprofile 里的 Homebrew 等 PATH，再 exec tsx）。 */
+export function repoProgram(repoDir: string): LaunchProgram {
+  return {
+    args: ["/bin/zsh", "-l", join(repoDir, "scripts", "launchd", "run-daemon.sh")],
+    workingDir: repoDir,
+    env: { CLAUDE_REMOTE_REPO: repoDir },
+  };
+}
+
+/**
+ * package 模式：node 直接跑编译好的 daemon。launchd 没有 shell PATH，
+ * 显式给出 node 和 claude 所在目录（npm 装的 claude 是 #!/usr/bin/env node 脚本，也需要 node 在 PATH 里）。
+ */
+export function packageProgram(opts: {
+  nodePath: string;
+  daemonEntry: string;
+  dataDir: string;
+  envFile: string;
+  claudeBin?: string | undefined;
+  home: string;
+}): LaunchProgram {
+  const dirs = [
+    ...(opts.claudeBin !== undefined && opts.claudeBin.includes("/") ? [dirname(opts.claudeBin)] : []),
+    dirname(opts.nodePath),
+    join(opts.home, ".local", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ];
+  return {
+    args: [opts.nodePath, opts.daemonEntry],
+    workingDir: opts.dataDir,
+    env: { CLAUDE_REMOTE_ENV_FILE: opts.envFile, PATH: [...new Set(dirs)].join(":") },
+  };
 }
 
 export interface LaunchdState {
@@ -105,7 +148,8 @@ const defaultExec: Exec = (cmd, args) =>
   execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
 export interface LaunchdOptions {
-  repoDir: string;
+  /** 每次 up 时重新计算（claude 路径等配置可能变了）。 */
+  program: () => LaunchProgram;
   logFile: string;
   exec?: Exec;
   home?: string;
@@ -115,7 +159,6 @@ export interface LaunchdOptions {
 
 export class Launchd {
   readonly plistPath: string;
-  readonly runner: string;
   readonly #opts: LaunchdOptions;
   readonly #exec: Exec;
   readonly #domain: string;
@@ -126,7 +169,6 @@ export class Launchd {
     this.#exec = opts.exec ?? defaultExec;
     const home = opts.home ?? homedir();
     this.plistPath = join(home, "Library", "LaunchAgents", `${DAEMON_LABEL}.plist`);
-    this.runner = join(opts.repoDir, "scripts", "launchd", "run-daemon.sh");
     this.#domain = `gui/${opts.uid ?? process.getuid?.() ?? 501}`;
     this.#sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
@@ -156,7 +198,7 @@ export class Launchd {
 
   /** 写 plist；内容未变返回 false。 */
   writePlist(): boolean {
-    const content = renderPlist({ runner: this.runner, repoDir: this.#opts.repoDir, logFile: this.#opts.logFile });
+    const content = renderPlist({ program: this.#opts.program(), logFile: this.#opts.logFile });
     const current = existsSync(this.plistPath) ? readFileSync(this.plistPath, "utf8") : undefined;
     if (current === content) return false;
     mkdirSync(join(this.plistPath, ".."), { recursive: true });

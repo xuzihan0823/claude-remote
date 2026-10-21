@@ -4,16 +4,33 @@
 
 ## 安装
 
+两种形态，`cr` 会自动识别：
+
+| | npm 安装（给其他人用） | 源码运行（开发） |
+|---|---|---|
+| 安装 | `npm i -g @xuzihan0823/claude-remote` | `pnpm install && node packages/cli/bin/cr.mjs setup` |
+| 配置 | `~/.claude-remote/config.env` | 仓库根目录 `.env` |
+| 数据 | `~/.claude-remote/.data/`、`~/.claude-remote/uploads` | 仓库 `.data/` |
+| launchd 启动 | `node <包>/dist/daemon.js`（PATH 显式包含 node 与 claude 目录） | `zsh -l scripts/launchd/run-daemon.sh` → tsx |
+
+`setup` 幂等，可重复运行；npm 安装后**第一次运行 `cr` 会自动执行**：
+
+1. **token**：已有 `BRIDGE_TOKEN` 就沿用；没有但 Keychain 里有旧菜单栏 App 存的 token（service `claude-remote` / account `bridge-token`），就迁移进配置，**已配对的手机不用重配**；都没有就生成新的（配置文件权限 0600）。
+2. **找 claude**：依次查当前 PATH、登录 shell（`$SHELL -ilc 'command -v claude'`，覆盖 nvm/fnm 配在 .zshrc 里的情况）、官方安装器 `~/.claude/local`、`~/.local/bin`、Homebrew、`npm prefix -g`、bun、volta、nvm/fnm 各版本目录。找到的绝对路径写进 `CLAUDE_BIN`：daemon 用它驱动会话（Agent SDK 的 `pathToClaudeCodeExecutable`），`cr open` 用它接管。已配置且仍可执行就沿用。同时报告 `~/.claude/projects` 里有多少项目的会话。
+3. **PATH**（仅源码运行）：把 `~/.local/bin/cr` 软链到 `packages/cli/bin/cr.mjs`。
+4. **launchd**：写 `~/Library/LaunchAgents/com.claude-remote.daemon.plist` 并启动，等待 `/api/health` 响应。Label 与旧 `install.sh` 相同，旧安装直接被接管。
+
+换了 Node 版本或重装 claude 后重新运行 `cr setup` 即可（plist 内容有变化会自动重载）。
+
+### 发布 npm 包
+
 ```sh
-pnpm install
-node packages/cli/bin/cr.mjs setup
+pnpm build:npm                # 输出 dist/npm（esbuild 打包 cli/daemon，web 静态资源一并带上）
+cd dist/npm && npm publish --access public
 ```
 
-`setup` 幂等，可重复运行，依次做三件事：
-
-1. **token**：`.env` 已有 `BRIDGE_TOKEN` 就沿用；没有但 Keychain 里有旧菜单栏 App 存的 token（service `claude-remote` / account `bridge-token`），就迁移进 `.env`，**已配对的手机不用重配**；都没有就生成新的（`.env` 权限 0600）。
-2. **PATH**：把 `~/.local/bin/cr` 软链到 `packages/cli/bin/cr.mjs`。若 `~/.local/bin` 不在 PATH，会提示加到 `~/.zshrc`。
-3. **launchd**：写 `~/Library/LaunchAgents/com.claude-remote.daemon.plist` 并启动，等待 `/api/health` 响应。Label 与旧 `install.sh` 相同，旧安装直接被接管。
+workspace 包打进 bundle，第三方依赖（ink、react、ws、qrcode、Agent SDK）保持 external 作为 dependencies。
+包名默认 `@xuzihan0823/claude-remote`，可用 `--name` 或 `NPM_NAME` 覆盖（scope 必须是自己的 npm 用户名或组织）。
 
 ## 全屏控制台
 

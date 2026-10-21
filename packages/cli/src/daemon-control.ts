@@ -2,13 +2,13 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
 
 import { enumeratePairBases, pairPayload, type PairInfo } from "@claude-remote/daemon/pair";
 
 import { Api, ApiError, type ApprovalCard, type SessionSummary } from "./api.js";
-import { findRepoDir, readDotenv, type CliEnv } from "./env.js";
-import { Launchd, type LaunchdState } from "./launchd.js";
+import { readDotenv, type CliEnv } from "./env.js";
+import { Launchd, packageProgram, repoProgram, type LaunchdState } from "./launchd.js";
 
 export interface Context {
   env: CliEnv;
@@ -19,7 +19,20 @@ export interface Context {
 export function makeContext(env: CliEnv): Context {
   return {
     env,
-    launchd: new Launchd({ repoDir: env.repoDir, logFile: env.logFile }),
+    launchd: new Launchd({
+      logFile: env.logFile,
+      program: () =>
+        env.mode === "repo"
+          ? repoProgram(env.repoDir)
+          : packageProgram({
+              nodePath: process.execPath,
+              daemonEntry: env.daemonEntry,
+              dataDir: env.dataDir,
+              envFile: env.envFile,
+              claudeBin: readDotenv(env.envFile).CLAUDE_BIN,
+              home: homedir(),
+            }),
+    }),
     api: env.token === undefined ? undefined : new Api(env.baseUrl, env.token),
   };
 }
@@ -131,7 +144,7 @@ export function copyToClipboard(text: string): boolean {
 }
 
 /** claude 可执行文件：环境变量 CLAUDE_BIN > .env 里的 CLAUDE_BIN（cr config set claude）> PATH。 */
-export function claudeBin(envFile = join(findRepoDir(), ".env")): string {
+export function claudeBin(envFile: string): string {
   return process.env.CLAUDE_BIN?.trim() || readDotenv(envFile).CLAUDE_BIN || "claude";
 }
 
@@ -139,10 +152,10 @@ export function claudeBin(envFile = join(findRepoDir(), ".env")): string {
  * 在当前终端接管会话（claude --resume），返回子进程退出码。
  * cwd 必须是会话原始目录：claude 按 cwd 编码目录查找会话文件。
  */
-export function resumeInTerminal(session: Pick<SessionSummary, "sessionId" | "cwd">): Promise<number> {
+export function resumeInTerminal(session: Pick<SessionSummary, "sessionId" | "cwd">, envFile: string): Promise<number> {
   const cwd = session.cwd !== "" && existsSync(session.cwd) ? session.cwd : process.cwd();
   return new Promise((resolvePromise) => {
-    const child = spawn(claudeBin(), ["--resume", session.sessionId], { cwd, stdio: "inherit" });
+    const child = spawn(claudeBin(envFile), ["--resume", session.sessionId], { cwd, stdio: "inherit" });
     child.on("error", (error) => {
       console.error(`无法启动 claude：${error.message}（可用 CLAUDE_BIN 指定路径）`);
       resolvePromise(127);
