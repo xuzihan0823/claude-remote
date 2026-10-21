@@ -20,18 +20,17 @@ pnpm --dir /Users/mac/Desktop/claude-remote dev
 
 ## 常驻运行（launchd，推荐）
 
-nohup 起的 daemon / cloudflared 会随终端或 agent 会话一起消失。改用 LaunchAgent 让 launchd 托管：登录即起、崩溃自动拉起、与任何会话无关。
+nohup 起的 daemon 会随终端或 agent 会话一起消失。改用 LaunchAgent 让 launchd 托管：登录即起、崩溃自动拉起、与任何会话无关。
 
 ```sh
 pnpm install                                  # 首次
-scripts/launchd/install.sh install            # 只托管 daemon
-scripts/launchd/install.sh install --tunnel   # 同时托管 cloudflared named tunnel（默认隧道名 claude-remote）
+scripts/launchd/install.sh install            # 安装并启动
 scripts/launchd/install.sh status             # 查看状态 / pid / 上次退出码
 scripts/launchd/install.sh logs               # 日志在 ~/Library/Logs/claude-remote/
 scripts/launchd/install.sh uninstall          # 移除
 ```
 
-- 安装时会先停掉占着 `BRIDGE_PORT` 的 nohup 旧实例和非托管的 cloudflared，避免撞端口。
+- 安装时会先停掉占着 `BRIDGE_PORT` 的 nohup 旧实例，避免撞端口。
 - token 读取顺序：环境变量 → 仓库 `.env` → Keychain（菜单栏 App 生成的 `claude-remote / bridge-token`），三种启动方式用同一个 token。
 - 装了 LaunchAgent 后，菜单栏 App 自动切换为「launchctl 模式」：启动 = `bootstrap + kickstart`，停止 = `bootout`（KeepAlive 下直接 kill 会被立刻拉起），重启 = `kickstart -k`；退出 App 不会停掉 daemon。
 - 仓库在 `~/Desktop` / `~/Documents` 下时，launchd 起的 zsh 可能被 TCC 拦（日志里 `Operation not permitted`）：给 `/bin/zsh` 加「完全磁盘访问」，或把仓库移出这些目录后重装。

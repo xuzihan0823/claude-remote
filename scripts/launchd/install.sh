@@ -1,27 +1,22 @@
 #!/bin/bash
-# 把 daemon（以及可选的 cloudflared named tunnel）装成 launchd LaunchAgent。
+# 把 daemon 装成 launchd LaunchAgent。
 #
-# 解决的问题：nohup 起的 daemon / cloudflared 会随终端会话或 agent 会话一起消失
-# （PROGRESS.md 2026-07-31「坑 3」：先 1033 无活跃隧道，再 502 源站不可达）。
+# 解决的问题：nohup 起的 daemon 会随终端会话或 agent 会话一起消失
+# （PROGRESS.md 2026-07-31「坑 3」）。
 # LaunchAgent 由 launchd 托管：登录即起、崩溃自动拉起、与任何终端会话无关。
 #
 # 用法：
-#   scripts/launchd/install.sh install [--tunnel]   安装并启动（--tunnel 同时托管 cloudflared）
-#   scripts/launchd/install.sh uninstall            停止并移除
-#   scripts/launchd/install.sh restart              重启 daemon（及已安装的 tunnel）
-#   scripts/launchd/install.sh status               查看状态
-#   scripts/launchd/install.sh logs                 tail 日志
-#
-# 环境变量：
-#   CLAUDE_REMOTE_TUNNEL   cloudflared 隧道名（默认 claude-remote）
-#   CLOUDFLARED_BIN        cloudflared 路径（默认自动探测）
+#   scripts/launchd/install.sh install     安装并启动
+#   scripts/launchd/install.sh uninstall   停止并移除
+#   scripts/launchd/install.sh restart     重启 daemon
+#   scripts/launchd/install.sh status      查看状态
+#   scripts/launchd/install.sh logs        tail 日志
 #
 # 注意 macOS 只自带 bash 3.2，本脚本不使用 bash 4 语法。
 
 set -euo pipefail
 
 DAEMON_LABEL="com.claude-remote.daemon"
-TUNNEL_LABEL="com.claude-remote.tunnel"
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs/claude-remote"
 DOMAIN="gui/$(id -u)"
@@ -31,7 +26,6 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RUNNER="$SCRIPT_DIR/run-daemon.sh"
 
 daemon_plist="$AGENTS_DIR/$DAEMON_LABEL.plist"
-tunnel_plist="$AGENTS_DIR/$TUNNEL_LABEL.plist"
 
 log() { printf '[launchd] %s\n' "$*"; }
 die() { printf '[launchd] 错误：%s\n' "$*" >&2; exit 1; }
@@ -77,15 +71,6 @@ stop_stray_listener() {
     sleep 0.2; i=$((i + 1))
   done
   [ -z "$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true)" ] || die "端口 $port 仍被占用，请手动处理"
-}
-
-stop_stray_tunnel() {
-  local name="$1" pids
-  pids="$(pgrep -f "cloudflared.*tunnel.*run.*$name" 2>/dev/null || true)"
-  [ -z "$pids" ] && return 0
-  log "发现非 launchd 托管的 cloudflared（$(echo $pids | tr '\n' ' ')），发送 SIGTERM"
-  kill $pids 2>/dev/null || true
-  sleep 1
 }
 
 write_daemon_plist() {
@@ -137,48 +122,6 @@ EOF
   plutil -lint "$daemon_plist" >/dev/null
 }
 
-write_tunnel_plist() {
-  local bin="$1" name="$2" logdir
-  logdir="$(xml_escape "$LOG_DIR")"
-  cat >"$tunnel_plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>$TUNNEL_LABEL</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$(xml_escape "$bin")</string>
-    <string>tunnel</string>
-    <string>--no-autoupdate</string>
-    <string>run</string>
-    <string>$(xml_escape "$name")</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>ThrottleInterval</key>
-  <integer>10</integer>
-  <key>StandardOutPath</key>
-  <string>$logdir/tunnel.log</string>
-  <key>StandardErrorPath</key>
-  <string>$logdir/tunnel.log</string>
-</dict>
-</plist>
-EOF
-  plutil -lint "$tunnel_plist" >/dev/null
-}
-
-find_cloudflared() {
-  if [ -n "${CLOUDFLARED_BIN:-}" ]; then printf '%s' "$CLOUDFLARED_BIN"; return; fi
-  for c in /opt/homebrew/bin/cloudflared /usr/local/bin/cloudflared; do
-    [ -x "$c" ] && { printf '%s' "$c"; return; }
-  done
-  command -v cloudflared 2>/dev/null || true
-}
-
 wait_healthy() {
   local port="$1" i=0 code
   while [ $i -lt 40 ]; do
@@ -192,13 +135,7 @@ wait_healthy() {
 }
 
 cmd_install() {
-  local with_tunnel=0
-  for arg in "$@"; do
-    case "$arg" in
-      --tunnel) with_tunnel=1 ;;
-      *) die "未知参数 $arg" ;;
-    esac
-  done
+  [ $# -eq 0 ] || die "未知参数 $*"
 
   [ "$(uname)" = "Darwin" ] || die "只支持 macOS"
   [ -x "$RUNNER" ] || chmod +x "$RUNNER"
@@ -220,23 +157,10 @@ cmd_install() {
   bootstrap "$DAEMON_LABEL" "$daemon_plist"
   log "已安装 $DAEMON_LABEL（日志 $LOG_DIR/daemon.log）"
   wait_healthy "$port" || true
-
-  if [ $with_tunnel -eq 1 ]; then
-    local bin name
-    bin="$(find_cloudflared)"
-    [ -n "$bin" ] || die "找不到 cloudflared（brew install cloudflared，或设置 CLOUDFLARED_BIN）"
-    [ -f "$HOME/.cloudflared/config.yml" ] || die "缺少 ~/.cloudflared/config.yml（named tunnel 配置）"
-    name="${CLAUDE_REMOTE_TUNNEL:-claude-remote}"
-    bootout "$TUNNEL_LABEL"
-    stop_stray_tunnel "$name"
-    write_tunnel_plist "$bin" "$name"
-    bootstrap "$TUNNEL_LABEL" "$tunnel_plist"
-    log "已安装 $TUNNEL_LABEL（隧道 $name，日志 $LOG_DIR/tunnel.log）"
-  fi
 }
 
 cmd_uninstall() {
-  for label in "$DAEMON_LABEL" "$TUNNEL_LABEL"; do
+  for label in "$DAEMON_LABEL"; do
     bootout "$label"
     rm -f "$AGENTS_DIR/$label.plist"
     log "已移除 $label"
@@ -244,7 +168,7 @@ cmd_uninstall() {
 }
 
 cmd_restart() {
-  for label in "$DAEMON_LABEL" "$TUNNEL_LABEL"; do
+  for label in "$DAEMON_LABEL"; do
     if is_loaded "$label"; then
       launchctl kickstart -k "$DOMAIN/$label"
       log "已重启 $label"
@@ -253,7 +177,7 @@ cmd_restart() {
 }
 
 cmd_status() {
-  for label in "$DAEMON_LABEL" "$TUNNEL_LABEL"; do
+  for label in "$DAEMON_LABEL"; do
     if is_loaded "$label"; then
       launchctl print "$DOMAIN/$label" | grep -E '^[[:space:]]*(state|pid|last exit code|runs) =' | sed "s/^/$label: /"
     elif [ -f "$AGENTS_DIR/$label.plist" ]; then

@@ -262,11 +262,12 @@ agent team：explorer-opus47 审计完成度正常；**coder-glm（glm-5.2[1m]�
 
 ## 2026-10-21·进程守护修复（分支 fix/daemon-supervision）
 
-针对「nohup 起的 cloudflared / daemon 会随会话消失」（7-31 坑 3）：
-- 新增 `scripts/launchd/`：`install.sh install [--tunnel] | uninstall | restart | status | logs` 生成 `com.claude-remote.daemon` / `com.claude-remote.tunnel` 两个 LaunchAgent（RunAtLoad + KeepAlive + ThrottleInterval 10s + ExitTimeOut 15s），日志 `~/Library/Logs/claude-remote/`；`run-daemon.sh` 补 PATH、按 env → .env → Keychain 取 token、直接 exec tsx（SIGTERM 直达 daemon 优雅退出）。
+针对「nohup 起的 daemon 会随会话消失」（7-31 坑 3）：
+- 新增 `scripts/launchd/`：`install.sh install | uninstall | restart | status | logs` 生成 `com.claude-remote.daemon` LaunchAgent（RunAtLoad + KeepAlive + ThrottleInterval 10s + ExitTimeOut 15s），日志 `~/Library/Logs/claude-remote/`；`run-daemon.sh` 补 PATH、按 env → .env → Keychain 取 token、直接 exec tsx（SIGTERM 直达 daemon 优雅退出）。
 - 菜单栏 App：检测到 LaunchAgent 时按钮改走 launchctl（停止用 bootout，否则 KeepAlive 立即拉起），不再自拉子进程抢端口。
 - 修 App 自身守护的退避 bug：原先每次 `run()` 成功就把 `restartAttempt` 清零，启动即崩会永远 1 秒重启一次；改为稳定运行 ≥30s 才清零。
-- 未在真机验证（编写环境无 macOS/swift）：需本机 `swift build` + `install.sh install --tunnel` 实测。
+- 未在真机验证（编写环境无 macOS/swift）：需本机 `swift build` + `install.sh install` 实测。
+- 按用户决定，不再用 launchd 托管 cloudflared 隧道（已从脚本移除）。
 
 ## 2026-07-31 晚·Named Tunnel 落地（claude.example.com 固定地址已通）+ Home 顶栏精简
 
