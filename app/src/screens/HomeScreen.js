@@ -14,7 +14,7 @@ import { ProjectPicker } from '../components/ProjectPicker.js';
 import { useReducedMotion } from 'react-native-reanimated';
 import { BloomSpark } from '../components/Spark.js';
 import { FadeIn } from '../components/FadeIn.js';
-import { takeIntro } from '../lib/intro.js';
+import { takeHandoff, takeIntro } from '../lib/intro.js';
 import { NewChatComposer } from '../components/composer/NewChatComposer.js';
 import { useTheme } from '../theme.js';
 
@@ -30,7 +30,10 @@ export function HomeScreen() {
 
   // 冷启动第一次进入首页时播放开屏：芒星原位绽放，其余元素依次渐入（系统开了「减弱动态效果」则跳过）
   const reduceMotion = useReducedMotion();
-  const [intro] = useState(() => takeIntro() && !reduceMotion);
+  // 刚在登录页连接成功：芒星从登录页的位置滑过来（不再二次绽放），其余元素更早渐入
+  const [glideFrom] = useState(() => (reduceMotion ? null : takeHandoff()));
+  const [intro] = useState(() => (takeIntro() || !!glideFrom) && !reduceMotion);
+  const d0 = glideFrom ? -350 : 0; // 滑入模式整体提前
 
   const { catalog, catalogLoaded, catalogError, target, setTarget, inheritCwd, noteCreated, setDraftActive, refresh } = useProjects();
   const [mode, setMode] = useState(getNewSessionMode);
@@ -75,7 +78,7 @@ export function HomeScreen() {
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
     <View style={{ flex: 1, backgroundColor: colors.bg, paddingTop: insets.top, paddingLeft: insets.left, paddingRight: insets.right }}>
-      <FadeIn play={intro} delay={800} dy={-6}>
+      <FadeIn play={intro} delay={800 + d0} dy={-6}>
       <ConversationHeader
         mode={mode}
         onModeChange={(m) => { setMode(m); setNewSessionMode(m); }}
@@ -94,16 +97,16 @@ export function HomeScreen() {
       </FadeIn>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 24 }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-        <BloomSpark size={48} play={intro} style={{ marginBottom: 20 }} />
-        <FadeIn play={intro} delay={600}>
+        <BloomSpark size={48} play={intro && !glideFrom} glideFrom={glideFrom} style={{ marginBottom: 20 }} />
+        <FadeIn play={intro} delay={600 + d0}>
           <Text style={{ color: colors.inkStrong, fontSize: 32, fontWeight: '400', letterSpacing: -0.8 }}>{greet}</Text>
         </FadeIn>
-        <FadeIn play={intro} delay={700}>
+        <FadeIn play={intro} delay={700 + d0}>
           <Text style={{ color: colors.ink2, fontSize: 15, marginTop: 12 }}>在手机上，继续你的工作。</Text>
         </FadeIn>
       </ScrollView>
 
-      <FadeIn play={intro} delay={850} dy={18} duration={420}>
+      <FadeIn play={intro} delay={850 + d0} dy={18} duration={420}>
         {catalogError && !catalogLoaded ? (
           <TouchableOpacity onPress={refresh} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 20, paddingBottom: 6 }}>
             <Text style={{ color: colors.danger, fontSize: 13, textAlign: 'center' }}>{catalogError} · 点击重试</Text>
