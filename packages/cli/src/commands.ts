@@ -18,6 +18,7 @@ import {
   type Context,
 } from "./daemon-control.js";
 import { CONFIG_FIELDS, findField, readConfig, rotateToken, setConfig } from "./config.js";
+import { countProjects, detectClaude, inspectClaude, type DetectDeps, type DetectedClaude } from "./detect.js";
 import { ensureToken, loadCliEnv } from "./env.js";
 import {
   describeMessage,
@@ -34,7 +35,7 @@ export const HELP = `cr — Claude Remote 控制台
 
 用法：
   cr                    打开全屏控制台（会话 / 搜索 / 审批 / 配对 / 日志）
-  cr setup              首次安装：生成 token、把 cr 链接到 ~/.local/bin、注册 launchd 并启动
+  cr setup              首次安装：生成 token、自动查找 claude、注册 launchd 并启动（首次运行 cr 会自动执行）
   cr up | down | restart  启动（并开机自启）/ 停止（并取消自启）/ 重启 daemon
   cr status             daemon 状态、配对地址、会话与待审批数量
   cr logs               跟随 daemon 日志
@@ -222,47 +223,78 @@ export async function cmdOpen(ctx: Context, args: string[]): Promise<void> {
   if (session.status !== "idle" && !force) {
     throw new Error(`这个会话正${STATUS_LABEL[session.status]}，此时接管会和手机端抢同一个会话。等它空闲，或加 --force`);
   }
-  process.exitCode = await resumeInTerminal(session);
+  process.exitCode = await resumeInTerminal(session, ctx.env.envFile);
 }
 
 /** cr setup：token、PATH 链接、launchd。幂等，可重复运行。 */
+/** 探测 claude 并写入配置；已配置且仍可用则沿用。 */
+export function setupClaude(envFile: string, deps: DetectDeps = {}): DetectedClaude | undefined {
+  const field = findField("claude") as NonNullable<ReturnType<typeof findField>>;
+  const configured = readConfig(envFile).find((v) => v.field.key === "CLAUDE_BIN")?.value;
+  if (configured !== undefined) {
+    const kept = inspectClaude(configured, "已配置", deps);
+    if (kept !== undefined) return kept;
+  }
+  const found = detectClaude(deps);
+  if (found !== undefined) setConfig(envFile, field, found.path);
+  return found;
+}
+
 export async function cmdSetup(ctx: Context, binPath: string): Promise<void> {
   const { action } = ensureToken(ctx.env);
+  const where = ctx.env.mode === "repo" ? ".env" : ctx.env.envFile.replace(homedir(), "~");
   const tokenMsg = {
-    kept: "沿用 .env 里的 BRIDGE_TOKEN",
-    migrated: "已把菜单栏 App 存在 Keychain 的 token 迁移到 .env（已配对的手机不用重配）",
-    generated: "已生成新的 BRIDGE_TOKEN 写入 .env",
+    kept: `沿用 ${where} 里的 BRIDGE_TOKEN`,
+    migrated: `已把菜单栏 App 存在 Keychain 的 token 迁移到 ${where}（已配对的手机不用重配）`,
+    generated: `已生成访问 token，写入 ${where}`,
   }[action];
   console.log(`✓ ${tokenMsg}`);
 
-  const binDir = join(homedir(), ".local", "bin");
-  const link = join(binDir, "cr");
-  mkdirSync(binDir, { recursive: true });
-  const target = resolve(binPath);
-  let linkOk = false;
-  try {
-    const stat = lstatSync(link);
-    if (stat.isSymbolicLink() && resolve(binDir, readlinkSync(link)) === target) linkOk = true;
-    else rmSync(link);
-  } catch {
-    // 不存在
+  if (process.stdout.isTTY) process.stdout.write("… 查找 claude");
+  const claude = setupClaude(ctx.env.envFile);
+  if (process.stdout.isTTY) process.stdout.write("\r\x1b[K");
+  if (claude === undefined) {
+    console.log("✗ 没找到 claude。装好 Claude Code 后运行 cr setup 重新探测，或 cr config set claude <绝对路径>");
+  } else {
+    console.log(`✓ claude ${claude.version ?? "（版本未知）"}  ${claude.path}  [${claude.source}]`);
   }
-  if (!linkOk) symlinkSync(target, link);
-  console.log(`✓ ${link} → ${target}`);
-  if (!(process.env.PATH ?? "").split(":").includes(binDir)) {
-    console.log(`  ~/.local/bin 不在 PATH 里，在 ~/.zshrc 加一行：export PATH="$HOME/.local/bin:$PATH"`);
+  const projects = countProjects();
+  if (projects === undefined) console.log("  ~/.claude/projects 还不存在：先在终端用 claude 聊几句，会话就会出现在 cr 里");
+  else console.log(`✓ 发现 ${projects} 个项目的 Claude Code 会话记录`);
+
+  if (ctx.env.mode === "repo") {
+    // npm 全局安装自带 cr 命令；源码运行时才需要软链
+    const binDir = join(homedir(), ".local", "bin");
+    const link = join(binDir, "cr");
+    mkdirSync(binDir, { recursive: true });
+    const target = resolve(binPath);
+    let linkOk = false;
+    try {
+      const stat = lstatSync(link);
+      if (stat.isSymbolicLink() && resolve(binDir, readlinkSync(link)) === target) linkOk = true;
+      else rmSync(link);
+    } catch {
+      // 不存在
+    }
+    if (!linkOk) symlinkSync(target, link);
+    console.log(`✓ ${link} → ${target}`);
+    if (!(process.env.PATH ?? "").split(":").includes(binDir)) {
+      console.log(`  ~/.local/bin 不在 PATH 里，在 ~/.zshrc 加一行：export PATH="$HOME/.local/bin:$PATH"`);
+    }
   }
 
+  // token / claude 路径可能刚写入，重新加载环境再起 daemon
+  const fresh = makeContext(loadCliEnv());
   if (process.platform === "darwin") {
-    // token 可能刚写入，重新加载环境再起 daemon
-    const fresh = { ...ctx, env: loadCliEnv() };
     await cmdUp(fresh);
   } else {
-    console.log("非 macOS：跳过 launchd，用 pnpm dev 前台运行 daemon");
+    const run = fresh.env.mode === "repo" ? "pnpm dev" : `CLAUDE_REMOTE_ENV_FILE=${fresh.env.envFile} node ${fresh.env.daemonEntry}`;
+    console.log(`非 macOS：跳过 launchd，前台运行 daemon：${run}`);
   }
   if (action === "migrated") {
     console.log("提示：菜单栏 App 已不再需要，可从「登录项」里移除并删掉 ClaudeRemote.app");
   }
+  console.log("\n下一步：运行 cr 打开控制台，按 p 用 iPhone 扫码配对");
 }
 
 export function describeError(error: unknown): string {
@@ -337,8 +369,7 @@ export async function cmdConfig(ctx: Context, args: string[]): Promise<void> {
     setConfig(ctx.env.envFile, field, raw);
     console.log(sub === "unset" ? `✓ ${field.label} 已恢复默认（${field.fallback}）` : `✓ ${field.label} = ${raw.trim()}`);
     if (field.key === "BRIDGE_PORT" || field.key === "BRIDGE_HOST") console.log("  已配对的手机需要重新扫码（cr pair）");
-    // claude 路径只影响 cr 自己，不必重启 daemon
-    await applyConfig(ctx, { restart: restart && field.key !== "CLAUDE_BIN" });
+    await applyConfig(ctx, { restart });
     return;
   }
   throw new Error(`未知子命令：config ${sub}。用法见 cr --help`);

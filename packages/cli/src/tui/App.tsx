@@ -376,7 +376,7 @@ export function App({
       }
       const label = raw.trim() === "" ? `${entry.field.label} 已恢复默认` : `${entry.field.label} 已保存`;
       void applyConfig({
-        restart: entry.field.key !== "CLAUDE_BIN",
+        restart: true,
         reload: entry.field.affectsCli === true,
         then: "settings",
         saved: label,

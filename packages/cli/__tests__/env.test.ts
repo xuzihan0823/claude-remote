@@ -63,3 +63,20 @@ test("ensureToken：已有不动；Keychain 迁移；否则生成并写 0600", (
   assert.ok(g.token.length >= 40);
   assert.equal(statSync(join(fresh, ".env")).mode & 0o777, 0o600);
 });
+
+test("package 模式：配置与数据在 ~/.claude-remote（CLAUDE_REMOTE_HOME 可改），daemon 入口在包内 dist/", () => {
+  const home = mkdtempSync(join(tmpdir(), "cr-pkg-home-"));
+  const install = { mode: "package" as const, root: "/usr/local/lib/node_modules/x" };
+  const a = loadCliEnv({ env: {}, home, install, keychain: () => undefined });
+  assert.equal(a.mode, "package");
+  assert.equal(a.envFile, join(home, ".claude-remote", "config.env"));
+  assert.equal(a.daemonEntry, "/usr/local/lib/node_modules/x/dist/daemon.js");
+  assert.equal(a.token, undefined);
+  const b = loadCliEnv({ env: { CLAUDE_REMOTE_HOME: join(home, "alt") }, home, install, keychain: () => undefined });
+  assert.equal(b.envFile, join(home, "alt", "config.env"));
+  // setup 写 token 时自动建目录（权限 700），文件权限 600
+  const { action } = ensureToken(a);
+  assert.equal(action, "generated");
+  assert.equal(statSync(a.envFile).mode & 0o777, 0o600);
+  assert.equal(statSync(join(home, ".claude-remote")).mode & 0o777, 0o700);
+});

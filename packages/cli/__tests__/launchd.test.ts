@@ -5,15 +5,34 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { parseEtime } from "../src/daemon-control.js";
-import { DAEMON_LABEL, Launchd, parseLaunchctlPrint, renderPlist, type Exec } from "../src/launchd.js";
+import { DAEMON_LABEL, Launchd, packageProgram, parseLaunchctlPrint, renderPlist, repoProgram, type Exec } from "../src/launchd.js";
 
 test("renderPlist：转义路径、KeepAlive、日志路径", () => {
-  const xml = renderPlist({ runner: "/a&b/run.sh", repoDir: "/r<1>", logFile: "/l/daemon.log" });
-  assert.match(xml, /<string>\/a&amp;b\/run\.sh<\/string>/);
-  assert.match(xml, /<string>\/r&lt;1&gt;<\/string>/);
+  const xml = renderPlist({ program: repoProgram("/r<1>&b"), logFile: "/l/daemon.log" });
+  assert.match(xml, /<string>\/r&lt;1&gt;&amp;b\/scripts\/launchd\/run-daemon\.sh<\/string>/);
+  assert.match(xml, /<key>CLAUDE_REMOTE_REPO<\/key>\s*<string>\/r&lt;1&gt;&amp;b<\/string>/);
   assert.match(xml, new RegExp(`<string>${DAEMON_LABEL}</string>`));
   assert.match(xml, /<key>KeepAlive<\/key>\s*<true\/>/);
   assert.equal((xml.match(/\/l\/daemon\.log/g) ?? []).length, 2);
+});
+
+test("packageProgram：node 直接跑 dist/daemon.js，PATH 带上 claude 与 node 目录", () => {
+  const p = packageProgram({
+    nodePath: "/Users/u/.nvm/versions/node/v22.12.0/bin/node",
+    daemonEntry: "/usr/local/lib/node_modules/x/dist/daemon.js",
+    dataDir: "/Users/u/.claude-remote",
+    envFile: "/Users/u/.claude-remote/config.env",
+    claudeBin: "/Users/u/.claude/local/claude",
+    home: "/Users/u",
+  });
+  assert.deepEqual(p.args, ["/Users/u/.nvm/versions/node/v22.12.0/bin/node", "/usr/local/lib/node_modules/x/dist/daemon.js"]);
+  assert.equal(p.workingDir, "/Users/u/.claude-remote");
+  assert.equal(p.env.CLAUDE_REMOTE_ENV_FILE, "/Users/u/.claude-remote/config.env");
+  const path = (p.env.PATH ?? "").split(":");
+  assert.deepEqual(path.slice(0, 3), ["/Users/u/.claude/local", "/Users/u/.nvm/versions/node/v22.12.0/bin", "/Users/u/.local/bin"]);
+  assert.ok(path.includes("/usr/bin"));
+  const xml = renderPlist({ program: p, logFile: "/l" });
+  assert.doesNotMatch(xml, /zsh/);
 });
 
 test("parseLaunchctlPrint：取顶层 state/pid/runs/last exit code", () => {
@@ -53,7 +72,7 @@ function fakeLaunchctl(): { exec: Exec; calls: string[]; loaded: { v: boolean } 
 test("Launchd：up 写 plist 并 bootstrap；重复 up 不重载；down 卸载并 disable；uninstall 删 plist", async () => {
   const home = mkdtempSync(join(tmpdir(), "cr-home-"));
   const fake = fakeLaunchctl();
-  const l = new Launchd({ repoDir: "/repo", logFile: join(home, "logs/daemon.log"), exec: fake.exec, home, uid: 501, sleep: async () => {} });
+  const l = new Launchd({ program: () => repoProgram("/repo"), logFile: join(home, "logs/daemon.log"), exec: fake.exec, home, uid: 501, sleep: async () => {} });
 
   const first = await l.up();
   assert.deepEqual(first, { changed: true, alreadyRunning: false });
