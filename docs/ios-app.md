@@ -80,3 +80,12 @@ const config: CapacitorConfig = {
   - 运行完成 / 出错：`claude-remote://session/<sessionId>`
   点通知打开 App → 进入对应会话，并把这条审批顶到最前；已处理则提示「这条审批已处理或已超时」。
 - **触感反馈**（expo-haptics）：新审批到达、允许 / 拒绝、发送成功、停止运行、失败。expo-haptics 是原生模块，**需要重新编译 dev client**（`npx expo run:ios` 或重新打包）；旧 client 上自动降级为无震动，不会崩。
+
+## 工具调用可读化（2026-10）
+
+`app/src/lib/tool-view.js`（纯函数，有测试）把工具参数转成展示结构，`components/ToolInputView.js` 负责渲染，消息流与审批卡片共用：
+
+- Edit / MultiEdit / NotebookEdit：行级 diff（红 `-` 删、绿 `+` 增），改动前后各留 2 行，其余折叠成「⋯ N 行未改动」；标题行显示 `目录/文件 +N −M`
+- Write：整个文件按新增显示（最多 400 行）
+- Bash：说明 + `$ 命令`；TodoWrite：勾选清单；Read/Grep/Glob/WebFetch 等：关键字段表
+- 审批卡片里直接展开（最高 260pt，内部滚动）；右下「原始参数」可切回 JSON
