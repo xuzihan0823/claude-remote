@@ -3,35 +3,56 @@ import Animated, {
   cancelAnimation, Easing, runOnJS, useAnimatedProps, useAnimatedStyle, useSharedValue,
   withRepeat, withSequence, withTiming,
 } from 'react-native-reanimated';
-import Svg, { Line } from 'react-native-svg';
+import Svg, { Circle, Path } from 'react-native-svg';
 import { useTheme } from '../theme.js';
 
-// 品牌芒星：11 条光芒，角度略有错落、长短参差（2026-10 由 15 条等长改版）。
-// 每项 [x1, y1, x2, y2, 线宽]，viewBox 24×24，全部从中心 (12,12) 出发。
-// web/ui/components/spark.js 与 App 图标仍是旧版 15 条。
+// 品牌芒星：12 条锥形光芒 + 实心中心，按用户给的参考图描出来（2026-10）。
+// 每项 [角度°（0 = 向右，顺时针）, 长度, 端部宽度]，viewBox 24×24，中心 (12,12)；按顺时针从正上方排序，绽放时依次长出。
+// 光芒从中心的 0.75 倍宽渐宽到端部，端部是带小圆角的平头。web/ui/components/spark.js 与 App 图标仍是旧版。
 export const RAYS = [
-  [12, 12, 12.0, 2.6, 2.1],
-  [12, 12, 15.93, 6.73, 1.8],
-  [12, 12, 19.5, 8.09, 2.0],
-  [12, 12, 17.67, 13.33, 1.7],
-  [12, 12, 19.02, 17.67, 2.1],
-  [12, 12, 13.65, 18.95, 1.85],
-  [12, 12, 10.27, 19.9, 1.95],
-  [12, 12, 7.17, 15.9, 1.7],
-  [12, 12, 3.03, 14.1, 2.1],
-  [12, 12, 6.0, 8.87, 1.8],
-  [12, 12, 7.62, 5.43, 1.9],
+  [280, 8.88, 1.62],
+  [313, 9.19, 2.24],
+  [352.5, 9.05, 1.68],
+  [15, 9.46, 1.45],
+  [44, 9.69, 1.4],
+  [60.5, 9.5, 1.91],
+  [93.5, 9.82, 1.45],
+  [121.5, 9.91, 1.4],
+  [146.5, 9.42, 1.57],
+  [178, 9.72, 1.28],
+  [212.5, 9.72, 2.08],
+  [241, 10.18, 2.24],
 ];
+const HUB_R = 2.4;
+const C = 12;
+
+/** 一条光芒的 path。p 为生长比例（0..1+，回弹时可略大于 1）。 */
+export function rayPath(angleDeg, len, width, p) {
+  'worklet';
+  const l = Math.max(0, len * p);
+  if (l < 0.05) return 'M12 12Z';
+  const k = Math.min(1, l / (width * 1.5)); // 很短时宽度也跟着缩，避免出现方块
+  const w = width * k;
+  const wb = w * 0.75;
+  const r = w * 0.3;
+  const t = (angleDeg * Math.PI) / 180;
+  const c = Math.cos(t);
+  const s = Math.sin(t);
+  const pt = (x, y) => `${(C + x * c - y * s).toFixed(3)} ${(C + x * s + y * c).toFixed(3)}`;
+  return `M${pt(0, -wb / 2)}L${pt(l - r, -w / 2)}Q${pt(l, -w / 2)} ${pt(l, -w / 2 + r)}`
+    + `L${pt(l, w / 2 - r)}Q${pt(l, w / 2)} ${pt(l - r, w / 2)}L${pt(0, wb / 2)}Z`;
+}
+
+const STATIC_PATHS = RAYS.map(([a, l, w]) => rayPath(a, l, w, 1));
 
 // 静态芒星。color 缺省走主题 accent；暗色自动随 useColorScheme 切换。
 export function Spark({ size = 16, color, style }) {
   const { colors } = useTheme();
-  const stroke = color ?? colors.accent;
+  const fill = color ?? colors.accent;
   return (
-    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={stroke} strokeLinecap="round" style={style}>
-      {RAYS.map(([x1, y1, x2, y2, w], i) => (
-        <Line key={i} x1={x1} y1={y1} x2={x2} y2={y2} strokeWidth={w} />
-      ))}
+    <Svg width={size} height={size} viewBox="0 0 24 24" style={style}>
+      <Circle cx={C} cy={C} r={HUB_R} fill={fill} />
+      {STATIC_PATHS.map((d, i) => <Path key={i} d={d} fill={fill} />)}
     </Svg>
   );
 }
@@ -42,7 +63,8 @@ export function Spark({ size = 16, color, style }) {
 //   busy           连接中：持续旋转，光芒依次伸缩（呼吸感）
 //   shake          数字每变一次左右抖一下（连接失败）
 //   glideFrom      { x, y, size }：从登录页芒星的窗口位置平移缩放到自身位置（登录成功衔接首页）
-const AnimatedLine = Animated.createAnimatedComponent(Line);
+const AnimatedPath = Animated.createAnimatedComponent(Path);
+const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 const RAY_STAGGER = 30; // ms
 const RAY_DUR = 360; // ms
 export const BLOOM_MS = 100 + RAYS.length * RAY_STAGGER + RAY_DUR + 150;
@@ -56,21 +78,28 @@ function backOut(x) {
   return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
 }
 
-function AnimRay({ ray, index, t, pulse, busyAmt }) {
-  const [x1, y1, x2, y2, w] = ray;
+function AnimRay({ ray, index, t, pulse, busyAmt, fill }) {
+  const [angle, len, width] = ray;
   const props = useAnimatedProps(() => {
     const local = (t.value - 100 - index * RAY_STAGGER) / RAY_DUR;
     const grow = local <= 0 ? 0 : local >= 1 ? 1 : backOut(local);
-    const breathe = 1 - busyAmt.value * (0.24 + 0.24 * Math.sin(pulse.value * 3 - index * 0.9));
-    const p = grow * breathe;
-    return { x2: x1 + (x2 - x1) * p, y2: y1 + (y2 - y1) * p, strokeOpacity: local <= 0 ? 0 : 1 };
+    const breathe = 1 - busyAmt.value * (0.2 + 0.2 * Math.sin(pulse.value * 3 - index * 0.8));
+    return { d: rayPath(angle, len, width, grow * breathe) };
   });
-  return <AnimatedLine x1={x1} y1={y1} x2={x2} y2={y2} strokeWidth={w} animatedProps={props} />;
+  return <AnimatedPath fill={fill} animatedProps={props} />;
+}
+
+function AnimHub({ t, fill }) {
+  const props = useAnimatedProps(() => {
+    const p = Math.min(1, Math.max(0, (t.value - 60) / 180));
+    return { r: HUB_R * backOut(p) };
+  });
+  return <AnimatedCircle cx={C} cy={C} fill={fill} animatedProps={props} />;
 }
 
 export function BloomSpark({ size = 48, color, style, play = false, busy = false, shake = 0, glideFrom = null, onDone }) {
   const { colors } = useTheme();
-  const stroke = color ?? colors.accent;
+  const fill = color ?? colors.accent;
   const ref = useRef(null);
   const t = useSharedValue(play ? 0 : BLOOM_MS);
   const pulse = useSharedValue(0); // busy 时 0→2π 循环
@@ -145,8 +174,9 @@ export function BloomSpark({ size = 48, color, style, play = false, busy = false
 
   return (
     <Animated.View ref={ref} onLayout={onLayout} collapsable={false} style={[{ width: size, height: size }, style, wrap]}>
-      <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={stroke} strokeLinecap="round">
-        {RAYS.map((ray, i) => <AnimRay key={i} ray={ray} index={i} t={t} pulse={pulse} busyAmt={busyAmt} />)}
+      <Svg width={size} height={size} viewBox="0 0 24 24">
+        <AnimHub t={t} fill={fill} />
+        {RAYS.map((ray, i) => <AnimRay key={i} ray={ray} index={i} t={t} pulse={pulse} busyAmt={busyAmt} fill={fill} />)}
       </Svg>
     </Animated.View>
   );
