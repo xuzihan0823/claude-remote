@@ -60,7 +60,7 @@ export function Spark({ size = 16, color, style }) {
 // ── 动画芒星 ─────────────────────────────────────────────────────
 // 一个组件覆盖开屏与登录的所有状态，结束时都与静态 Spark 完全重合：
 //   play           挂载即绽放：光芒按顺时针依次从中心长出并回弹，整体放大 1.35 倍再回落、轻转（≈0.9s）
-//   busy           连接中：持续旋转，光芒依次伸缩（呼吸感）
+//   busy           连接中：不旋转，各光束像星星闪烁一样各自轻微伸缩（±8% 左右）
 //   shake          数字每变一次左右抖一下（连接失败）
 //   glideFrom      { x, y, size }：从登录页芒星的窗口位置平移缩放到自身位置（登录成功衔接首页）
 const AnimatedPath = Animated.createAnimatedComponent(Path);
@@ -78,12 +78,19 @@ function backOut(x) {
   return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
 }
 
+const TWINKLE_AMP = 0.08;
+// [频率, 相位]，固定伪随机值
+const TWINKLE = RAYS.map((_, i) => [1 + ((i * 7) % 3), ((i * 2.399) % 6.283)]);
+
 function AnimRay({ ray, index, t, pulse, busyAmt, fill }) {
   const [angle, len, width] = ray;
   const props = useAnimatedProps(() => {
     const local = (t.value - 100 - index * RAY_STAGGER) / RAY_DUR;
     const grow = local <= 0 ? 0 : local >= 1 ? 1 : backOut(local);
-    const breathe = 1 - busyAmt.value * (0.2 + 0.2 * Math.sin(pulse.value * 3 - index * 0.8));
+    // 每条光束用不同的整数频率和相位叠两个正弦，看起来无规律但一圈后无缝衔接
+    const [k, ph] = TWINKLE[index];
+    const wave = 0.65 * Math.sin(k * pulse.value + ph) + 0.35 * Math.sin((k + 2) * pulse.value + ph * 1.7);
+    const breathe = 1 + busyAmt.value * TWINKLE_AMP * wave;
     return { d: rayPath(angle, len, width, grow * breathe) };
   });
   return <AnimatedPath fill={fill} animatedProps={props} />;
@@ -104,7 +111,6 @@ export function BloomSpark({ size = 48, color, style, play = false, busy = false
   const t = useSharedValue(play ? 0 : BLOOM_MS);
   const pulse = useSharedValue(0); // busy 时 0→2π 循环
   const busyAmt = useSharedValue(0); // busy 的强度，0/1 之间过渡，避免停下时跳变
-  const spin = useSharedValue(0); // 累计旋转（弧度）
   const shakeX = useSharedValue(0);
   const glide = useSharedValue(glideFrom ? 0 : 1);
   const from = useSharedValue({ dx: 0, dy: 0, s: 1 });
@@ -121,17 +127,10 @@ export function BloomSpark({ size = 48, color, style, play = false, busy = false
     if (busy) {
       busyAmt.value = withTiming(1, { duration: 250 });
       pulse.value = 0;
-      pulse.value = withRepeat(withTiming(TWO_PI, { duration: 1100, easing: Easing.linear }), -1, false);
-      spin.value = withRepeat(withTiming(spin.value + TWO_PI, { duration: 2600, easing: Easing.linear }), -1, false);
+      pulse.value = withRepeat(withTiming(TWO_PI, { duration: 3200, easing: Easing.linear }), -1, false);
     } else {
-      busyAmt.value = withTiming(0, { duration: 250 });
-      cancelAnimation(spin);
-      // 停在最近的整圈，回到和静态 Spark 一致的角度
-      const target = Math.ceil(spin.value / TWO_PI) * TWO_PI;
-      spin.value = withTiming(target, { duration: 450, easing: Easing.out(Easing.cubic) }, () => {
-        spin.value = 0;
-        cancelAnimation(pulse);
-      });
+      // 闪烁幅度渐收到 0 再停，光束回到原长，不跳变
+      busyAmt.value = withTiming(0, { duration: 300 }, () => cancelAnimation(pulse));
     }
   }, [busy]);
 
@@ -167,7 +166,7 @@ export function BloomSpark({ size = 48, color, style, play = false, busy = false
         { translateX: f.dx * (1 - g) + shakeX.value },
         { translateY: f.dy * (1 - g) },
         { scale: bloomScale * (f.s + (1 - f.s) * g) },
-        { rotate: `${bloomRot + spin.value}rad` },
+        { rotate: `${bloomRot}rad` },
       ],
     };
   });

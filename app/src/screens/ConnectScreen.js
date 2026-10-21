@@ -18,7 +18,7 @@ const hostOf = (base) => String(base || '').replace(/^[a-z]+:\/\//i, '').replace
 
 // 登录 / 配对页。
 //   选择：芒星绽放 + 标题，主按钮「扫码连接」（App 内相机），次按钮「输入地址和令牌」
-//   连接中：按钮淡出，芒星旋转、光芒依次伸缩，下方「正在连接 xxx…」
+//   连接中：按钮淡出，芒星不转，各光束像星星闪烁一样轻微伸缩，下方「正在连接 xxx…」
 //   成功：变绿「已连接」+ 触感，标题淡出，把芒星位置交给首页（intro.setHandoff），首页芒星从这里滑过去
 //   失败：芒星左右抖一下 + 错误文案，回到原来的按钮
 // onSubmit(base, token, opts) / onScan(bases, token, opts) 由 App 提供，opts.beforeCommit 在探测成功、
