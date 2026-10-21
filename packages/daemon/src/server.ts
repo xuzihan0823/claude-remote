@@ -26,6 +26,7 @@ import { NotIdleError, type ApprovalBridge, type ApprovalEvent, type Notifier, t
 import { listSessions } from "./transcript/indexer.js";
 import { buildProjectIndex } from "./transcript/projects.js";
 import { readBefore, readTail } from "./transcript/reader.js";
+import { searchSessions } from "./transcript/search.js";
 import type { ActivityTracker } from "./watch/activity.js";
 import type { SessionWatcher } from "./watch/watcher.js";
 
@@ -232,6 +233,16 @@ export class DaemonServer {
       return;
     }
 
+    if (method === "GET" && path === "/api/sessions/search") {
+      await this.#handleSearch(res, url);
+      return;
+    }
+
+    if (method === "GET" && path === "/api/interactions/pending") {
+      this.#json(res, 200, { interactions: this.#options.approvals.pending() });
+      return;
+    }
+
     if (method === "GET" && path === "/api/projects") {
       const all = await listSessions(this.#options.config.projectsDir);
       this.#json(res, 200, { ...(await buildProjectIndex(all)).catalog, homeCwd: homedir() });
@@ -324,6 +335,26 @@ export class DaemonServer {
       status: this.#options.tracker.getStatus(summary.sessionId),
     }));
     this.#json(res, 200, { sessions, total: filtered.length });
+  }
+
+  async #handleSearch(res: ServerResponse, url: URL): Promise<void> {
+    const q = url.searchParams.get("q") ?? "";
+    if (q.trim() === "") {
+      this.#json(res, 400, { error: "invalid_query" });
+      return;
+    }
+    const full = url.searchParams.get("full") === "1" || url.searchParams.get("full") === "true";
+    const limit = clampInt(url.searchParams.get("limit"), 50, 1, 200);
+    const all = await listSessions(this.#options.config.projectsDir);
+    const { hits, truncated } = await searchSessions(this.#options.config.projectsDir, all, q, { full, limit });
+    this.#json(res, 200, {
+      results: hits.map((hit) => ({
+        ...hit.session,
+        status: this.#options.tracker.getStatus(hit.session.sessionId),
+        match: { field: hit.field, snippet: hit.snippet, ...(hit.seq === undefined ? {} : { seq: hit.seq }) },
+      })),
+      truncated,
+    });
   }
 
   async #readModelCatalog(): Promise<ModelCatalog> {

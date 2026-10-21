@@ -3,10 +3,10 @@
 #
 # 为什么需要这层包装：
 #   - launchd 进程没有交互 shell 的 PATH，node / pnpm / claude 可能找不到；
-#   - BRIDGE_TOKEN 优先取仓库 .env，其次取菜单栏 App 存在 Keychain 的 token，
-#     这样 launchd、菜单栏 App、终端手工启动三种方式用的是同一个 token。
+#   - BRIDGE_TOKEN 优先取仓库 .env，其次取 Keychain 里的旧 token（已删除的菜单栏 App 写入），
+#     这样 launchd、cr 命令行、终端手工启动用的是同一个 token。
 #
-# 由 scripts/launchd/install.sh 生成的 LaunchAgent 调用；也可手工运行做冒烟测试。
+# 由 `cr up` / `cr setup`（packages/cli/src/launchd.ts）生成的 LaunchAgent 调用；也可手工运行做冒烟测试。
 
 set -u
 
@@ -32,7 +32,7 @@ for bin in node; do
   fi
 done
 
-# token：已有环境变量 > .env > Keychain（菜单栏 App 写入的 service=claude-remote / account=bridge-token）
+# token：已有环境变量 > .env > Keychain（旧菜单栏 App 写入的 service=claude-remote / account=bridge-token；cr setup 会迁移进 .env）
 if [[ -z "${BRIDGE_TOKEN:-}" ]] && ! grep -Eq '^[[:space:]]*BRIDGE_TOKEN=[^[:space:]]+' .env 2>/dev/null; then
   keychain_token="$(/usr/bin/security find-generic-password -s claude-remote -a bridge-token -w 2>/dev/null || true)"
   if [[ -n "$keychain_token" ]]; then

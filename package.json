@@ -10,6 +10,7 @@
   },
   "scripts": {
     "dev": "tsx packages/daemon/src/index.ts",
+    "cr": "node packages/cli/bin/cr.mjs",
     "test": "pnpm run test:web && pnpm run test:mobile && pnpm -r --if-present test",
     "test:web": "node --test web/core/*.test.js",
     "test:mobile": "node --test app/src/lib/__tests__/*.test.mjs",
