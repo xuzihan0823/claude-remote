@@ -57,7 +57,7 @@ cd ~/Desktop/claude-remote && pnpm dev   # 读 .env（token/host/port），缺 B
 验证：
 - `npx cap sync ios` → iOS 包 42KB→56KB，新功能命中 21 处、icon.svg 已同步；
 - **旧 daemon（07-18 22:29 起）早于 `/api/models` 路由，`/api/models` 返回 not_found → 必须重启 daemon**（跑源码 `pnpm dev`，重启即生效）；
-- xcodebuild 重建成功、装模拟器（iPhone 17 Pro / <SIM_UDID>…）、启动，连接页新芒星 logo 生效；
+- xcodebuild 重建成功、装模拟器（iPhone 17 Pro / <SIM_UDID>）、启动，连接页新芒星 logo 生效；
 - Chrome 直连 live daemon 目检：首页问候语 + 新 logo + 模型下拉（跟随默认/fable/opus/sonnet/haiku）+ 项目选择 + 最近对话全对；聊天页模型覆盖选择器（"跟随 Mac 默认"/"仅本轮"）+ 中断按钮条件渲染确认；
 - iOS bundle 编译后的 AppIcon 中心像素 = #d97757（赤陶橙芒星中心）。
 
@@ -215,7 +215,7 @@ agent team：explorer-opus47 审计完成度正常；**coder-glm（glm-5.2[1m]�
 
 **坑记**：① CocoaPods 机器没装，`brew install cocoapods` 走 ghcr bottle 镜像 SSL 失败 → `env -u HOMEBREW_BOTTLE_DOMAIN` 绕过装成 1.17.0；② `pod install` 拉 cdn.cocoapods.org 同样 SSL EOF → 走系统代理 `https_proxy=http://127.0.0.1:1082 pod install` 成功；③ bundleId 用 `cc.anyyu.clauderemote.rn`（.rn 后缀与旧 Capacitor 壳区分，可并存对比）。
 
-**当前运行态**：metro 在 8081（nohup，日志 /tmp/rn-metro.log）；daemon 8788；app 装在 iPhone 17 Pro 模拟器（<SIM_UDID>…）。RN 全部改动**未 commit**（基线 82773cd）。
+**当前运行态**：metro 在 8081（nohup，日志 /tmp/rn-metro.log）；daemon 8788；app 装在 iPhone 17 Pro 模拟器（<SIM_UDID>）。RN 全部改动**未 commit**（基线 82773cd）。
 
 **剩余（P3，未做）**：keyboard-controller 交互式拖拽收起的真机跟手验收（=迁移主因，硬门槛见迁移计划 §6）、暗色真机回归、图标/启动屏换芒星、TestFlight/签名；以及用户模拟器点测后反馈的观感微调。
 
