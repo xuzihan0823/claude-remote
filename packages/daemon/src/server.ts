@@ -22,6 +22,7 @@ import type { DaemonConfig } from "./config.js";
 import { enumeratePairBases, isLoopbackAddress, looksProxied, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
 import { readSessionCwd, resolveSessionFile } from "./session-files.js";
+import { StreamBuffer } from "./run/stream-buffer.js";
 import { approvalLink, NotIdleError, sessionLink, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
 import { listSessions } from "./transcript/indexer.js";
 import { buildProjectIndex } from "./transcript/projects.js";
@@ -93,6 +94,7 @@ export class DaemonServer {
   readonly #newSessions = new Set<string>();
   readonly #watchActivations = new Set<string>();
   readonly #watchRetryTimers = new Map<string, NodeJS.Timeout>();
+  readonly #streams = new StreamBuffer({ emit: (frame) => this.#broadcastToSubscribers(frame.sessionId, frame) });
   #heartbeat: NodeJS.Timeout | undefined;
   #closed = false;
 
@@ -545,11 +547,19 @@ export class DaemonServer {
     try {
       for await (const event of handle.events) {
         if (event.type === "worker") {
-          if (this.#newSessions.has(sessionId) && event.event.type === "session") {
+          const worker = event.event;
+          if (this.#newSessions.has(sessionId) && worker.type === "session") {
             void this.#activateNewSessionWatch(sessionId);
+          } else if (worker.type === "assistant_stream_start") {
+            this.#streams.start(sessionId, worker.apiMessageId);
+          } else if (worker.type === "assistant_delta") {
+            this.#streams.delta(sessionId, worker.index ?? 0, worker.text);
+          } else if (worker.type === "assistant_block_stop") {
+            this.#streams.stop(sessionId, worker.index);
           }
           continue;
         }
+        if (event.state !== "started") this.#streams.end(sessionId);
         const frame: Record<string, unknown> = {
           type: "run",
           sessionId,
@@ -572,6 +582,7 @@ export class DaemonServer {
       console.error(`run event pump failed (session ${sessionId}):`, error);
     } finally {
       this.#activeRuns.delete(handle.runId);
+      this.#streams.end(sessionId);
       if (this.#newSessions.has(sessionId)) void this.#activateNewSessionWatch(sessionId);
     }
   }
@@ -716,7 +727,7 @@ export class DaemonServer {
       state.alive = true;
     });
     ws.on("message", (data) => {
-      void this.#onClientFrame(state, data.toString());
+      void this.#onClientFrame(ws, state, data.toString());
     });
     ws.on("close", () => {
       this.#clients.delete(ws);
@@ -725,7 +736,7 @@ export class DaemonServer {
     ws.on("error", () => ws.terminate());
   }
 
-  async #onClientFrame(state: ClientState, raw: string): Promise<void> {
+  async #onClientFrame(ws: WebSocket, state: ClientState, raw: string): Promise<void> {
     let frame: unknown;
     try {
       frame = JSON.parse(raw);
@@ -754,6 +765,8 @@ export class DaemonServer {
         }
       }
       state.subs.add(sessionId);
+      // 中途打开 / 断线重连：补发正在流式输出的草稿
+      for (const f of this.#streams.snapshot(sessionId)) if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(f));
       return;
     }
     if (type === "unsubscribe") {
