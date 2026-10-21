@@ -4,6 +4,7 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 
 import type { Api, EventStream, ServerFrame, SessionSummary } from "../api.js";
 import {
+  autostartEnabled,
   copyToClipboard,
   openUrl,
   pairInfo,
@@ -69,18 +70,31 @@ export function realDeps(ctx: Context): TuiDeps {
       ctx.env.token === undefined
         ? undefined
         : (handlers) => connectEvents(ctx.env.baseUrl, ctx.env.token as string, handlers),
-    control: {
-      available: darwin,
-      up: async () => {
-        await ctx.launchd.up();
-        return waitHealthy(ctx);
-      },
-      down: () => ctx.launchd.down(),
-      restart: async () => {
-        await ctx.launchd.restart();
-        return waitHealthy(ctx);
-      },
-    },
+    control: autostartEnabled(ctx.env)
+      ? {
+          available: darwin,
+          up: async () => {
+            await ctx.launchd.up();
+            return waitHealthy(ctx);
+          },
+          down: () => ctx.launchd.down(),
+          restart: async () => {
+            await ctx.launchd.restart();
+            return waitHealthy(ctx);
+          },
+        }
+      : {
+          // 随 cr 运行：启停的是 cr 拉起的子进程
+          available: true,
+          up: async () => {
+            if (await ctx.attached.ensure() !== "started") return waitHealthy(ctx);
+            return true;
+          },
+          down: async () => {
+            await ctx.attached.stop();
+          },
+          restart: () => ctx.attached.restart(),
+        },
     pair: async () => {
       const info = pairInfo(ctx);
       if (info === undefined) return undefined;

@@ -1,6 +1,12 @@
 # cr：Mac 端命令行控制台
 
-`cr` 取代了原来的 SwiftUI 菜单栏 App（`mac/` 已删除）。daemon 由 launchd 常驻，`cr` 负责安装、启停、观察和日常操作。
+`cr` 取代了原来的 SwiftUI 菜单栏 App（`mac/` 已删除）。`cr` 负责安装、启停、观察和日常操作。
+
+**daemon 托管方式**（设置项 `autostart`）：
+- `off`（默认）：打开 `cr` 时若 daemon 没在跑就拉起子进程（独立进程组，日志写 `cr logs` 同一文件），退出 `cr`、关掉终端（SIGHUP）时一起停。pid 记在日志目录 `daemon.pid`，`cr` 被强杀留下的孤儿下次会被认领。另一个 `cr` 已经拉起的 daemon 直接共用、不重复启动。切到 off 时若装过 launchd 服务会自动移除。
+- `on`：交给 launchd 常驻（开机自启、崩溃拉起、关终端不停），即原来的行为。
+
+切换：`cr config set autostart on|off`，或 TUI 设置页选中「开机自启」按 Enter。
 
 ## 安装
 
@@ -64,7 +70,8 @@ workspace 包打进 bundle，第三方依赖（ink、react、ws、qrcode、Agent
 
 ```
 cr setup                 首次安装（见上）
-cr up | down | restart   启动（并开机自启）/ 停止（并取消自启，跨登录保持）/ 重启
+cr up | down | restart   autostart=on：启动 / 停止（并取消自启，跨登录保持）/ 重启
+                         autostart=off：cr up 前台运行 daemon（Ctrl-C 停）；cr down 停止；restart 提示重开 cr
 cr uninstall             移除 launchd 服务（不删数据）
 cr status                daemon、launchd、地址、会话与待审批数量；daemon 不通时退出码 1
 cr logs                  tail -F ~/Library/Logs/claude-remote/daemon.log

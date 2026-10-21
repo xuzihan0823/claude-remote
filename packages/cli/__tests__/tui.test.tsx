@@ -1,3 +1,4 @@
+import { CONFIG_FIELDS } from "../src/config.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -257,12 +258,29 @@ test("设置：非法端口提示错误不写入；合法端口重启后重载 T
   ui.unmount();
 });
 
+test("设置：开机自启 Enter 直接切换，退出 TUI 让 main 切换托管方式（不重启 daemon）", async () => {
+  const { deps, envFile, calls } = fakeDeps();
+  let exited: TuiExit | undefined;
+  const ui = render(<App deps={deps} onExit={(r) => (exited = r)} initialView="settings" />);
+  await settle(300);
+  for (let i = 0; i < CONFIG_FIELDS.findIndex((f) => f.key === "AUTOSTART"); i += 1) {
+    ui.stdin.write("j");
+    await settle(20);
+  }
+  ui.stdin.write("\r");
+  await settle(200);
+  assert.match(readFileSync(envFile, "utf8"), /AUTOSTART=on/);
+  assert.deepEqual(exited, { kind: "reload", then: "settings" });
+  assert.equal(calls.restarts, 0);
+  ui.unmount();
+});
+
 test("设置：重置 token 需 y 确认，之后重载并打开配对", async () => {
   const { deps, envFile } = fakeDeps();
   let exited: TuiExit | undefined;
   const ui = render(<App deps={deps} onExit={(r) => (exited = r)} initialView="settings" />);
   await settle(300);
-  for (let i = 0; i < 8; i += 1) {
+  for (let i = 0; i < CONFIG_FIELDS.length; i += 1) {
     ui.stdin.write("j");
     await settle(20);
   }
