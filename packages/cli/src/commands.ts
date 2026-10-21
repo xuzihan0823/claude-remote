@@ -11,11 +11,13 @@ import {
   openUrl,
   pairInfo,
   resumeInTerminal,
+  makeContext,
   snapshot,
   terminalQr,
   waitHealthy,
   type Context,
 } from "./daemon-control.js";
+import { CONFIG_FIELDS, findField, readConfig, rotateToken, setConfig } from "./config.js";
 import { ensureToken, loadCliEnv } from "./env.js";
 import {
   describeMessage,
@@ -37,6 +39,8 @@ export const HELP = `cr — Claude Remote 控制台
   cr status             daemon 状态、配对地址、会话与待审批数量
   cr logs               跟随 daemon 日志
   cr pair               终端打印配对二维码
+  cr config             查看配置；cr config set <项> <值> / unset <项> / reset-token
+                        项：host port bark ntfy timeout cooldown claude uploads（改完自动重启 daemon）
   cr web                浏览器打开 Web 界面（token 复制到剪贴板）
   cr ls [-n 20]         最近会话
   cr search <词> [--full]  搜标题/项目路径；--full 连对话全文一起搜
@@ -274,4 +278,68 @@ export function describeError(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+// -- cr config ---------------------------------------------------------------
+
+function printConfig(ctx: Context): void {
+  const values = readConfig(ctx.env.envFile);
+  const aliasWidth = Math.max(...values.map((v) => v.field.alias.length));
+  for (const { field, value } of values) {
+    const shown = value ?? `${field.fallback} [默认]`;
+    console.log(`${field.alias.padEnd(aliasWidth)}  ${fit(field.label, 18)}  ${shown}`);
+  }
+  console.log(`\ntoken    ${ctx.env.token === undefined ? "未设置（cr setup）" : `已设置（来源：${ctx.env.tokenSource}）`}`);
+  console.log(`文件     ${ctx.env.envFile}`);
+}
+
+/** 配置写入后：launchd 在跑就重启让它生效，否则提示。返回重启后（可能已换端口/token）的新上下文。 */
+async function applyConfig(ctx: Context, opts: { restart: boolean }): Promise<Context> {
+  const next = makeContext(loadCliEnv());
+  if (!opts.restart) {
+    console.log("已保存，重启 daemon 后生效（cr restart）");
+    return next;
+  }
+  if (process.platform !== "darwin" || !ctx.launchd.isLoaded()) {
+    console.log("已保存。daemon 不在 launchd 下运行，下次启动时生效");
+    return next;
+  }
+  await ctx.launchd.restart();
+  console.log((await waitHealthy(next)) ? `✓ 已重启 daemon，${next.env.baseUrl} 已响应` : "✗ 重启后 20 秒内没有响应，看看日志：cr logs");
+  return next;
+}
+
+export async function cmdConfig(ctx: Context, args: string[]): Promise<void> {
+  const restart = !args.includes("--no-restart");
+  const [sub, name, ...rest] = args.filter((a) => a !== "--no-restart");
+  if (sub === undefined || sub === "list" || sub === "ls") {
+    printConfig(ctx);
+    return;
+  }
+  if (sub === "reset-token") {
+    rotateToken(ctx.env.envFile);
+    console.log("✓ 已生成新 token，旧 token 立即失效：已配对的手机和浏览器需要重新扫码（cr pair）");
+    await applyConfig(ctx, { restart });
+    return;
+  }
+  const field = name === undefined ? undefined : findField(name);
+  if (field === undefined) {
+    throw new Error(`未知配置项：${name ?? "（缺少）"}。可用：${CONFIG_FIELDS.map((f) => f.alias).join(" ")}`);
+  }
+  if (sub === "get") {
+    const value = readConfig(ctx.env.envFile).find((v) => v.field.key === field.key)?.value;
+    console.log(value ?? field.fallback);
+    return;
+  }
+  if (sub === "set" || sub === "unset") {
+    const raw = sub === "unset" ? "" : rest.join(" ");
+    if (sub === "set" && raw.trim() === "") throw new Error(`用法：cr config set ${field.alias} <值>（恢复默认用 unset）`);
+    setConfig(ctx.env.envFile, field, raw);
+    console.log(sub === "unset" ? `✓ ${field.label} 已恢复默认（${field.fallback}）` : `✓ ${field.label} = ${raw.trim()}`);
+    if (field.key === "BRIDGE_PORT" || field.key === "BRIDGE_HOST") console.log("  已配对的手机需要重新扫码（cr pair）");
+    // claude 路径只影响 cr 自己，不必重启 daemon
+    await applyConfig(ctx, { restart: restart && field.key !== "CLAUDE_BIN" });
+    return;
+  }
+  throw new Error(`未知子命令：config ${sub}。用法见 cr --help`);
 }

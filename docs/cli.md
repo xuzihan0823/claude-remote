@@ -85,3 +85,31 @@ npx tsx --test __tests__/*.test.ts __tests__/*.test.tsx
 ```
 
 TUI 测试用 `ink-testing-library` 注入假依赖（`src/tui/deps.ts` 的 `TuiDeps`），不需要真 daemon。
+
+## 配置
+
+`cr` 里按 `c` 打开设置页，或用 `cr config`：
+
+```sh
+cr config                      # 列出全部配置（未设置的显示默认值）
+cr config set host 0.0.0.0     # 允许局域网 / Tailscale 的手机直连
+cr config set port 8790
+cr config set bark https://api.day.app/<key>
+cr config set timeout 600      # 审批超时，单位秒
+cr config unset bark           # 恢复默认
+cr config reset-token          # 生成新 token，已配对设备全部失效
+```
+
+| 项 | 环境变量 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| host | BRIDGE_HOST | 127.0.0.1 | 监听地址 |
+| port | BRIDGE_PORT | 8787 | 端口 |
+| bark | BARK_URL | 不推送 | Bark 推送地址 |
+| ntfy | NTFY_URL | 不推送 | ntfy 推送地址 |
+| timeout | PERMISSION_TIMEOUT_MS | 300 秒 | 审批超时自动拒绝（输入/显示为秒） |
+| cooldown | ACTIVITY_COOLDOWN_MS | 120 秒 | 终端会话静默多久算空闲 |
+| claude | CLAUDE_BIN | PATH | `cr open` / `o` 接管用的 claude |
+| uploads | UPLOADS_DIR | ~/.claude-remote/uploads | 手机上传附件目录 |
+
+配置写入仓库根目录 `.env`（权限 600）。daemon 在 launchd 下运行时，保存后会自动重启生效（claude 路径只影响 cr，不重启）；
+改地址、端口或 token 后 TUI 会用新参数重新连接，重置 token 后直接显示新的配对二维码。加 `--no-restart` 只写不重启。

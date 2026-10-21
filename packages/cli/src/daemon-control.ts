@@ -2,11 +2,12 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 import { enumeratePairBases, pairPayload, type PairInfo } from "@claude-remote/daemon/pair";
 
 import { Api, ApiError, type ApprovalCard, type SessionSummary } from "./api.js";
-import type { CliEnv } from "./env.js";
+import { findRepoDir, readDotenv, type CliEnv } from "./env.js";
 import { Launchd, type LaunchdState } from "./launchd.js";
 
 export interface Context {
@@ -129,8 +130,9 @@ export function copyToClipboard(text: string): boolean {
   }
 }
 
-export function claudeBin(): string {
-  return process.env.CLAUDE_BIN?.trim() || "claude";
+/** claude 可执行文件：环境变量 CLAUDE_BIN > .env 里的 CLAUDE_BIN（cr config set claude）> PATH。 */
+export function claudeBin(envFile = join(findRepoDir(), ".env")): string {
+  return process.env.CLAUDE_BIN?.trim() || readDotenv(envFile).CLAUDE_BIN || "claude";
 }
 
 /**

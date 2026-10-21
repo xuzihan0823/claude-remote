@@ -6,6 +6,7 @@
 //   approvals 待审批列表：y 允许 / n 拒绝；AskUserQuestion 用数字键选项
 //   pair      配对二维码
 //   logs      daemon 日志尾部（每秒刷新）
+//   settings  daemon 配置（写 .env 后自动重启 daemon；改地址/端口/token 时 TUI 重新加载以换用新连接）
 //   help      快捷键说明
 //
 // 会话接管：空闲会话按 o → 退出 TUI，在当前终端 claude --resume；claude 退出后回到 TUI。
@@ -28,11 +29,14 @@ import {
   STATUS_LABEL,
   summarizeInput,
 } from "../format.js";
-import type { TuiDeps } from "./deps.js";
+import type { ConfigValue, TuiDeps } from "./deps.js";
 
-export type TuiExit = { kind: "quit" } | { kind: "resume"; session: SessionSummary };
-
-type View = "main" | "session" | "approvals" | "pair" | "logs" | "help";
+export type View = "main" | "session" | "approvals" | "pair" | "logs" | "help" | "settings";
+export type TuiExit =
+  | { kind: "quit" }
+  | { kind: "resume"; session: SessionSummary }
+  /** 连接参数（地址/端口/token）变了：main 重新加载 CliEnv 后再开 TUI，落在 then 视图。 */
+  | { kind: "reload"; then: View };
 type Row = SessionSummary & { match?: SearchMatch };
 
 const STATUS_COLOR: Record<SessionSummary["status"], string> = {
@@ -88,14 +92,22 @@ function messageLines(messages: RenderMessage[], width: number, maxLines: number
   return lines.slice(-maxLines);
 }
 
-export function App({ deps, onExit }: { deps: TuiDeps; onExit: (exit: TuiExit) => void }): React.JSX.Element {
+export function App({
+  deps,
+  onExit,
+  initialView = "main",
+}: {
+  deps: TuiDeps;
+  onExit: (exit: TuiExit) => void;
+  initialView?: View;
+}): React.JSX.Element {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
 
   const [snap, setSnap] = useState<DaemonSnapshot | undefined>(undefined);
   const [connected, setConnected] = useState(false);
   const [pending, setPending] = useState<ApprovalCard[]>([]);
-  const [view, setView] = useState<View>("main");
+  const [view, setView] = useState<View>(initialView);
   const [focus, setFocus] = useState<"list" | "search">("list");
   const [query, setQuery] = useState("");
   const [fullText, setFullText] = useState(false);
@@ -111,6 +123,10 @@ export function App({ deps, onExit }: { deps: TuiDeps; onExit: (exit: TuiExit) =
   const [pairData, setPairData] = useState<{ qr: string; bases: string[] } | undefined>(undefined);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [detailSession, setDetailSession] = useState<SessionSummary | undefined>(undefined);
+  const [config, setConfig] = useState<ConfigValue[]>(() => (initialView === "settings" ? deps.config.read() : []));
+  const [configIdx, setConfigIdx] = useState(0);
+  const [editing, setEditing] = useState<string | undefined>(undefined);
+  const [confirmToken, setConfirmToken] = useState(false);
 
   const streamRef = useRef<ReturnType<NonNullable<TuiDeps["connect"]>> | undefined>(undefined);
   const watchRef = useRef<{ preview?: string | undefined; detail?: string | undefined }>({});
@@ -224,6 +240,10 @@ export function App({ deps, onExit }: { deps: TuiDeps; onExit: (exit: TuiExit) =
     return () => clearTimeout(timer);
   }, [current?.sessionId, deps.api, view]);
 
+  useEffect(() => {
+    if (initialView === "pair") void deps.pair().then(setPairData);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // -- 日志视图刷新 -----------------------------------------------------------
   useEffect(() => {
     if (view !== "logs") return;
@@ -316,6 +336,56 @@ export function App({ deps, onExit }: { deps: TuiDeps; onExit: (exit: TuiExit) =
 
   const daemonUp = snap?.reachable === true && !snap.unauthorized;
 
+  /** 写完 .env 之后让配置生效：能控制 launchd 就重启；连接参数变了再整体重载 TUI。 */
+  const applyConfig = useCallback(
+    async (opts: { restart: boolean; reload: boolean; then: View; saved: string }) => {
+      setConfig(deps.config.read());
+      if (!opts.restart) {
+        flash(opts.saved);
+        return;
+      }
+      if (!deps.control.available || !daemonUp) {
+        flash(`${opts.saved}，daemon 下次启动时生效`);
+        return;
+      }
+      setBusy("重启中");
+      try {
+        await deps.control.restart();
+      } catch (error) {
+        flash(errorText(error));
+        setBusy(undefined);
+        return;
+      }
+      setBusy(undefined);
+      if (opts.reload) quit({ kind: "reload", then: opts.then });
+      else {
+        flash(`${opts.saved}，daemon 已重启`);
+        void refresh();
+      }
+    },
+    [deps, daemonUp, flash, quit, refresh],
+  );
+
+  const saveField = useCallback(
+    (entry: ConfigValue, raw: string) => {
+      try {
+        deps.config.set(entry.field, raw);
+      } catch (error) {
+        flash(errorText(error));
+        return false;
+      }
+      const label = raw.trim() === "" ? `${entry.field.label} 已恢复默认` : `${entry.field.label} 已保存`;
+      void applyConfig({
+        restart: entry.field.key !== "CLAUDE_BIN",
+        reload: entry.field.affectsCli === true,
+        then: "settings",
+        saved: label,
+      });
+      return true;
+    },
+    [deps.config, flash, applyConfig],
+  );
+
   // -- 键盘 ---------------------------------------------------------------------
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
@@ -343,6 +413,33 @@ export function App({ deps, onExit }: { deps: TuiDeps; onExit: (exit: TuiExit) =
         const q = card.questions?.[0];
         const option = q?.options[Number(input) - 1];
         if (q !== undefined && option !== undefined) void decide(card, { type: "answer", answers: { [q.question]: option.label } });
+      }
+      return;
+    }
+
+    if (view === "settings") {
+      if (editing !== undefined) {
+        if (key.escape) setEditing(undefined);
+        return; // 交给输入框
+      }
+      const tokenRow = configIdx === config.length;
+      if (confirmToken) {
+        setConfirmToken(false);
+        if (input === "y") {
+          deps.config.rotateToken();
+          void applyConfig({ restart: true, reload: true, then: "pair", saved: "已生成新 token" });
+        } else flash("已取消");
+        return;
+      }
+      if (key.escape || input === "q") setView("main");
+      else if (key.upArrow || input === "k") setConfigIdx((i) => Math.max(0, i - 1));
+      else if (key.downArrow || input === "j") setConfigIdx((i) => Math.min(config.length, i + 1));
+      else if (key.return) {
+        if (tokenRow) setConfirmToken(true);
+        else setEditing(config[configIdx]?.value ?? "");
+      } else if (input === "d" && !tokenRow) {
+        const entry = config[configIdx];
+        if (entry !== undefined && entry.value !== undefined) saveField(entry, "");
       }
       return;
     }
@@ -383,6 +480,12 @@ export function App({ deps, onExit }: { deps: TuiDeps; onExit: (exit: TuiExit) =
     } else if (input === "w") flash(deps.openWeb());
     else if (input === "l") setView("logs");
     else if (input === "?") setView("help");
+    else if (input === "c") {
+      setConfig(deps.config.read());
+      setEditing(undefined);
+      setConfirmToken(false);
+      setView("settings");
+    }
     else if (input === "r") void runControl("重启中", deps.control.restart, "daemon 已重启");
     else if (input === "s") {
       if (daemonUp) void runControl("停止中", deps.control.down, "daemon 已停止（取消开机自启，按 s 再启动）");
@@ -443,7 +546,7 @@ export function App({ deps, onExit }: { deps: TuiDeps; onExit: (exit: TuiExit) =
           <Text>  o          在本终端 claude --resume 接管（仅空闲会话）</Text>
           <Text>  /          搜索          Tab    切换 标题/路径 ⇄ 全文</Text>
           <Text bold>{"\n"}daemon</Text>
-          <Text>  s 启动/停止   r 重启   l 日志   p 配对二维码   w 打开 Web   g 刷新</Text>
+          <Text>  s 启动/停止   r 重启   l 日志   p 配对二维码   w 打开 Web   c 设置   g 刷新</Text>
           <Text bold>{"\n"}审批</Text>
           <Text>  a 打开待审批   y 允许   n 拒绝   1-9 选择问题选项</Text>
           <Text bold>{"\n"}会话视图</Text>
@@ -473,6 +576,61 @@ export function App({ deps, onExit }: { deps: TuiDeps; onExit: (exit: TuiExit) =
           )}
           <Text color="gray">Esc 返回</Text>
         </Box>
+      </Box>
+    );
+  }
+
+  if (view === "settings") {
+    const entry = config[configIdx];
+    const tokenRow = configIdx === config.length;
+    return (
+      <Box flexDirection="column" width={width}>
+        {header}
+        {toastLine}
+        <Box flexDirection="column" paddingX={1} marginTop={1}>
+          {config.map((c, i) => {
+            const sel = i === configIdx;
+            const isEditing = sel && editing !== undefined;
+            return (
+              <Box key={c.field.key}>
+                <Text inverse={sel && !isEditing}>
+                  {sel ? "❯ " : "  "}
+                  {fit(c.field.label, 20)}
+                </Text>
+                {isEditing ? (
+                  <TextInput
+                    value={editing}
+                    onChange={setEditing}
+                    placeholder={`留空恢复默认（${c.field.fallback}）`}
+                    onSubmit={(text) => {
+                      if (saveField(c, text)) setEditing(undefined);
+                    }}
+                  />
+                ) : c.value === undefined ? (
+                  <Text color="gray">{fit(`${c.field.fallback}  默认`, inner - 24, false)}</Text>
+                ) : (
+                  <Text color="cyan">{fit(c.value, inner - 24, false)}</Text>
+                )}
+              </Box>
+            );
+          })}
+          <Text inverse={tokenRow}>
+            {tokenRow ? "❯ " : "  "}
+            {fit("重置 token", 20)}
+          </Text>
+        </Box>
+        <Box borderStyle="single" borderColor="gray" paddingX={1} marginTop={1} width={width}>
+          <Text color={confirmToken ? "yellow" : "gray"}>
+            {confirmToken
+              ? "旧 token 立即失效，已配对的手机和浏览器都要重新扫码。按 y 确认，其他键取消"
+              : tokenRow
+                ? "生成新的访问凭据。二维码泄露或换手机时用"
+                : fit(entry?.field.hint ?? "", inner - 2, false)}
+          </Text>
+        </Box>
+        <Text color="gray">
+          {editing !== undefined ? " Enter 保存（自动重启 daemon）· Esc 取消" : " ↑↓ 选择 · Enter 修改 · d 恢复默认 · Esc 返回"}
+        </Text>
       </Box>
     );
   }
@@ -634,7 +792,7 @@ export function App({ deps, onExit }: { deps: TuiDeps; onExit: (exit: TuiExit) =
         ))}
       </Box>
       {toastLine}
-      <Text color="gray"> ↑↓ 选择 ⏎ 查看/回复 o 本地接管 a 审批 p 配对 w Web l 日志 r 重启 s 启停 / 搜索 ? 帮助 q 退出</Text>
+      <Text color="gray"> ↑↓ 选择 ⏎ 查看/回复 o 本地接管 a 审批 p 配对 w Web l 日志 r 重启 s 启停 c 设置 ? 帮助 q 退出</Text>
     </Box>
   );
 }

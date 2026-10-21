@@ -5,6 +5,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { render } from "ink-testing-library";
 
 import type { ApprovalCard, Decision, ServerFrame, SessionSummary } from "../src/api.js";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { readConfig, rotateToken, setConfig } from "../src/config.js";
 import type { DaemonSnapshot } from "../src/daemon-control.js";
 import { App, type TuiExit } from "../src/tui/App.js";
 import type { TuiDeps } from "../src/tui/deps.js";
@@ -22,7 +27,9 @@ const card: ApprovalCard = {
 };
 
 function fakeDeps(overrides: Partial<TuiDeps> = {}) {
-  const calls = { decide: [] as Array<[string, Decision]>, search: [] as Array<[string, boolean]>, sent: [] as string[] };
+  const calls = { decide: [] as Array<[string, Decision]>, search: [] as Array<[string, boolean]>, sent: [] as string[], restarts: 0 };
+  const envFile = join(mkdtempSync(join(tmpdir(), "cr-tui-")), ".env");
+  writeFileSync(envFile, "BRIDGE_TOKEN=old-token\n");
   let push: ((f: ServerFrame) => void) | undefined;
   const snap: DaemonSnapshot = {
     launchd: { loaded: true, installed: true, pid: 1 }, reachable: true, unauthorized: false,
@@ -53,13 +60,26 @@ function fakeDeps(overrides: Partial<TuiDeps> = {}) {
       handlers.onConnection?.(true);
       return { subscribe() {}, unsubscribe() {}, close() {} };
     },
-    control: { available: true, up: async () => true, down: async () => {}, restart: async () => true },
+    control: {
+      available: true,
+      up: async () => true,
+      down: async () => {},
+      restart: async () => {
+        calls.restarts += 1;
+        return true;
+      },
+    },
+    config: {
+      read: () => readConfig(envFile),
+      set: (field, raw) => setConfig(envFile, field, raw),
+      rotateToken: () => void rotateToken(envFile),
+    },
     pair: async () => ({ qr: "[QR]", bases: ["http://100.64.0.10:8787"] }),
     openWeb: () => "已打开浏览器",
     readLogTail: () => ["line 1", "error: boom"],
     ...overrides,
   };
-  return { deps, calls, push: (f: ServerFrame) => push?.(f) };
+  return { deps, calls, envFile, push: (f: ServerFrame) => push?.(f) };
 }
 
 async function settle(ms = 80): Promise<void> {
@@ -169,5 +189,94 @@ test("daemon 未运行：提示按 s 启动，s 调用 up", async () => {
   ui.stdin.write("s");
   await settle();
   assert.equal(upCalled, true);
+  ui.unmount();
+});
+
+test("设置：c 进入，改审批超时（秒→毫秒写 .env）并重启 daemon，不重载", async () => {
+  const { deps, calls, envFile } = fakeDeps();
+  let exited: TuiExit | undefined;
+  const ui = render(<App deps={deps} onExit={(r) => (exited = r)} />);
+  await settle(300);
+  ui.stdin.write("c");
+  await settle();
+  let frame = ui.lastFrame() ?? "";
+  assert.match(frame, /监听地址\s+127\.0\.0\.1\s+默认/);
+  assert.match(frame, /重置 token/);
+  for (let i = 0; i < 4; i += 1) {
+    ui.stdin.write("j");
+    await settle(30);
+  }
+  assert.match(ui.lastFrame() ?? "", /超时自动拒绝/); // 选中项的说明
+  ui.stdin.write("\r");
+  await settle();
+  ui.stdin.write("600");
+  await settle();
+  ui.stdin.write("\r");
+  await settle(200);
+  assert.match(readFileSync(envFile, "utf8"), /^PERMISSION_TIMEOUT_MS=600000$/m);
+  assert.equal(calls.restarts, 1);
+  assert.equal(exited, undefined);
+  frame = ui.lastFrame() ?? "";
+  assert.match(frame, /审批超时（秒）\s+600/);
+  assert.match(frame, /已保存，daemon 已重启/);
+  // d 恢复默认
+  ui.stdin.write("d");
+  await settle(200);
+  assert.doesNotMatch(readFileSync(envFile, "utf8"), /PERMISSION_TIMEOUT_MS/);
+  ui.unmount();
+});
+
+test("设置：非法端口提示错误不写入；合法端口重启后重载 TUI", async () => {
+  const { deps, calls, envFile } = fakeDeps();
+  let exited: TuiExit | undefined;
+  const ui = render(<App deps={deps} onExit={(r) => (exited = r)} initialView="settings" />);
+  await settle(300);
+  ui.stdin.write("j");
+  await settle(30);
+  ui.stdin.write("\r");
+  await settle();
+  ui.stdin.write("99999");
+  await settle();
+  ui.stdin.write("\r");
+  await settle(150);
+  assert.match(ui.lastFrame() ?? "", /端口：需要 1–65535 的整数/);
+  assert.doesNotMatch(readFileSync(envFile, "utf8"), /BRIDGE_PORT/);
+  assert.equal(calls.restarts, 0);
+  // 还在编辑：清空重输
+  for (let i = 0; i < 5; i += 1) {
+    ui.stdin.write("\x7f");
+    await settle(20);
+  }
+  ui.stdin.write("8790");
+  await settle();
+  ui.stdin.write("\r");
+  await settle(200);
+  assert.match(readFileSync(envFile, "utf8"), /^BRIDGE_PORT=8790$/m);
+  assert.equal(calls.restarts, 1);
+  assert.deepEqual(exited, { kind: "reload", then: "settings" });
+  ui.unmount();
+});
+
+test("设置：重置 token 需 y 确认，之后重载并打开配对", async () => {
+  const { deps, envFile } = fakeDeps();
+  let exited: TuiExit | undefined;
+  const ui = render(<App deps={deps} onExit={(r) => (exited = r)} initialView="settings" />);
+  await settle(300);
+  for (let i = 0; i < 8; i += 1) {
+    ui.stdin.write("j");
+    await settle(20);
+  }
+  ui.stdin.write("\r");
+  await settle();
+  assert.match(ui.lastFrame() ?? "", /按 y 确认/);
+  ui.stdin.write("x"); // 取消
+  await settle();
+  assert.match(readFileSync(envFile, "utf8"), /BRIDGE_TOKEN=old-token/);
+  ui.stdin.write("\r");
+  await settle();
+  ui.stdin.write("y");
+  await settle(200);
+  assert.doesNotMatch(readFileSync(envFile, "utf8"), /old-token/);
+  assert.deepEqual(exited, { kind: "reload", then: "pair" });
   ui.unmount();
 });
