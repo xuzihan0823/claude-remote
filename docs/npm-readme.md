@@ -8,7 +8,7 @@ Mac 端是一个常驻 daemon（launchd 托管）加终端控制台 `cr`。
 需要 macOS、Node.js 22.5+，以及已安装的 [Claude Code](https://docs.anthropic.com/claude-code)。
 
 ```sh
-npm install -g @xuzihan0823/claude-remote
+npm install -g @anyu/claude-remote
 cr
 ```
 
@@ -40,6 +40,6 @@ cr
 
 ```sh
 cr uninstall
-npm uninstall -g @xuzihan0823/claude-remote
+npm uninstall -g @anyu/claude-remote
 rm -rf ~/.claude-remote
 ```
