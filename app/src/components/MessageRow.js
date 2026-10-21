@@ -4,6 +4,8 @@ import { MarkdownView } from './markdown/MarkdownView.js';
 import { Icon } from './Icon.js';
 import { Spark } from './Spark.js';
 import { fmtClock, toolSummary } from '../lib/format.js';
+import { toolHeadline } from '../lib/tool-view.js';
+import { ToolInputView } from './ToolInputView.js';
 import { useTheme } from '../theme.js';
 
 // 折叠块：thinking / tool_use / tool_result 共用（web 的 <details> 对应物）
@@ -71,8 +73,12 @@ export function MessageRow({ m }) {
   }
   if (m.kind === 'tool_use') {
     return (
-      <Block icon={<Text style={{ fontSize: 12 }}>⚒</Text>} title={m.toolName || '工具'} sub={toolSummary(m)}>
-        <MonoBody text={JSON.stringify(m.toolInput ?? {}, null, 2)} />
+      <Block
+        icon={<Text style={{ fontSize: 12 }}>⚒</Text>}
+        title={m.toolName || '工具'}
+        sub={toolHeadline(m.toolName, m.toolInput) || toolSummary(m)}
+      >
+        <ToolInputView name={m.toolName} input={m.toolInput} />
       </Block>
     );
   }

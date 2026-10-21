@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ScrollView, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { KeyboardStickyView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, sessionCache } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
 import { truncate } from '../lib/format.js';
 import { haptics } from '../lib/haptics.js';
+import { ToolInputView } from './ToolInputView.js';
 import { useTheme } from '../theme.js';
 
 // 移植 web/ui/components/approval.js：
@@ -49,11 +50,9 @@ function Countdown({ expiresAt, stop }) {
   );
 }
 
-// 输入 JSON 折叠块：折叠 = 摘要（截 80 等宽）；展开 = pretty JSON 等宽横向滚动。
-function InputBlock({ value }) {
-  const { colors, fonts, radius } = useTheme();
-  const [open, setOpen] = useState(false);
-  const summary = truncate(JSON.stringify(value ?? {}), 80);
+// 工具参数：Edit/Write 直接展开红绿 diff，Bash 显示命令；很长时卡片内滚动，「原始参数」可看 JSON。
+function InputBlock({ toolName, value }) {
+  const { colors, radius } = useTheme();
   return (
     <View
       style={{
@@ -61,35 +60,11 @@ function InputBlock({ value }) {
         borderWidth: 1,
         borderColor: colors.line,
         borderRadius: radius.xs,
-        overflow: 'hidden',
+        padding: 9,
         backgroundColor: colors.bg,
       }}
     >
-      <TouchableOpacity
-        onPress={() => setOpen((o) => !o)}
-        style={{ flexDirection: 'row', alignItems: 'center', padding: 9, gap: 6 }}
-      >
-        <Text style={{ fontSize: 12, color: colors.ink2 }}>⚒</Text>
-        <Text
-          numberOfLines={1}
-          style={{ flex: 1, fontFamily: fonts.mono, fontSize: 12, color: colors.ink2 }}
-        >
-          {summary}
-        </Text>
-        <Text style={{ color: colors.ink3, fontSize: 12 }}>{open ? '⌃' : '⌄'}</Text>
-      </TouchableOpacity>
-      {open ? (
-        <View style={{ borderTopWidth: 1, borderTopColor: colors.line, padding: 9 }}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            <Text
-              selectable
-              style={{ fontFamily: fonts.mono, fontSize: 12, color: colors.ink, lineHeight: 18 }}
-            >
-              {JSON.stringify(value ?? {}, null, 2)}
-            </Text>
-          </ScrollView>
-        </View>
-      ) : null}
+      <ToolInputView name={toolName} input={value} maxHeight={260} />
     </View>
   );
 }
@@ -236,7 +211,7 @@ function ApprovalCard({ item, onDecide }) {
 
       {it.kind === 'approval' ? (
         <>
-          <InputBlock value={it.input} />
+          <InputBlock toolName={it.toolName} value={it.input} />
           <TextInput
             value={denyMsg}
             onChangeText={setDenyMsg}
