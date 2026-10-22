@@ -53,9 +53,17 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "扫描 Mac 上的配对二维码",
+          "cameraPermission": "扫描 Mac 上的配对二维码，以及拍照发给 Claude",
           "microphonePermission": false,
           "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "选择照片发给 Claude",
+          "cameraPermission": "扫描 Mac 上的配对二维码，以及拍照发给 Claude",
+          "microphonePermission": false
         }
       ]
     ]

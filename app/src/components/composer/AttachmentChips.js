@@ -1,4 +1,4 @@
-import { ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import { Image, ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import { useTheme } from '../../theme.js';
 import { fmtBytes, truncate } from '../../lib/format.js';
 
@@ -26,11 +26,14 @@ export function AttachmentChips({ files, onRemove }) {
             paddingVertical: 4,
           }}
         >
+          {f.isImage && f.uri ? (
+            <Image source={{ uri: f.uri }} style={{ width: 28, height: 28, borderRadius: 5, marginRight: 6 }} />
+          ) : null}
           <Text numberOfLines={1} style={{ color: colors.ink, fontSize: 12, maxWidth: 120 }}>
             {truncate(f.name, 24)}
           </Text>
           <Text style={{ color: colors.ink2, fontSize: 11, marginLeft: 6, fontFamily: fonts.mono }}>
-            {fmtBytes(f.size)}
+            {f.size ? fmtBytes(f.size) : ''}
           </Text>
           <TouchableOpacity
             onPress={() => onRemove(i)}
