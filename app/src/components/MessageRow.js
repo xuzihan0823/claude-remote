@@ -7,6 +7,7 @@ import { fmtClock, toolSummary } from '../lib/format.js';
 import { toolHeadline } from '../lib/tool-view.js';
 import { ToolInputView } from './ToolInputView.js';
 import { useTheme } from '../theme.js';
+import { LinkText } from './LinkText.js';
 
 // 折叠块：thinking / tool_use / tool_result 共用（web 的 <details> 对应物）
 function Block({ icon, title, sub, err, children }) {
@@ -47,9 +48,7 @@ function MonoBody({ text, err }) {
   const { colors, fonts } = useTheme();
   return (
     <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-      <Text style={{ color: err ? colors.danger : colors.ink, fontFamily: fonts.mono, fontSize: 12, lineHeight: 18 }} selectable>
-        {text}
-      </Text>
+      <LinkText text={text} style={{ color: err ? colors.danger : colors.ink, fontFamily: fonts.mono, fontSize: 12, lineHeight: 18 }} selectable />
     </ScrollView>
   );
 }
@@ -67,7 +66,7 @@ export function MessageRow({ m }) {
   if (m.kind === 'thinking') {
     return (
       <Block icon={<Spark size={13} />} title="思考过程">
-        <Text style={{ color: colors.ink2, fontSize: 13, lineHeight: 20 }} selectable>{m.text}</Text>
+        <LinkText text={m.text} style={{ color: colors.ink2, fontSize: 13, lineHeight: 20 }} selectable />
       </Block>
     );
   }
@@ -100,7 +99,7 @@ export function MessageRow({ m }) {
       <View style={{ alignItems: 'flex-end', marginTop: 12, marginBottom: 20 }}>
         <View style={{ backgroundColor: colors.bubble, borderRadius: 26, borderCurve: 'continuous',
           paddingHorizontal: 18, paddingVertical: 12, maxWidth: '88%' }}>
-          <Text style={{ color: colors.inkStrong, fontSize: 17, lineHeight: 26 }} selectable>{m.text}</Text>
+          <LinkText text={m.text} style={{ color: colors.inkStrong, fontSize: 17, lineHeight: 26 }} selectable />
         </View>
       </View>
     );
