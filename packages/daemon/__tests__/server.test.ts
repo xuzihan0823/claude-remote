@@ -246,7 +246,9 @@ test("鉴权：/api 无 token 401；错 token 401；对 token 放行", async () 
   assert.equal(wrong.status, 401);
   const ok = await fetch(`${harness.base}/api/health`, authed());
   assert.equal(ok.status, 200);
-  assert.deepEqual(await ok.json(), { ok: true, version: "0.1.0-test", claudeCliVersion: "9.9.9-test" });
+  const health = await ok.json();
+  assert.deepEqual({ ...health, hostname: undefined }, { ok: true, version: "0.1.0-test", claudeCliVersion: "9.9.9-test", hostname: undefined });
+  assert.equal(typeof health.hostname, "string");
 });
 
 test("静态托管：/ 返回 index.html；路径穿越 404", async () => {

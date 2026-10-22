@@ -4,6 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { createSession } from '../../lib/create-session.js';
 import { tooLargeMessage } from '../../lib/attachments.js';
+import { getPref } from '../../lib/prefs.js';
 import { toast } from '../../../../web/core/bus.js';
 import { setSessionMode } from '../../../../web/core/modes.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
@@ -23,7 +24,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
   const insets = useSafeAreaInsets();
   const catalog = useModelCatalog();
   const [draft, setDraft] = useState('');
-  const [model, setModel] = useState('');
+  const [model, setModel] = useState(() => getPref('defaultModel') || '');
   const [files, setFiles] = useState([]);
   const [busy, setBusy] = useState(false);
   const [inputH, setInputH] = useState(44);

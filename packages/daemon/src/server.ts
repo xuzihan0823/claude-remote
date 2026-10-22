@@ -13,7 +13,7 @@ import { createReadStream } from "node:fs";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { basename, extname, join, normalize, resolve, sep } from "node:path";
 import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
@@ -231,6 +231,7 @@ export class DaemonServer {
         ok: true,
         version: this.#options.version,
         claudeCliVersion: this.#options.claudeCliVersion(),
+        hostname: hostname(),
       });
       return;
     }

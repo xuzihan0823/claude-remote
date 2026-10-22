@@ -1,5 +1,7 @@
 // 触感反馈。expo-haptics 是原生模块：旧的 dev client 没编进来时 require 会抛，这里吞掉降级为 no-op，
 // 避免 JS 先更新、原生还没重编时整个 App 起不来。
+import { getPref } from './prefs.js';
+
 let H = null;
 try {
   // eslint-disable-next-line global-require
@@ -9,7 +11,7 @@ try {
 }
 
 function safe(fn) {
-  if (!H) return;
+  if (!H || getPref('haptics') === false) return;
   try {
     const p = fn(H);
     if (p && typeof p.catch === 'function') p.catch(() => { /* 设备不支持 */ });

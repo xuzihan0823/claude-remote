@@ -4,6 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { cacheSessions, pendingSessionMessages } from '../../../web/core/api.js';
 import { getNewSessionMode, setNewSessionMode } from '../../../web/core/modes.js';
+import { useBus } from '../../../web/core/bus.js';
 import { ws } from '../../../web/core/ws.js';
 import { truncate } from '../lib/format.js';
 import { useProjects } from '../lib/projects-context.js';
@@ -37,6 +38,7 @@ export function HomeScreen() {
 
   const { catalog, catalogLoaded, catalogError, target, setTarget, inheritCwd, noteCreated, setDraftActive, refresh } = useProjects();
   const [mode, setMode] = useState(getNewSessionMode);
+  useBus('new-session-mode', setMode, []);
   const pickerRef = useRef(null);
   const openPicker = useCallback(() => { Keyboard.dismiss(); pickerRef.current?.present(); }, []);
 
