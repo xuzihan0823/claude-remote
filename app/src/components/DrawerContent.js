@@ -44,7 +44,10 @@ export function DrawerContent({ navigation, state }) {
   const go = (fn) => () => { fn(); navigation.closeDrawer(); };
   const goNew = go(() => { projects.prepareNewChat(); navigation.navigate('Main', { screen: 'Home', pop: true }); });
   const goSettings = go(() => navigation.navigate('Main', { screen: 'Settings' }));
-  const goChat = (sessionId) => go(() => navigation.navigate('Main', { screen: 'Chat', params: { sessionId } }));
+  const goChat = (sessionId, focusSeq) => go(() => navigation.navigate('Main', {
+    screen: 'Chat',
+    params: focusSeq == null ? { sessionId } : { sessionId, focusSeq, focusNonce: Date.now() },
+  }));
 
   const renderResult = ({ item: s }) => {
     const selected = s.sessionId === list.selectedSessionId;
@@ -52,7 +55,7 @@ export function DrawerContent({ navigation, state }) {
     const field = s.match?.field;
     return (
       <Pressable
-        onPress={() => { Keyboard.dismiss(); goChat(s.sessionId)(); }}
+        onPress={() => { Keyboard.dismiss(); goChat(s.sessionId, s.match?.field === 'content' ? s.match.seq : undefined)(); }}
         testID={`search-row-${s.sessionId}`}
         accessibilityRole="button"
         accessibilityState={{ selected }}

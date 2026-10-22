@@ -52,3 +52,31 @@ export function createSessionSearch(searchFn, onChange, { debounceMs = SEARCH_DE
     dispose() { gen += 1; if (timer !== null) clearTimer(timer); timer = null; },
   };
 }
+
+// ---------------------------------------------------------------------------
+// 搜索结果 → 定位到命中消息
+// ---------------------------------------------------------------------------
+
+/** 往前翻页直到已加载范围覆盖 targetSeq（或到头/超出页数上限）。fetchBefore(beforeSeq) → {messages, firstSeq, hasMore}。 */
+export async function loadUntilSeq(fetchBefore, { firstSeq, hasMore }, targetSeq, { maxPages = 40 } = {}) {
+  const pages = [];
+  let cursor = firstSeq;
+  let more = hasMore;
+  let guard = 0;
+  while (more && cursor != null && cursor > targetSeq && guard++ < maxPages) {
+    const d = await fetchBefore(cursor);
+    pages.push(...(d.messages || []));
+    cursor = d.firstSeq;
+    more = d.hasMore;
+  }
+  return { messages: pages, firstSeq: cursor, hasMore: more };
+}
+
+/**
+ * 在已排序（seq 升序）的消息里找搜索命中对应的那条：优先同 seq，
+ * 否则取 seq 之后最近的一条（命中行可能是不渲染的 sidechain/meta 行）。
+ */
+export function findFocusIndex(sorted, targetSeq) {
+  for (let i = 0; i < sorted.length; i++) if (sorted[i].seq >= targetSeq) return i;
+  return -1;
+}

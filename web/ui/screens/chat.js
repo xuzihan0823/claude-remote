@@ -4,6 +4,7 @@ import { toast, useBus } from "../../core/bus.js";
 import { PERMISSION_MODES, getSessionMode, setSessionMode } from "../../core/modes.js";
 import { ws } from "../../core/ws.js";
 import { applyStreamFrame, reconcileDrafts } from "../../core/stream-drafts.js";
+import { findFocusIndex, loadUntilSeq } from "../../core/search.js";
 import { useModelCatalog } from "../hooks.js";
 import { cmpMsg, cwdTail, fmtBytes, fmtClock, msgKey, toolSummary, truncate } from "../utils.js";
 import { StatusBadge } from "../components/conn-bar.js";
@@ -56,7 +57,7 @@ export function MessageRow({ m }) {
     </div>`;
 }
 // ================================================================ 聊天页
-export function Chat({ sessionId, goList }) {
+export function Chat({ sessionId, focusSeq, focusNonce, goList }) {
   const catalog = useModelCatalog();
   const store = useRef({ map: new Map(), sorted: [] });
   const [version, setVersion] = useState(0);
@@ -236,6 +237,40 @@ export function Chat({ sessionId, goList }) {
       toast(`历史加载失败：${e.code}`, 'error');
     } finally { loadingOlder.current = false; }
   }, [sessionId, hasMore, firstSeq, addMsgs]);
+  // ---- 搜索结果定位：翻页直到覆盖命中的 seq，再滚到该条并短暂高亮
+  const [highlightKey, setHighlightKey] = useState(null);
+  const pageRef = useRef({ firstSeq: null, hasMore: false });
+  pageRef.current = { firstSeq, hasMore };
+  useEffect(() => {
+    if (focusSeq == null || initLoading || loadErr) return;
+    let cancelled = false;
+    let hlTimer;
+    (async () => {
+      loadingOlder.current = true;
+      try {
+        const r = await loadUntilSeq(
+          (before) => api(`/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=500&beforeSeq=${before}`),
+          pageRef.current,
+          focusSeq,
+        );
+        if (cancelled) return;
+        if (r.messages.length) { setFirstSeq(r.firstSeq); setHasMore(r.hasMore); addMsgs(r.messages); }
+        const sorted = store.current.sorted;
+        const i = findFocusIndex(sorted, focusSeq);
+        if (i < 0) { toast('没找到这条消息，可能已被改写', 'info'); return; }
+        const key = msgKey(sorted[i]);
+        stick.current = false;
+        setHighlightKey(key);
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          scrollRef.current?.querySelector(`[data-key="${key}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }));
+        hlTimer = setTimeout(() => setHighlightKey(null), 2500);
+      } catch (e) {
+        if (!cancelled) toast(`定位失败：${e.code}`, 'error');
+      } finally { loadingOlder.current = false; }
+    })();
+    return () => { cancelled = true; clearTimeout(hlTimer); };
+  }, [sessionId, focusSeq, focusNonce, initLoading, loadErr]);
   // ---- 滚动维护
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -378,7 +413,7 @@ export function Chat({ sessionId, goList }) {
           ${initLoading && html`<div class="empty">加载中…</div>`}
           ${loadErr && html`<div class="page-err">${loadErr}</div>`}
           ${!initLoading && !loadErr && msgs.length === 0 && html`<div class="empty">（空会话）</div>`}
-          ${msgs.map((m) => html`<${MessageRow} key=${msgKey(m)} m=${m} />`)}
+          ${msgs.map((m) => html`<div key=${msgKey(m)} data-key=${msgKey(m)} class=${msgKey(m) === highlightKey ? 'focus-hl' : ''}><${MessageRow} m=${m} /></div>`)}
           ${pending && html`
             <div class="msg user pending">
               <span class="avatar user-avatar">我</span>
