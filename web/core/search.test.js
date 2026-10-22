@@ -56,3 +56,23 @@ test('出错给提示，不抛', async () => {
   assert.equal(search.state.error, '网络不可达');
   assert.equal(search.state.loading, false);
 });
+
+import { findFocusIndex, loadUntilSeq } from './search.js';
+
+test('loadUntilSeq：翻页到覆盖目标 seq 为止', async () => {
+  const calls = [];
+  const fetchBefore = async (before) => { calls.push(before); return { messages: [{ seq: before - 100 }], firstSeq: before - 100, hasMore: before - 100 > 1 }; };
+  const r = await loadUntilSeq(fetchBefore, { firstSeq: 401, hasMore: true }, 150);
+  assert.deepEqual(calls, [401, 301, 201]);
+  assert.equal(r.firstSeq, 101);
+  assert.equal(r.messages.length, 3);
+  const none = await loadUntilSeq(fetchBefore, { firstSeq: 100, hasMore: true }, 150);
+  assert.deepEqual(none.messages, []);
+});
+
+test('findFocusIndex：同 seq 或其后最近一条', () => {
+  const s = [{ seq: 3 }, { seq: 5 }, { seq: 9 }];
+  assert.equal(findFocusIndex(s, 5), 1);
+  assert.equal(findFocusIndex(s, 6), 2);
+  assert.equal(findFocusIndex(s, 10), -1);
+});

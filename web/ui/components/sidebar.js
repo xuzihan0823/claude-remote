@@ -85,7 +85,7 @@ export function Sidebar({ route, goList, goSettings, goChat }) {
           ${sq.results.map((s) => html`
             <li key=${s.sessionId}
               class="session-item ${route.view === 'chat' && route.sessionId === s.sessionId ? 'active' : ''}"
-              onClick=${nav(() => goChat(s.sessionId))}>
+              onClick=${nav(() => goChat(s.sessionId, s.match?.field === 'content' ? s.match.seq : undefined))}>
               <div class="row1">
                 <span class="title">${s.match?.field === 'title' ? hl(s.title || '(空会话)') : (s.title || '(空会话)')}</span>
                 <i class="dot ${STATUS_DOT[s.status] || ''}"></i>
