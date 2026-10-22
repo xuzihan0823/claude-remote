@@ -464,6 +464,14 @@ test("新会话/模型输入校验：未知 cwd、未知模型拒绝；abort 对
   assert.equal(missing.status, 200);
   assert.deepEqual(await missing.json(), { runId: null, status: "idle" });
 
+  // 无 daemon run 但被判 terminal-driving（上一轮报错后的收尾写入等）：停止 = 解除占用
+  harness.tracker.noteWrite(SESSION_ID);
+  assert.equal(harness.tracker.getStatus(SESSION_ID), "terminal-driving");
+  const release = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/abort`, authed({ method: "POST" }));
+  assert.equal(release.status, 200);
+  assert.deepEqual(await release.json(), { runId: null, status: "released" });
+  assert.equal(harness.tracker.getStatus(SESSION_ID), "idle");
+
   const malformed = await fetch(`${harness.base}/api/sessions/not-a-uuid/abort`, authed({ method: "POST" }));
   assert.equal(malformed.status, 400);
   assert.deepEqual(await malformed.json(), { error: "invalid_session_id" });

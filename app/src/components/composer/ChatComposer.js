@@ -58,6 +58,18 @@ export function ChatComposer({
     }
   }, [sessionId, activeRunId, isRunning, onStopped]);
 
+  // 终端驾驶误判（如上一轮报错后 CLI 收尾写入）时的手动出口：daemon 无 run 时 abort = 解除占用
+  const releaseSession = useCallback(async () => {
+    try {
+      const r = await api(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, { method: 'POST', body: '{}' });
+      onStopped?.();
+      haptics.reject();
+      toast(r?.status === 'aborted' ? '已停止当前运行' : '已解除占用', 'info');
+    } catch (e) {
+      if (e.code !== 'unauthorized') toast(`解除失败：${e.code}`, 'error');
+    }
+  }, [sessionId, onStopped]);
+
   const doSend = useCallback(async () => {
     if (!hasContent || !canSend) return;
     setSendBusy(true);
@@ -134,8 +146,13 @@ export function ChatComposer({
         </View>
       ) : null}
       {!canSend && !isRunning && disabledReason ? (
-        <View style={{ paddingHorizontal: 4, paddingVertical: 6 }}>
-          <Text style={{ color: colors.ink3, fontSize: 13 }}>{disabledReason}</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 4, paddingVertical: 6, gap: 8 }}>
+          <Text style={{ color: colors.ink3, fontSize: 13, flex: 1 }}>{disabledReason}</Text>
+          {status === 'terminal-driving' && !sendBusy ? (
+            <TouchableOpacity onPress={releaseSession} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }} accessibilityLabel="解除占用">
+              <Text style={{ color: colors.danger, fontSize: 13, fontWeight: '500' }}>解除占用</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
       ) : null}
       <ComposerCard disabled={!canSend}>

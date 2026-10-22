@@ -303,6 +303,17 @@ export function Chat({ sessionId, goList }) {
       } else if (e.code !== 'unauthorized') toast(`停止失败：${e.code}`, 'error');
     }
   }, [sessionId, activeRunId, isRunning]);
+  // 终端驾驶误判（如上一轮报错后 CLI 收尾写入）时的手动出口：daemon 无 run 时 abort = 解除占用
+  const releaseSession = useCallback(async () => {
+    try {
+      const r = await api(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, { method: 'POST', body: '{}' });
+      if (r?.status === 'aborted') { setRunActive(false); setActiveRunId(null); }
+      setStatus('idle');
+      toast(r?.status === 'aborted' ? '已停止当前运行' : '已解除占用', 'info');
+    } catch (e) {
+      if (e.code !== 'unauthorized') toast(`解除失败：${e.code}`, 'error');
+    }
+  }, [sessionId]);
   const doSend = useCallback(async () => {
     if (!hasContent || !canSend) return;
     setSendBusy(true);
@@ -389,7 +400,7 @@ export function Chat({ sessionId, goList }) {
       ${showJump && html`<button class="jump-btn" onClick=${() => { stick.current = true; const el = scrollRef.current; el.scrollTop = el.scrollHeight; setShowJump(false); }}>↓</button>`}
       <footer class="composer">
         ${isRunning && html`<div class="runbar"><span class="pulse"></span>Claude 正在运行… <button class="stop-link" onClick=${stopRun}>停止</button></div>`}
-        ${!canSend && !isRunning && disabledReason && html`<div class="runbar muted">${disabledReason}</div>`}
+        ${!canSend && !isRunning && disabledReason && html`<div class="runbar muted">${disabledReason}${status === 'terminal-driving' && !sendBusy && html` <button class="stop-link" onClick=${releaseSession}>解除占用</button>`}</div>`}
         <div class="composer-card ${canSend ? '' : 'disabled'}">
           ${files.length > 0 && html`
             <div class="attach-chips">
