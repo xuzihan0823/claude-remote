@@ -121,3 +121,14 @@ export function removeDevice(id) {
 export function candidateBases(d) {
   return uniqBases([d.lastBase, ...d.bases]);
 }
+
+/**
+ * 「移除此设备」的后续动作：删的不是当前设备 → 'none'；还有别的设备 → 'switch'（切过去）；
+ * 删光了 → 'logout'（回到连接页）。
+ */
+export function removeDeviceAction(id) {
+  const wasCurrent = currentDeviceId() === id;
+  const next = removeDevice(id);
+  if (!wasCurrent) return { type: 'none' };
+  return next ? { type: 'switch', id: next.id } : { type: 'logout' };
+}

@@ -1,15 +1,15 @@
-import { Children, Fragment, isValidElement, useRef } from 'react';
+import { Children, Fragment, isValidElement, useEffect, useRef, useState } from 'react';
 import { Animated, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
-import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 import { GlassSurface } from '../../components/GlassSurface.js';
+import { ProgressiveBlur } from '../../components/ProgressiveBlur.js';
 import { Icon } from '../../components/Icon.js';
 import { useTheme } from '../../theme.js';
 
 // 设置页通用骨架（对照 Claude iOS 设置）：页面以 sheet 弹出，悬浮的液态玻璃圆钮 + 居中标题；
-// 内容滚到导航区下面时，导航区渐显一层底色渐隐，保证标题可读、又能透出下面的卡片。
+// 内容滚到导航区下面时，导航区是一层渐进模糊（顶部最糊、往下渐清）加淡淡的底色，透出下面的卡片。
 
 export const HEADER_H = 64;
 
@@ -52,6 +52,11 @@ export function SettingsPage({ title, left = 'back', right = null, children, key
   const bg = sheetBg(colors, dark);
   const scrollY = useRef(new Animated.Value(0)).current;
   const fade = scrollY.interpolate({ inputRange: [0, 24], outputRange: [0, 1], extrapolate: 'clamp' });
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const id = scrollY.addListener(({ value }) => setScrolled(value > 1));
+    return () => scrollY.removeListener(id);
+  }, [scrollY]);
 
   const close = () => {
     // 根页的 ✕ 关掉整个设置 sheet（父 stack 的 Settings 路由）
@@ -75,18 +80,9 @@ export function SettingsPage({ title, left = 'back', right = null, children, key
   return (
     <View style={{ flex: 1, backgroundColor: bg }}>
       {keyboard ? <KeyboardAvoidingView behavior="padding" style={{ flex: 1 }}>{body}</KeyboardAvoidingView> : body}
-      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { height: HEADER_H + 22, opacity: fade }]}>
-        <Svg width="100%" height="100%">
-          <Defs>
-            <LinearGradient id="hdr" x1="0" y1="0" x2="0" y2="1">
-              <Stop offset="0" stopColor={bg} stopOpacity="0.97" />
-              <Stop offset="0.62" stopColor={bg} stopOpacity="0.82" />
-              <Stop offset="1" stopColor={bg} stopOpacity="0" />
-            </LinearGradient>
-          </Defs>
-          <Rect x="0" y="0" width="100%" height="100%" fill="url(#hdr)" />
-        </Svg>
-      </Animated.View>
+      <View pointerEvents="none" style={{ position: 'absolute', top: 0, left: 0, right: 0, height: HEADER_H + 24 }}>
+        <ProgressiveBlur tintColor={bg} fade={fade} active={scrolled} />
+      </View>
       <View
         pointerEvents="box-none"
         style={{ position: 'absolute', top: 0, left: 0, right: 0, height: HEADER_H, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16 }}

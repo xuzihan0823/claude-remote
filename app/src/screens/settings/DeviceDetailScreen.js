@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert } from 'react-native';
 import { api } from '../../../../web/core/api.js';
 import { bus, toast } from '../../../../web/core/bus.js';
-import { getDevice, hostOf, removeDevice, updateDevice } from '../../../../web/core/devices.js';
+import { getDevice, hostOf, removeDeviceAction, updateDevice } from '../../../../web/core/devices.js';
 import { useConnActions } from '../../lib/conn-context.js';
 import { useDevices } from '../../lib/useDevices.js';
 import { QrScanner } from '../../components/QrScanner.js';
@@ -77,11 +77,11 @@ export function DeviceDetailScreen({ navigation, route }) {
         text: '移除',
         style: 'destructive',
         onPress: async () => {
-          const next = removeDevice(d.id);
+          const act = removeDeviceAction(d.id);
           changed();
-          if (!isCurrent) { navigation.goBack(); return; }
-          if (next) { await switchDevice(next.id); return; }
-          bus.emit('logout');
+          if (act.type === 'none') navigation.goBack();
+          else if (act.type === 'switch') await switchDevice(act.id);
+          else bus.emit('logout');
         },
       },
     ]);
