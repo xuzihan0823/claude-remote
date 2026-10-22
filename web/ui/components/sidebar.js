@@ -1,5 +1,6 @@
-import { html, useCallback, useEffect, useMemo, useState } from '../../vendor/preact-htm-standalone.module.js';
-import { connHost, fetchSessions } from '../../core/api.js';
+import { html, useCallback, useEffect, useMemo, useRef, useState } from '../../vendor/preact-htm-standalone.module.js';
+import { connHost, fetchSessions, searchSessionsApi } from '../../core/api.js';
+import { createSessionSearch, emptySearchState, MATCH_LABEL } from '../../core/search.js';
 import { useBus } from '../../core/bus.js';
 import { ws } from '../../core/ws.js';
 import { cwdTail, relTime, STATUS_DOT } from '../utils.js';
@@ -43,6 +44,19 @@ export function Sidebar({ route, goList, goSettings, goChat }) {
   useEffect(() => { setDrawerOpen(false); }, [route.view, route.sessionId]);
   const nav = (fn) => () => { fn(); setDrawerOpen(false); };
 
+  // ---- 搜索：先标题/路径/最近消息，再全文
+  const [sq, setSq] = useState(emptySearchState);
+  const searchRef = useRef(null);
+  if (searchRef.current === null) searchRef.current = createSessionSearch(searchSessionsApi, setSq);
+  useEffect(() => () => searchRef.current.dispose(), []);
+  const searching = sq.query.trim() !== '';
+  const hl = (text) => {
+    const q = sq.query.trim().toLowerCase();
+    const i = q ? text.toLowerCase().indexOf(q) : -1;
+    if (i < 0 || text.toLowerCase().length !== text.length) return text;
+    return html`${text.slice(0, i)}<mark>${text.slice(i, i + q.length)}</mark>${text.slice(i + q.length)}`;
+  };
+
   return html`
     <div class="sidebar-backdrop ${drawerOpen ? 'open' : ''}" onClick=${() => setDrawerOpen(false)}></div>
     <aside class="sidebar ${drawerOpen ? 'open' : ''}">
@@ -58,6 +72,35 @@ export function Sidebar({ route, goList, goSettings, goChat }) {
           <span class="nav-ico">⚙</span>设置
         </button>
       </nav>
+      <div class="side-search">
+        <input type="search" placeholder="搜索对话" value=${sq.query} aria-label="搜索对话"
+          onInput=${(e) => searchRef.current.setQuery(e.currentTarget.value)}
+          onKeyDown=${(e) => { if (e.key === 'Escape') searchRef.current.setQuery(''); }} />
+      </div>
+      ${searching ? html`
+      <div class="side-scroll">
+        ${sq.loading && html`<div class="empty">搜索中…</div>`}
+        ${!sq.loading && !sq.fullLoading && !sq.error && sq.results.length === 0 && html`<div class="empty">没有找到相关对话</div>`}
+        <ul class="session-list">
+          ${sq.results.map((s) => html`
+            <li key=${s.sessionId}
+              class="session-item ${route.view === 'chat' && route.sessionId === s.sessionId ? 'active' : ''}"
+              onClick=${nav(() => goChat(s.sessionId))}>
+              <div class="row1">
+                <span class="title">${s.match?.field === 'title' ? hl(s.title || '(空会话)') : (s.title || '(空会话)')}</span>
+                <i class="dot ${STATUS_DOT[s.status] || ''}"></i>
+              </div>
+              ${s.match && s.match.field !== 'title' && html`<div class="row2 snippet">${MATCH_LABEL[s.match.field] || ''} · ${hl(s.match.snippet)}</div>`}
+              <div class="row3">
+                <span class="cwd">${cwdTail(s.cwd)}</span>
+                <span class="sep">·</span><span>${relTime(s.lastActiveAt)}</span>
+              </div>
+            </li>`)}
+        </ul>
+        ${sq.error && html`<div class="page-err" onClick=${() => searchRef.current.retry()}>${sq.error} · 点击重试</div>`}
+        ${sq.fullLoading && html`<div class="list-foot">正在搜索对话正文…</div>`}
+        ${!sq.fullLoading && sq.truncated && html`<div class="list-foot">历史太多，只搜了最近的部分</div>`}
+      </div>` : html`
       <div class="side-label">最近对话</div>
       <div class="side-scroll">
         ${error && html`<div class="page-err" onClick=${() => load()}>${error} · 点击重试</div>`}
@@ -78,7 +121,7 @@ export function Sidebar({ route, goList, goSettings, goChat }) {
             </li>`)}
         </ul>
         ${data.total > sorted.length && html`<div class="list-foot">已显示 ${sorted.length} / ${data.total} 个会话</div>`}
-      </div>
+      </div>`}
       <div class="side-foot">
         <span class="conn-dot ${wsPhase}"></span>
         <span class="ellip mono">${connHost()}</span>

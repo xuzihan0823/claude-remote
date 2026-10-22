@@ -3,6 +3,7 @@ import { useTheme } from '../theme.js';
 
 const paths = {
   menu: 'M4 6h16M4 12h12M4 18h7',
+  search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM20 20l-4-4',
   plus: 'M12 5v14M5 12h14',
   send: 'M12 19V5m-6 6 6-6 6 6',
   arrowDown: 'M12 5v14m-6-6 6 6 6-6',

@@ -126,6 +126,14 @@ export async function fetchSessions(limit = 100, { offset = 0, projectId, cwd } 
   }
   return d;
 }
+/** GET /api/sessions/search。full=true 时 daemon 会扫 JSONL 全文（较慢）。 */
+export async function searchSessionsApi(q, { full = false, limit = 30 } = {}) {
+  const params = new URLSearchParams({ q, limit: String(limit) });
+  if (full) params.set('full', '1');
+  const d = await api(`/api/sessions/search?${params}`, { timeoutMs: full ? 30_000 : undefined });
+  cacheSessions(d.results || []);
+  return d;
+}
 export async function fetchProjects() {
   return api('/api/projects');
 }
