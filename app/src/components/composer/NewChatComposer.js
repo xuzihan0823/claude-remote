@@ -3,6 +3,7 @@ import { ActivityIndicator, Text, TextInput, TouchableOpacity, View } from 'reac
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { createSession } from '../../lib/create-session.js';
+import { tooLargeMessage } from '../../lib/attachments.js';
 import { toast } from '../../../../web/core/bus.js';
 import { setSessionMode } from '../../../../web/core/modes.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
@@ -35,7 +36,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
   }, [hasDraft, onDraftChange]);
 
   const create = useCallback(async () => {
-    const text = draft.trim();
+    const text = draft.trim() || (files.length ? '请查看我上传的附件。' : '');
     if (!text || !cwd || !cwdKnown || busy) return;
     setBusy(true);
     try {
@@ -46,7 +47,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
       setFiles([]);
     } catch (e) {
       if (e.status === 409) toast('所选项目当前不可创建新会话', 'error');
-      else if (e.status === 413) toast('附件过大（上限 25MB）', 'error');
+      else if (e.status === 413) toast(tooLargeMessage(e), 'error');
       else if (e.code === 'unknown_model') toast('该模型已不可用，请重新选择', 'error');
       else if (e.code === 'unknown_cwd') toast('该项目已不可用，请刷新后重试', 'error');
       else if (e.code === 'connection_changed') toast('连接已切换，请在当前连接重新发送', 'info');
@@ -59,7 +60,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
     if (h !== lastH.current) { lastH.current = h; setInputH(h); }
   };
 
-  const canSend = !busy && draft.trim() !== '';
+  const canSend = !busy && (draft.trim() !== '' || files.length > 0);
   const needsCwd = !cwd || !cwdKnown;
   const onSendPress = () => {
     if (needsCwd) { onPickCwd?.(); return; }

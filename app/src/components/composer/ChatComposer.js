@@ -13,6 +13,7 @@ import { AttachmentChips } from './AttachmentChips.js';
 import { AttachmentPicker } from './AttachmentPicker.js';
 import { ModelPicker } from './ModelPicker.js';
 import { haptics } from '../../lib/haptics.js';
+import { tooLargeMessage, uploadAttachments, withAttachmentNote } from '../../lib/attachments.js';
 
 // 聊天 composer（发送/停止/附件/模型 pill/模式 pill/bypass 确认）。
 // 契约（不得更改）：props { sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped }
@@ -27,13 +28,15 @@ export function ChatComposer({
   const [draft, setDraft] = useState('');
   const [files, setFiles] = useState([]);
   const [sendBusy, setSendBusy] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null); // { done, total }
   const [modelOverride, setModelOverride] = useState('');
   const [inputH, setInputH] = useState(36);
   const lastH = useRef(36);
 
   const canSend = status === 'idle' && !sendBusy;
   const hasContent = draft.trim() !== '' || files.length > 0;
-  const disabledReason = sendBusy ? '发送中…'
+  const disabledReason = sendBusy ? (uploadProgress && uploadProgress.done < uploadProgress.total
+      ? `上传附件 ${uploadProgress.done + 1}/${uploadProgress.total}…` : '发送中…')
     : status === 'terminal-driving' ? '终端驾驶中，暂不可发送'
     : status === 'daemon-driving' ? 'Claude 正在运行…'
     : status == null ? '状态获取中…' : '';
@@ -74,20 +77,11 @@ export function ChatComposer({
     if (!hasContent || !canSend) return;
     setSendBusy(true);
     try {
-      // 先传附件（存到 Mac 本地），再把路径写进消息文本让 Claude 直接读
-      const uploaded = [];
-      for (const f of files) {
-        const blob = await (await fetch(f.uri)).blob();
-        const r = await api(`/api/sessions/${encodeURIComponent(sessionId)}/upload?filename=${encodeURIComponent(f.name)}`, {
-          method: 'POST', body: blob, headers: { 'Content-Type': 'application/octet-stream' },
-        });
-        uploaded.push(r.path);
-      }
-      let text = draft.trim();
-      if (uploaded.length) {
-        const list = uploaded.map((p) => `- ${p}`).join('\n');
-        text = `${text || '请查看我上传的附件。'}\n\n[手机端上传的附件，已保存在本机，可直接读取]\n${list}`;
-      }
+      // 先传附件（存到 Mac 本地），再把路径写进消息文本让 Claude 直接读；失败重试不会重复上传
+      const uploaded = await uploadAttachments(files, `/api/sessions/${encodeURIComponent(sessionId)}/upload`, {
+        onProgress: (done, total) => setUploadProgress({ done, total }),
+      });
+      const text = withAttachmentNote(draft.trim(), uploaded);
       await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
         method: 'POST',
         body: JSON.stringify({
@@ -108,11 +102,13 @@ export function ChatComposer({
           : e.data?.status === 'daemon-driving' ? 'Claude 正在运行' : '会话被占用';
         toast(`${why}，发送被拒`, 'error');
       } else if (e.status === 413) {
-        toast('附件过大（上限 25MB）', 'error');
+        toast(tooLargeMessage(e), 'error');
+      } else if (e.code === 'connection_changed') {
+        toast('连接已切换，请重新发送', 'info');
       } else if (e.code !== 'unauthorized') {
         toast(`发送失败：${e.code}`, 'error');
       }
-    } finally { setSendBusy(false); }
+    } finally { setSendBusy(false); setUploadProgress(null); }
   }, [draft, files, hasContent, canSend, sessionId, modelOverride, mode, onSent, onStatusConflict]);
 
   const onContentSizeChange = (e) => {
