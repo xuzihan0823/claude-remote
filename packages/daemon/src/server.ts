@@ -457,7 +457,9 @@ export class DaemonServer {
     }
     const runId = this.#options.runner.activeRunId(sessionId);
     if (runId === undefined) {
-      this.#json(res, 200, { runId: null, status: "idle" });
+      // 无 daemon run：若被判为 terminal-driving（如上一轮报错后 CLI 收尾写入误判），手动解除占用
+      const released = this.#options.tracker.release(sessionId);
+      this.#json(res, 200, { runId: null, status: released ? "released" : "idle" });
       return;
     }
     this.#options.runner.abort(runId);
