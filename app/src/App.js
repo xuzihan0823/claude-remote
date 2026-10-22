@@ -14,7 +14,10 @@ import {
   baseUrl, BASE_KEY, clearToken, connErrMsg, connHost, loadBases, normalizeBase,
   pendingSessionMessages, probeBase, probeBases, saveBases, saveConn, sessionCache, token, TOKEN_KEY,
 } from '../../web/core/api.js';
+import { api } from '../../web/core/api.js';
 import { bus, toast, useBus } from '../../web/core/bus.js';
+import { candidateBases, currentDeviceId, displayName, getDevice, loadDevices, updateDevice, upsertDevice } from '../../web/core/devices.js';
+import { applyAppearance } from './lib/prefs.js';
 import { ws } from '../../web/core/ws.js';
 import { parseDeepLink } from './lib/deep-link.js';
 import { ConnActions } from './lib/conn-context.js';
@@ -23,7 +26,7 @@ import { useTheme } from './theme.js';
 import { ConnectScreen } from './screens/ConnectScreen.js';
 import { HomeScreen } from './screens/HomeScreen.js';
 import { ChatScreen } from './screens/ChatScreen.js';
-import { SettingsScreen } from './screens/SettingsScreen.js';
+import { SettingsNavigator } from './screens/settings/SettingsNavigator.js';
 import { DrawerContent } from './components/DrawerContent.js';
 import { PairConfirm } from './components/PairConfirm.js';
 import { ApprovalLayer } from './components/ApprovalLayer.js';
@@ -32,7 +35,9 @@ import { ToastLayer } from './components/Toast.js';
 // 原生启动屏只是纯底色（无图标），保持到连接校验结束，再淡出交给首页的芒星绽放动画。
 SplashScreen.preventAutoHideAsync().catch(() => { /* noop */ });
 try { SplashScreen.setOptions({ duration: 200, fade: true }); } catch { /* 旧版本无此 API */ }
-const SPLASH_MAX_MS = 2500; // 网络慢时最多等这么久，之后照常显示「连接中」
+const SPLASH_MAX_MS = 2500;
+applyAppearance(); // 设置里选的浅色 / 深色要在首帧前生效
+loadDevices(); // 旧版单连接数据迁移成设备列表 // 网络慢时最多等这么久，之后照常显示「连接中」
 
 const Stack = createNativeStackNavigator();
 const navigationRef = createNavigationContainerRef();
@@ -47,7 +52,7 @@ function MainStack() {
         component={ChatScreen}
         getId={({ params }) => params?.sessionId}
       />
-      <Stack.Screen name="Settings" component={SettingsScreen} />
+      <Stack.Screen name="Settings" component={SettingsNavigator} options={{ presentation: 'modal' }} />
     </Stack.Navigator>
   );
 }
@@ -94,6 +99,17 @@ export default function App() {
   }, []);
 
   // opts.beforeCommit：探测成功后、切到首页前调用（登录页借此播放「已连接」衔接动画）
+  // 连接成功后记下这台 Mac（设备列表），再异步取主机名 / 版本补全显示信息
+  const rememberDevice = useCallback((bases, base, tok) => {
+    const d = upsertDevice({ bases, base, token: tok });
+    bus.emit('devices');
+    api('/api/health').then((h) => {
+      updateDevice(d.id, { autoName: h?.hostname ? displayName(h.hostname, base) : undefined, info: { version: h?.version, claudeCliVersion: h?.claudeCliVersion } });
+      bus.emit('devices');
+    }).catch(() => { /* 显示信息缺失不影响使用 */ });
+    return d;
+  }, []);
+
   const tryConnect = useCallback(async (base, tok, opts) => {
     setAuth((a) => (a === 'ok' ? 'ok' : 'checking'));
     setAuthErr('');
@@ -102,6 +118,7 @@ export default function App() {
       await probeBase(nextBase, tok);
       if (opts?.beforeCommit) await opts.beforeCommit();
       saveConn(nextBase, tok);
+      rememberDevice([nextBase], nextBase, tok);
       commitConn();
       setAuth('ok');
       ws.stop();
@@ -113,7 +130,7 @@ export default function App() {
       toast(msg, 'error');
       return false;
     }
-  }, [commitConn]);
+  }, [commitConn, rememberDevice]);
 
   const tryConnectBases = useCallback(async (bases, tok, opts) => {
     setAuth((a) => (a === 'ok' ? 'ok' : 'checking'));
@@ -123,6 +140,7 @@ export default function App() {
       if (opts?.beforeCommit) await opts.beforeCommit();
       saveBases(bases);
       saveConn(base, tok);
+      rememberDevice(bases, base, tok);
       commitConn();
       setAuth('ok');
       ws.stop();
@@ -134,11 +152,22 @@ export default function App() {
       toast(msg, 'error');
       return false;
     }
-  }, [commitConn]);
+  }, [commitConn, rememberDevice]);
+
+  // 切到某台已配对设备（设置 → 设备）。成功后整个导航按新连接重挂载。
+  const switchDevice = useCallback(async (id) => {
+    const d = getDevice(id);
+    if (!d) return false;
+    const ok = await tryConnectBases(candidateBases(d), d.token);
+    if (ok) toast(`已切换到 ${getDevice(id)?.name || d.name}`, 'info');
+    return ok;
+  }, [tryConnectBases]);
 
   // 启动自动重连：优先多候选探测（扫码配对存的 bases），退回单地址
   useEffect(() => {
     if (!token) return;
+    const cur = getDevice(currentDeviceId());
+    if (cur && cur.token === token) { tryConnectBases(candidateBases(cur), token); return; }
     const bases = loadBases();
     if (bases.length > 0) tryConnectBases(bases, token);
     else tryConnect(baseUrl, token);
@@ -216,7 +245,7 @@ export default function App() {
       <KeyboardProvider>
         <SafeAreaProvider>
           <BottomSheetModalProvider>
-            <ConnActions.Provider value={{ tryConnect, tryConnectBases }}>
+            <ConnActions.Provider value={{ tryConnect, tryConnectBases, switchDevice }}>
               <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
               {auth !== 'ok' ? (
                 <ConnectScreen busy={auth === 'checking'} error={authErr} onSubmit={tryConnect} onScan={tryConnectBases} />
