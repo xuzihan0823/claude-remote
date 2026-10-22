@@ -693,3 +693,7 @@ input, textarea { font: inherit; color: var(--ink-strong); }
 
 /* 搜索结果定位：命中消息短暂高亮 */
 .focus-hl { border-radius: 12px; background: rgba(217, 119, 87, 0.14); transition: background .6s ease; }
+
+/* 纯文本里自动识别的链接 */
+.auto-link { color: var(--accent, #d97757); text-decoration: underline; word-break: break-all; }
+.md a > code { color: inherit; text-decoration: underline; }

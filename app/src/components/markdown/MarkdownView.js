@@ -2,9 +2,13 @@
 // 用 vendored marked 的 lexer 产 token 树，再 token -> RN 组件递归渲染。
 // 纯函数式：同一 text 重渲染稳定（列表 key 用索引即可）。
 import { useMemo } from 'react';
-import { Linking, ScrollView, Text, View } from 'react-native';
+import { ScrollView, Text, View } from 'react-native';
 import { marked } from '../../../../web/vendor/marked.esm.min.js';
+import { installLinkify, wholeUrl } from '../../../../web/core/linkify.js';
+import { openLink, shareLink } from '../../lib/links.js';
 import { useTheme } from '../../theme.js';
+
+installLinkify(marked);
 
 // 基准字号 / 行高（规格约定）
 const BASE_FS = 17;
@@ -62,11 +66,16 @@ function renderInline(tokens, ctx, keyPrefix) {
           </Text>,
         );
         break;
-      case 'codespan':
+      case 'codespan': {
+        // 反引号里整段是链接（Claude 常写 `http://localhost:3000`）也可点
+        const codeHref = wholeUrl(tok.text);
         out.push(
           <Text
             key={key}
+            onPress={codeHref ? () => openLink(codeHref) : undefined}
+            onLongPress={codeHref ? () => shareLink(codeHref) : undefined}
             style={{
+              ...(codeHref ? { textDecorationLine: 'underline', color: ctx.colors.accent } : null),
               fontFamily: ctx.fonts.mono,
               fontSize: BASE_FS * 0.86,
               backgroundColor: ctx.colors.bubble,
@@ -77,20 +86,20 @@ function renderInline(tokens, ctx, keyPrefix) {
           </Text>,
         );
         break;
+      }
       case 'link':
       case 'image': {
         // image 无原生图片组件，退化为指向图片 URL 的链接（alt 文本作展示）
         const href = tok.href || '';
-        const safe = /^\s*javascript:/i.test(href) ? '#' : href;
         const kids = tok.tokens
           ? renderInline(tok.tokens, ctx, `${key}-`)
           : tok.text || '';
-        const press =
-          !safe || safe === '#' ? undefined : () => Linking.openURL(safe).catch(() => {});
         out.push(
           <Text
             key={key}
-            onPress={press}
+            accessibilityRole="link"
+            onPress={() => openLink(href)}
+            onLongPress={() => shareLink(href)}
             style={{ color: ctx.colors.accent, textDecorationLine: 'underline' }}
           >
             {kids}
@@ -356,7 +365,8 @@ export function MarkdownView({ text }) {
   // lexer 失败退回纯 <Text>；同一 text 稳定（useMemo 仅 memo token 树，渲染每帧用最新 ctx）
   const tokens = useMemo(() => {
     try {
-      return marked.lexer(String(text ?? ''), { gfm: true, breaks: true });
+      // 必须带上 marked.defaults：只传 {gfm, breaks} 会绕过 installLinkify 装的 url 分词器
+      return marked.lexer(String(text ?? ''), { ...marked.defaults, gfm: true, breaks: true });
     } catch {
       return null;
     }

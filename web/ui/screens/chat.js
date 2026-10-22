@@ -8,7 +8,7 @@ import { findFocusIndex, loadUntilSeq } from "../../core/search.js";
 import { useModelCatalog } from "../hooks.js";
 import { cmpMsg, cwdTail, fmtBytes, fmtClock, msgKey, toolSummary, truncate } from "../utils.js";
 import { StatusBadge } from "../components/conn-bar.js";
-import { Markdown } from "../components/markdown.js";
+import { Linkified, Markdown } from "../components/markdown.js";
 import { ModePill, ModeSheet } from "../components/mode-sheet.js";
 import { ModelPicker } from "../components/model-picker.js";
 import { Spark } from "../components/spark.js";
@@ -20,7 +20,7 @@ export function MessageRow({ m }) {
     return html`
       <details class="block thinking">
         <summary><${Spark} cls="blk-spark" />思考过程</summary>
-        <div class="blk-body pre">${m.text}</div>
+        <div class="blk-body pre"><${Linkified} text=${m.text} /></div>
       </details>`;
   }
   if (m.kind === 'tool_use') {
@@ -35,7 +35,7 @@ export function MessageRow({ m }) {
     return html`
       <details class="block tool-result ${m.isError ? 'is-err' : ''}">
         <summary><span class="blk-ico">${m.isError ? '✕' : '✓'}</span>${m.isError ? '工具出错' : '工具结果'}<span class="blk-sub">${chars} 字符</span></summary>
-        <div class="blk-body pre mono">${m.text}</div>
+        <div class="blk-body pre mono"><${Linkified} text=${m.text} /></div>
       </details>`;
   }
   // kind === text
@@ -43,7 +43,7 @@ export function MessageRow({ m }) {
     return html`
       <div class="msg user">
         <span class="avatar user-avatar">我</span>
-        <div class="bubble">${m.text}</div>
+        <div class="bubble"><${Linkified} text=${m.text} /></div>
         <div class="msg-time">${fmtClock(m.timestamp)}</div>
       </div>`;
   }
