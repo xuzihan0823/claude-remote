@@ -149,6 +149,10 @@ input, textarea { font: inherit; color: var(--ink-strong); }
   padding: 12px 20px 4px; font-size: 12px; color: var(--ink-2);
   border-top: 1px solid var(--line); margin-top: 4px;
 }
+.side-search { padding: 4px 14px 8px; }
+.side-search input { width: 100%; box-sizing: border-box; height: 34px; border-radius: 10px; border: 1px solid var(--line, transparent); background: var(--card-hover, rgba(0,0,0,.04)); color: var(--ink-strong); padding: 0 10px; font-size: 14px; outline: none; }
+.session-item .snippet { font-size: 12px; color: var(--ink-2); margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.session-item mark { background: none; color: var(--accent, #D97757); font-weight: 600; }
 .side-scroll { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 2px 10px 10px; overscroll-behavior: contain; }
 
 .session-list { list-style: none; margin: 0; padding: 0; }
