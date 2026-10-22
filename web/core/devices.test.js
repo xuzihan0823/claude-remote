@@ -69,3 +69,28 @@ test('candidateBases 上次连通的地址优先；displayName 去掉 .local', (
   assert.equal(D.displayName('Example-MacBook-Pro.local', 'http://a:1'), 'Example-MacBook-Pro');
   assert.equal(D.displayName('', 'http://100.1.1.1:8787'), '100.1.1.1:8787');
 });
+
+test('removeDeviceAction：非当前 / 切到下一台 / 删光登出', () => {
+  const a = D.upsertDevice({ base: 'http://a:1', token: 't1' });
+  const b = D.upsertDevice({ base: 'http://b:1', token: 't2' });
+  const c = D.upsertDevice({ base: 'http://c:1', token: 't3' });
+  assert.deepEqual(D.removeDeviceAction(a.id), { type: 'none' });
+  assert.equal(D.currentDeviceId(), c.id, '删别的设备不影响当前');
+  assert.deepEqual(D.removeDeviceAction(c.id), { type: 'switch', id: b.id });
+  assert.deepEqual(D.removeDeviceAction(b.id), { type: 'logout' });
+  assert.deepEqual(D.loadDevices(), []);
+});
+
+test('updateDevice：地址去重规范化，未知 id 返回 null', () => {
+  const a = D.upsertDevice({ base: 'http://a:1', token: 't' });
+  D.updateDevice(a.id, { bases: ['a:1', 'http://a:1/', 'http://b:2'] });
+  assert.deepEqual(D.getDevice(a.id).bases, ['http://a:1', 'http://b:2']);
+  assert.equal(D.updateDevice('nope', { name: 'x' }), null);
+});
+
+test('存储损坏时不崩溃，按空列表处理', () => {
+  values.set('bridge_devices', '{oops');
+  assert.deepEqual(D.loadDevices(), []);
+  values.set('bridge_devices', JSON.stringify([{ id: 'x', bases: ['http://a:1'], token: 't' }, { bad: 1 }, null]));
+  assert.deepEqual(D.loadDevices().map((d) => d.id), ['x']);
+});
