@@ -1,13 +1,13 @@
 import { useCallback, useRef, useState } from 'react';
 import { Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { api } from '../../../../web/core/api.js';
 import { toast } from '../../../../web/core/bus.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useTheme } from '../../theme.js';
 import { Icon } from '../Icon.js';
 import { ComposerActions } from './ComposerActions.js';
+import { KeyboardLift } from './KeyboardLift.js';
 import { ComposerCard } from './ComposerCard.js';
 import { AttachmentChips } from './AttachmentChips.js';
 import { AttachmentPicker } from './AttachmentPicker.js';
@@ -118,17 +118,13 @@ export function ChatComposer({
 
   const removeFile = (i) => setFiles((xs) => xs.filter((_, idx) => idx !== i));
 
-  // 底部安全区间距必须放在 KAV 的子层：KAV(behavior=padding) 的动画样式排在 style 之后，
-  // 会整体覆盖 paddingBottom——写在 KAV 自身上时键盘收起（progress=0）就被清零，输入框贴住 home indicator。
-  // keyboardVerticalOffset=-padBottom 抵消内层静态间距，使键盘打开时总间距仍恰好等于键盘高度。
-  // automaticOffset：让 KAV 用原生窗口坐标算自身位置（默认用相对父容器的 onLayout.y≈0，会算出抬升 0）。
+  // 底部安全区间距必须放在 KeyboardLift 的子层：它的动画 paddingBottom 排在 style 之后会整体覆盖，
+  // 写在外层时键盘收起（padding=0）输入框就贴住 home indicator。innerPad 在键盘打开时扣掉这段间距。
   const padBottom = Math.max(insets.bottom, 8);
 
   return (
-    <KeyboardAvoidingView
-      behavior="padding"
-      automaticOffset
-      keyboardVerticalOffset={-padBottom}
+    <KeyboardLift
+      innerPad={padBottom}
       style={{ paddingLeft: Math.max(insets.left, 16), paddingRight: Math.max(insets.right, 16), paddingTop: 8 }}
     >
       <View style={{ paddingBottom: padBottom }}>
@@ -211,6 +207,6 @@ export function ChatComposer({
         />
       </ComposerCard>
       </View>
-    </KeyboardAvoidingView>
+    </KeyboardLift>
   );
 }
