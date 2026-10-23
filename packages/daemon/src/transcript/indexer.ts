@@ -71,7 +71,13 @@ function previewText(o: Record<string, unknown>): string {
 interface HeadInfo {
   cwd: string;
   title: string;
+  /** 发起该会话的客户端（取首个带 cwd 的行上的 entrypoint）；旧版本无此字段时为 ""。 */
+  entrypoint: string;
 }
+
+// 官方登录的 Claude 桌面端会话：手机端走第三方供应商，不应列出也不应接管这些会话。
+// 第三方模式的桌面端是 "claude-desktop-3p"，与 CLI 一样保留。
+const HIDDEN_ENTRYPOINTS = new Set(["claude-desktop"]);
 
 /** 头部流式扫：cwd 取首个带 cwd 字段的行；title 取首条真实 user 文本。拿齐即停。 */
 async function scanHead(filePath: string): Promise<HeadInfo> {
@@ -79,6 +85,7 @@ async function scanHead(filePath: string): Promise<HeadInfo> {
   const lines = createInterface({ input: stream, crlfDelay: Infinity });
   let cwd = "";
   let title = "";
+  let entrypoint = "";
   try {
     for await (const line of lines) {
       const trimmed = line.trim();
@@ -90,7 +97,10 @@ async function scanHead(filePath: string): Promise<HeadInfo> {
         continue;
       }
       if (!isRecord(o)) continue;
-      if (cwd === "" && typeof o.cwd === "string" && o.cwd !== "") cwd = o.cwd;
+      if (cwd === "" && typeof o.cwd === "string" && o.cwd !== "") {
+        cwd = o.cwd;
+        if (typeof o.entrypoint === "string") entrypoint = o.entrypoint;
+      }
       if (title === "") {
         const text = realUserText(o);
         if (text !== "") title = toSingleLineTruncated(text, TITLE_MAX_CHARS);
@@ -101,7 +111,7 @@ async function scanHead(filePath: string): Promise<HeadInfo> {
     lines.close();
     stream.destroy();
   }
-  return { cwd, title };
+  return { cwd, title, entrypoint };
 }
 
 /** 尾部块读最后一条非 sidechain、非 isMeta 的 user/assistant 行，提取预览文本。 */
@@ -142,7 +152,7 @@ async function scanLastPreview(filePath: string, fileSize: number): Promise<stri
 }
 
 /**
- * 列出 projectsDir 下所有会话摘要，按 lastActiveAt 降序。
+ * 列出 projectsDir 下所有会话摘要（跳过官方桌面端会话），按 lastActiveAt 降序。
  * 目录不存在返回空数组；status 本卡固定 "idle"（真实状态由 03 卡覆盖）。
  */
 export async function listSessions(projectsDir: string): Promise<SessionSummary[]> {
@@ -170,6 +180,7 @@ export async function listSessions(projectsDir: string): Promise<SessionSummary[
       try {
         const stats = await stat(filePath);
         const head = await scanHead(filePath);
+        if (HIDDEN_ENTRYPOINTS.has(head.entrypoint)) continue;
         const lastPreview = await scanLastPreview(filePath, stats.size);
         summaries.push({
           sessionId: file.name.slice(0, -".jsonl".length),

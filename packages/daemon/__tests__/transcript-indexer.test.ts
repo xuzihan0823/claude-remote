@@ -114,3 +114,25 @@ test("long titles truncate at 60 chars with ellipsis; skips tool_result-only and
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("official Claude Desktop sessions are hidden; 3p desktop and CLI sessions stay", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "claude-remote-idx-"));
+  try {
+    const projectDir = join(dir, "-tmp-proj");
+    await mkdir(projectDir);
+    const session = (entrypoint: string) => [
+      JSON.stringify({ type: "user", uuid: "u1", cwd: "/tmp/proj", entrypoint, message: { role: "user", content: `来自 ${entrypoint}` } }),
+      // 后续行在其他客户端继续：以发起方为准
+      JSON.stringify({ type: "user", uuid: "u2", cwd: "/tmp/proj", entrypoint: "claude-remote", message: { role: "user", content: "继续" } }),
+    ].join("\n");
+    await writeFile(join(projectDir, "official.jsonl"), session("claude-desktop"));
+    await writeFile(join(projectDir, "desktop3p.jsonl"), session("claude-desktop-3p"));
+    await writeFile(join(projectDir, "cli.jsonl"), session("cli"));
+    await writeFile(join(projectDir, "legacy.jsonl"), JSON.stringify({ type: "user", uuid: "u1", cwd: "/tmp/proj", message: { role: "user", content: "旧版无 entrypoint" } }));
+
+    const ids = (await listSessions(dir)).map((s) => s.sessionId).sort();
+    assert.deepEqual(ids, ["cli", "desktop3p", "legacy"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
