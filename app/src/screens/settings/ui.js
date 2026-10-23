@@ -18,7 +18,7 @@ export function sheetBg(colors, dark) { return dark ? colors.bg2 : colors.bg; }
 export function GlassButton({ icon, onPress, label, disabled }) {
   const { colors } = useTheme();
   return (
-    <GlassSurface interactive variant="pill" style={{ borderRadius: 22 }}>
+    <GlassSurface interactive variant="pill" style={{ width: 44, height: 44, borderRadius: 22 }}>
       <Pressable
         onPress={onPress}
         disabled={disabled}

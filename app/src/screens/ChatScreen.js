@@ -281,16 +281,9 @@ export function ChatScreen({ route }) {
   const listHeader = (
     <View>
       {pending ? (
-        <View style={{ flexDirection: 'row', marginVertical: 6, gap: 8, opacity: 0.65 }}>
-          <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: colors.bubble, alignItems: 'center', justifyContent: 'center', marginTop: 2 }}>
-            <Text style={{ fontSize: 11, color: colors.ink }}>我</Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <View style={{ backgroundColor: colors.bubble, borderRadius: 18, borderTopLeftRadius: 8, paddingHorizontal: 12, paddingVertical: 8, alignSelf: 'flex-start' }}>
-              <Text style={{ color: colors.inkStrong, fontSize: 15, lineHeight: 22 }}>{pending}</Text>
-            </View>
-            <Text style={{ color: colors.ink3, fontSize: 11, marginTop: 2 }}>发送中…</Text>
-          </View>
+        <View style={{ opacity: 0.65 }}>
+          <MessageRow m={{ role: 'user', text: pending }} />
+          <Text style={{ color: colors.ink3, fontSize: 11, textAlign: 'right', marginTop: -16, marginBottom: 12, marginRight: 4 }}>发送中…</Text>
         </View>
       ) : null}
       {drafts.map((d) => (

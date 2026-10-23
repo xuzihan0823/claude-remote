@@ -68,7 +68,7 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
     // process.env ourselves. Overriding CLAUDE_CODE_ENTRYPOINT to "claude-remote"
     // keeps the session visible in the Mac terminal's /resume list (CLI hides
     // sessions whose entrypoint ∈ {sdk-cli, sdk-ts, sdk-py}).
-    env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: "claude-remote" } as Record<string, string>,
+    env: { ...withoutHostAuth(process.env), CLAUDE_CODE_ENTRYPOINT: "claude-remote" } as Record<string, string>,
     // CLAUDE_BIN：GUI 壳 app 的子进程没有 shell PATH，由壳注入显式 claude 路径（docs/mac-app-plan.md §2.2）
     ...(process.env.CLAUDE_BIN ? { pathToClaudeCodeExecutable: process.env.CLAUDE_BIN } : {}),
     ...(options.resume === undefined ? {} : { resume: options.resume }),
@@ -89,6 +89,16 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
       sdkQuery.close();
     },
   };
+}
+
+// daemon 若从 Claude 桌面端会话里启动，会继承这些"凭据由宿主托管"的标记；
+// claude 子进程看到它们就会忽略 ~/.claude/settings.json 里的凭据，等宿主下发，而 daemon 不提供 → "Not logged in"。
+const HOST_AUTH_ENV = ["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "CLAUDE_CODE_HOST_AUTH_ENV_VAR", "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH"];
+
+function withoutHostAuth(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const copy = { ...env };
+  for (const key of HOST_AUTH_ENV) delete copy[key];
+  return copy;
 }
 
 function userMessage(prompt: string): SDKUserMessage {

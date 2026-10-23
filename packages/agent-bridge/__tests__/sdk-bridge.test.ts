@@ -96,6 +96,25 @@ test("env overrides CLAUDE_CODE_ENTRYPOINT to claude-remote while inheriting pro
   handle.close();
 });
 
+test("env drops host-managed auth markers inherited from a Claude desktop session", () => {
+  const keys = ["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "CLAUDE_CODE_HOST_AUTH_ENV_VAR", "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH"];
+  const previous = keys.map((k) => process.env[k]);
+  try {
+    for (const k of keys) process.env[k] = "1";
+    const fake = fakeQuery();
+    const handle = options(fake.factory, {});
+    const env = (fake.params()?.options as Record<string, unknown>).env as Record<string, string>;
+    for (const k of keys) assert.equal(Object.hasOwn(env, k), false, `${k} should be removed`);
+    assert.ok(env.PATH, "other env must still be inherited");
+    handle.close();
+  } finally {
+    keys.forEach((k, i) => {
+      if (previous[i] === undefined) delete process.env[k];
+      else process.env[k] = previous[i];
+    });
+  }
+});
+
 test("CLAUDE_BIN set injects pathToClaudeCodeExecutable; unset omits it", () => {
   const previous = process.env.CLAUDE_BIN;
   try {
