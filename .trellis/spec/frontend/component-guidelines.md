@@ -75,10 +75,12 @@ Questions to answer:
   have a label, button role, and at least a 44pt touch area.
 - `ComposerActions` uses two rows below 360pt or above font scale 1.3. Long model
   names may truncate visually but retain their full accessibility label.
-- Keep composer bottom safe-area padding inside `KeyboardAvoidingView` and
-  preserve `automaticOffset` with `keyboardVerticalOffset={-padBottom}`. The
-  keyboard controller owns its animated padding; parent padding is not a safe
-  substitute.
+- Bottom-anchored composers use `KeyboardLift({ innerPad })`, which pads by the
+  keyboard height directly. Do not use `KeyboardAvoidingView` for them: even with
+  `automaticOffset` it measures its window position once per layout, and a bad
+  measurement during cold start or the intro animation leaves the composer
+  hidden behind the keyboard. Keep the safe-area padding in a child view and pass
+  the same value as `innerPad`.
 - Expo SDK 57 native modules require CocoaPods sync and a native rebuild.
   `NODE_PATH="$PWD/node_modules" npx expo export --platform ios` from `app/`
   validates the Hermes bundle with the repository's monorepo Metro root. Set

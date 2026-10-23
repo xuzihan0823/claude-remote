@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { createSession } from '../../lib/create-session.js';
 import { tooLargeMessage } from '../../lib/attachments.js';
 import { getPref } from '../../lib/prefs.js';
@@ -11,6 +10,7 @@ import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useTheme } from '../../theme.js';
 import { Icon } from '../Icon.js';
 import { ComposerActions } from './ComposerActions.js';
+import { KeyboardLift } from './KeyboardLift.js';
 import { ComposerCard } from './ComposerCard.js';
 import { AttachmentChips } from './AttachmentChips.js';
 import { AttachmentPicker } from './AttachmentPicker.js';
@@ -68,16 +68,12 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
     create();
   };
 
-  // 见 ChatComposer 同处注释：安全区间距放子层，避免被 KAV 动画样式在键盘收起时清零。
-  // automaticOffset 必开：KAV 默认拿 onLayout 的 y（相对父容器≈0）当屏幕坐标，
-  // 停在屏幕底部的 composer 会被算成"离键盘很远"而抬升 0（真机被键盘整个盖住）。
+  // 见 ChatComposer 同处注释：安全区间距放子层，避免被 KeyboardLift 的动画 padding 覆盖。
   const padBottom = Math.max(insets.bottom, 12);
 
   return (
-    <KeyboardAvoidingView
-      behavior="padding"
-      automaticOffset
-      keyboardVerticalOffset={-padBottom}
+    <KeyboardLift
+      innerPad={padBottom}
       style={{ paddingLeft: Math.max(insets.left, 16), paddingRight: Math.max(insets.right, 16), paddingTop: 8 }}
     >
       <View style={{ paddingBottom: padBottom }}>
@@ -135,6 +131,6 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
         </Text>
       ) : null}
       </View>
-    </KeyboardAvoidingView>
+    </KeyboardLift>
   );
 }
