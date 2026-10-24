@@ -261,7 +261,7 @@ export function ChatScreen({ route }) {
           data={msgsDesc}
           inverted
           keyExtractor={(m) => msgKey(m)}
-          renderItem={({ item }) => <MessageRow m={item} />}
+          renderItem={({ item }) => <MessageRow m={item} sessionId={sessionId} />}
           maintainVisibleContentPosition={{ minIndexForVisible: 1, autoscrollToTopThreshold: 100 }}
           onEndReached={loadOlder}
           onEndReachedThreshold={0.6}

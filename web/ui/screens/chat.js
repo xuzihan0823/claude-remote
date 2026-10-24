@@ -10,7 +10,7 @@ import { Markdown } from "../components/markdown.js";
 import { ModePill, ModeSheet } from "../components/mode-sheet.js";
 import { ModelPicker } from "../components/model-picker.js";
 import { Spark } from "../components/spark.js";
-export function MessageRow({ m }) {
+export function MessageRow({ m, sessionId }) {
   if (m.kind === 'meta') {
     return html`<div class="msg-meta">· ${m.rawType || 'meta'} ·</div>`;
   }
@@ -49,7 +49,7 @@ export function MessageRow({ m }) {
     <div class="msg assistant">
       <span class="avatar ai-avatar"><${Spark} /></span>
       <div class="msg-body">
-        <${Markdown} text=${m.text} />
+        <${Markdown} text=${m.text} sessionId=${sessionId} />
         <div class="msg-time">${fmtClock(m.timestamp)}</div>
       </div>
     </div>`;
@@ -354,7 +354,7 @@ export function Chat({ sessionId, goList }) {
           ${initLoading && html`<div class="empty">加载中…</div>`}
           ${loadErr && html`<div class="page-err">${loadErr}</div>`}
           ${!initLoading && !loadErr && msgs.length === 0 && html`<div class="empty">（空会话）</div>`}
-          ${msgs.map((m) => html`<${MessageRow} key=${msgKey(m)} m=${m} />`)}
+          ${msgs.map((m) => html`<${MessageRow} key=${msgKey(m)} m=${m} sessionId=${sessionId} />`)}
           ${pending && html`
             <div class="msg user pending">
               <span class="avatar user-avatar">我</span>

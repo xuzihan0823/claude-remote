@@ -17,6 +17,7 @@
     "expo-linking": "~57.0.4",
     "expo-splash-screen": "~57.0.5",
     "expo-status-bar": "~57.0.1",
+    "mathjax-full": "3.2.2",
     "react": "19.2.3",
     "react-native": "0.86.0",
     "react-native-gesture-handler": "~2.32.0",

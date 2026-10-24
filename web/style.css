@@ -369,6 +369,19 @@ input, textarea { font: inherit; color: var(--ink-strong); }
 .md code { font-family: var(--mono); font-size: .86em; background: var(--bg-2); padding: .12em .38em; border-radius: 5px; }
 .md pre { background: #f4f1e9; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; overflow-x: auto; }
 .md pre code { background: none; padding: 0; font-size: .84em; }
+.md .hl-comment { color: #6e7781; font-style: italic; } .md .hl-string { color: #0a3069; } .md .hl-number, .md .hl-literal, .md .hl-attr { color: #0550ae; }
+.md .hl-keyword { color: #cf222e; } .md .hl-type { color: #953800; } .md .hl-func, .md .hl-meta { color: #8250df; } .md .hl-tag, .md .hl-add { color: #116329; } .md .hl-del { color: #82071e; }
+.md .hl-add { background: rgba(46,160,67,.12); } .md .hl-del { background: rgba(248,81,73,.12); }
+@media (prefers-color-scheme: dark) {
+  .md .hl-comment { color: #768390; } .md .hl-string { color: #96d0ff; } .md .hl-number, .md .hl-literal, .md .hl-attr { color: #6cb6ff; }
+  .md .hl-keyword { color: #f47067; } .md .hl-type { color: #f69d50; } .md .hl-func, .md .hl-meta { color: #dcbdfb; } .md .hl-tag, .md .hl-add { color: #8ddb8c; } .md .hl-del { color: #ff938a; }
+}
+.md .math-display { margin: .7em 0; overflow-x: auto; overflow-y: hidden; text-align: center; }
+.md .math:not([data-done]) { font-family: var(--mono); font-size: .86em; color: var(--ink-2, inherit); }
+.md .katex { font-size: 1.08em; }
+.md img.md-img { display: block; max-width: 100%; max-height: 420px; height: auto; margin: .6em 0; border-radius: 10px; border: 1px solid var(--line); cursor: zoom-in; background: var(--bg-2); }
+.md img.md-img:not([src]) { width: 160px; height: 100px; }
+.md img.md-img-err { width: auto; height: auto; min-height: 0; padding: 6px 10px; font-size: .86em; color: var(--ink-2, inherit); cursor: default; }
 .md blockquote { margin: .6em 0; padding: .1em .9em; border-left: 3px solid var(--line); color: var(--ink-2); }
 .md ul, .md ol { padding-left: 1.4em; margin: .5em 0; }
 .md table { border-collapse: collapse; font-size: .92em; }

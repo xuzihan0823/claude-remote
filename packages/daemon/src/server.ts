@@ -14,7 +14,7 @@ import { mkdir, stat, writeFile } from "node:fs/promises";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
-import { basename, extname, join, normalize, resolve, sep } from "node:path";
+import { basename, extname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -40,7 +40,22 @@ const MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
   ".map": "application/json",
+  ".woff2": "font/woff2",
 };
+
+/** 回复里引用的本机图片（![](/abs/x.png)、相对会话 cwd 的路径）经 /file 端点取回；只放行图片。 */
+const IMAGE_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".svg": "image/svg+xml",
+  ".heic": "image/heic",
+  ".avif": "image/avif",
+};
+const IMAGE_LIMIT_BYTES = 30 * 1024 * 1024;
 
 const BODY_LIMIT_BYTES = 1024 * 1024;
 const UPLOAD_LIMIT_BYTES = 25 * 1024 * 1024;
@@ -278,6 +293,12 @@ export class DaemonServer {
       return;
     }
 
+    const fileMatch = /^\/api\/sessions\/([^/]+)\/file$/.exec(path);
+    if (fileMatch !== null && (method === "GET" || method === "HEAD")) {
+      await this.#handleSessionImage(req, res, url, decodeURIComponent(fileMatch[1] ?? ""));
+      return;
+    }
+
     const decisionMatch = /^\/api\/interactions\/([^/]+)\/decision$/.exec(path);
     if (decisionMatch !== null && method === "POST") {
       await this.#handleDecision(req, res, decodeURIComponent(decisionMatch[1] ?? ""));
@@ -424,6 +445,71 @@ export class DaemonServer {
     }
     this.#options.runner.abort(runId);
     this.#json(res, 200, { runId, status: "aborted" });
+  }
+
+  /**
+   * GET /api/sessions/:id/file?path=… —— 取回回复里引用的本机图片。
+   * path 可为绝对路径、~/ 开头或相对会话 cwd；file:// 前缀会剥掉。只放行图片扩展名且 ≤30MB。
+   * 持 token 者本就能让 Claude 读任意文件，这里不额外限目录，但不做目录列举、不跟非图片。
+   */
+  async #handleSessionImage(req: IncomingMessage, res: ServerResponse, url: URL, sessionId: string): Promise<void> {
+    let raw = url.searchParams.get("path") ?? "";
+    if (raw.startsWith("file://")) {
+      try { raw = decodeURIComponent(new URL(raw).pathname); } catch { raw = ""; }
+    }
+    if (raw === "" || raw.includes("\0")) {
+      this.#json(res, 400, { error: "invalid_path" });
+      return;
+    }
+    const mime = IMAGE_MIME[extname(raw).toLowerCase()];
+    if (mime === undefined) {
+      this.#json(res, 415, { error: "not_an_image" });
+      return;
+    }
+    let target: string;
+    if (raw.startsWith("~/")) target = join(homedir(), raw.slice(2));
+    else if (isAbsolute(raw)) target = normalize(raw);
+    else {
+      let file: string;
+      try {
+        file = await resolveSessionFile(this.#options.config.projectsDir, sessionId);
+      } catch (error) {
+        if (isEnoent(error)) {
+          this.#json(res, 404, { error: "session_not_found" });
+          return;
+        }
+        throw error;
+      }
+      target = resolve((await readSessionCwd(file)) || homedir(), raw);
+    }
+    let info;
+    try {
+      info = await stat(target);
+    } catch {
+      this.#json(res, 404, { error: "file_not_found" });
+      return;
+    }
+    if (!info.isFile()) {
+      this.#json(res, 404, { error: "file_not_found" });
+      return;
+    }
+    if (info.size > IMAGE_LIMIT_BYTES) {
+      this.#json(res, 413, { error: "too_large" });
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": mime,
+      "Content-Length": String(info.size),
+      "Cache-Control": "private, max-age=300",
+      // svg 可能带脚本：禁止执行，只当图片看
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+      "X-Content-Type-Options": "nosniff",
+    });
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+    createReadStream(target).pipe(res);
   }
 
   async #handleGetMessages(res: ServerResponse, url: URL, sessionId: string): Promise<void> {

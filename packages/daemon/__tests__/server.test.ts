@@ -301,6 +301,44 @@ test("POST upload：落盘到 uploadsDir/sessionId、文件名消毒；空体 40
   assert.equal(missing.status, 404);
 });
 
+test("GET file：取回会话引用的图片（绝对路径 / 相对 cwd / file://）；非图片 415；不存在 404；需鉴权", async (t) => {
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+  const dir = await mkdtemp(join(tmpdir(), "cr-img-"));
+  await mkdir(SESSION_CWD, { recursive: true });
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true });
+    await rm(join(SESSION_CWD, "out"), { recursive: true, force: true });
+  });
+  await writeFile(join(dir, "a.png"), png);
+  await writeFile(join(dir, "secret.txt"), "nope");
+  await mkdir(join(SESSION_CWD, "out"), { recursive: true });
+  await writeFile(join(SESSION_CWD, "out", "chart.PNG"), png);
+  const get = (p: string, init: RequestInit = authed()) =>
+    fetch(`${harness.base}/api/sessions/${SESSION_ID}/file?path=${encodeURIComponent(p)}`, init);
+
+  const abs = await get(join(dir, "a.png"));
+  assert.equal(abs.status, 200);
+  assert.equal(abs.headers.get("content-type"), "image/png");
+  assert.match(abs.headers.get("content-security-policy") ?? "", /sandbox/);
+  assert.deepEqual(Buffer.from(await abs.arrayBuffer()), png);
+
+  const rel = await get("out/chart.PNG");
+  assert.equal(rel.status, 200);
+  assert.deepEqual(Buffer.from(await rel.arrayBuffer()), png);
+
+  const fileUrl = await get(`file://${join(dir, "a.png")}`);
+  assert.equal(fileUrl.status, 200);
+  await fileUrl.arrayBuffer();
+
+  assert.equal((await get(join(dir, "secret.txt"))).status, 415);
+  assert.equal((await get(join(dir, "missing.png"))).status, 404);
+  assert.equal((await get(dir + "/")).status, 415);
+  assert.equal((await get("")).status, 400);
+  assert.equal((await get(join(dir, "a.png"), {})).status, 401);
+  const unknown = await fetch(`${harness.base}/api/sessions/nope/file?path=x.png`, authed());
+  assert.equal(unknown.status, 404);
+});
+
 test("GET /api/sessions：fixture 会话 + 状态覆盖 + 分页 total", async () => {
   const res = await fetch(`${harness.base}/api/sessions?limit=10`, authed());
   assert.equal(res.status, 200);

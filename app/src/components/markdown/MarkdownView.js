@@ -4,7 +4,13 @@
 import { useMemo } from 'react';
 import { Linking, ScrollView, Text, View } from 'react-native';
 import { marked } from '../../../../web/vendor/marked.esm.min.js';
+import { HL_COLORS, highlight, normalizeLang } from '../../../../web/core/highlight.js';
+import { installMath } from '../../../../web/core/md-math.js';
 import { useTheme } from '../../theme.js';
+import { MathView } from './MathView.js';
+import { MdImage } from './MdImage.js';
+
+installMath(marked);
 
 // 基准字号 / 行高（规格约定）
 const BASE_FS = 17;
@@ -77,9 +83,13 @@ function renderInline(tokens, ctx, keyPrefix) {
           </Text>,
         );
         break;
-      case 'link':
-      case 'image': {
-        // image 无原生图片组件，退化为指向图片 URL 的链接（alt 文本作展示）
+      case 'math':
+        out.push(<MathView key={key} tex={tok.text} display={false} ctx={ctx} fontSize={BASE_FS} />);
+        break;
+      case 'image':
+        out.push(<MdImage key={key} href={tok.href} alt={tok.text} sessionId={ctx.sessionId} ctx={ctx} inline />);
+        break;
+      case 'link': {
         const href = tok.href || '';
         const safe = /^\s*javascript:/i.test(href) ? '#' : href;
         const kids = tok.tokens
@@ -158,11 +168,39 @@ function renderCode(tok, ctx, key) {
             color: ctx.colors.ink,
           }}
         >
-          {tok.text || ''}
+          {renderHighlighted(tok, ctx)}
         </Text>
       </ScrollView>
     </View>
   );
+}
+
+// 代码语法高亮（共用 web/core/highlight.js），plain 片段沿用代码块正文色
+function renderHighlighted(tok, ctx) {
+  const lang = normalizeLang(tok.lang);
+  if (!lang) return tok.text || '';
+  const pal = HL_COLORS[ctx.dark ? 'dark' : 'light'];
+  return highlight(tok.text || '', lang).map((p, i) => (p.k === 'plain'
+    ? p.t
+    : (
+      <Text
+        key={i}
+        style={{
+          color: pal[p.k],
+          fontStyle: p.k === 'comment' ? 'italic' : undefined,
+          backgroundColor: p.k === 'add' ? 'rgba(46,160,67,0.14)' : p.k === 'del' ? 'rgba(248,81,73,0.14)' : undefined,
+        }}
+      >
+        {p.t}
+      </Text>
+    )));
+}
+
+// 段落只有图片（常见的 ![](x) 独占一行）时按块级显示，宽度撑满
+function imageOnly(tokens) {
+  if (!Array.isArray(tokens) || !tokens.some((t) => t.type === 'image')) return null;
+  const ok = tokens.every((t) => t.type === 'image' || t.type === 'br' || (t.type === 'text' && !String(t.text).trim()));
+  return ok ? tokens.filter((t) => t.type === 'image') : null;
 }
 
 function renderBlockquote(tok, ctx, key) {
@@ -293,7 +331,17 @@ function renderBlock(tok, ctx, key) {
       );
     case 'heading':
       return renderHeading(tok, ctx, key);
-    case 'paragraph':
+    case 'math':
+      return <MathView key={key} tex={tok.text} display ctx={ctx} fontSize={BASE_FS} />;
+    case 'paragraph': {
+      const imgs = imageOnly(tok.tokens);
+      if (imgs) {
+        return (
+          <View key={key} style={{ marginVertical: 2 }}>
+            {imgs.map((t, i) => <MdImage key={i} href={t.href} alt={t.text} sessionId={ctx.sessionId} ctx={ctx} />)}
+          </View>
+        );
+      }
       return (
         <Text
           key={key}
@@ -302,6 +350,7 @@ function renderBlock(tok, ctx, key) {
           {renderInline(tok.tokens, ctx, `${key}-`)}
         </Text>
       );
+    }
     case 'code':
       return renderCode(tok, ctx, key);
     case 'blockquote':
@@ -349,14 +398,15 @@ function renderBlocks(tokens, ctx, keyPrefix = '') {
   return tokens.map((tok, i) => renderBlock(tok, ctx, `${keyPrefix}${i}`));
 }
 
-export function MarkdownView({ text }) {
-  const { colors, fonts, radius } = useTheme();
-  const ctx = { colors, fonts, radius };
+export function MarkdownView({ text, sessionId }) {
+  const { colors, fonts, radius, dark } = useTheme();
+  const ctx = { colors, fonts, radius, dark, sessionId };
 
   // lexer 失败退回纯 <Text>；同一 text 稳定（useMemo 仅 memo token 树，渲染每帧用最新 ctx）
   const tokens = useMemo(() => {
     try {
-      return marked.lexer(String(text ?? ''), { gfm: true, breaks: true });
+      // 必须带上 marked.defaults：只传 {gfm, breaks} 会丢掉 installMath 注册的扩展
+      return marked.lexer(String(text ?? ''), { ...marked.defaults, gfm: true, breaks: true });
     } catch {
       return null;
     }

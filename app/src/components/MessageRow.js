@@ -52,7 +52,7 @@ function MonoBody({ text, err }) {
   );
 }
 
-export function MessageRow({ m }) {
+export function MessageRow({ m, sessionId }) {
   const { colors } = useTheme();
 
   if (m.kind === 'meta') {
@@ -101,7 +101,7 @@ export function MessageRow({ m }) {
   }
   return (
     <View style={{ marginTop: 8, marginBottom: 20 }}>
-      <MarkdownView text={m.text} />
+      <MarkdownView text={m.text} sessionId={sessionId} />
       <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
         <TouchableOpacity accessibilityRole="button" accessibilityLabel="分享回复"
           onPress={() => Share.share({ message: m.text || '' }).catch(() => {})}
