@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import Animated, {
   cancelAnimation, Easing, runOnJS, useAnimatedProps, useAnimatedStyle, useSharedValue,
-  withRepeat, withSequence, withTiming,
+  withDelay, withRepeat, withSequence, withTiming,
 } from 'react-native-reanimated';
 import Svg, { Circle, Path } from 'react-native-svg';
 import { useTheme } from '../theme.js';
@@ -104,7 +104,7 @@ function AnimHub({ t, fill }) {
   return <AnimatedCircle cx={C} cy={C} fill={fill} animatedProps={props} />;
 }
 
-export function BloomSpark({ size = 48, color, style, play = false, busy = false, shake = 0, glideFrom = null, onDone }) {
+export function BloomSpark({ size = 48, color, style, play = false, delay = 0, busy = false, shake = 0, glideFrom = null, onDone }) {
   const { colors } = useTheme();
   const fill = color ?? colors.accent;
   const ref = useRef(null);
@@ -118,9 +118,9 @@ export function BloomSpark({ size = 48, color, style, play = false, busy = false
 
   useEffect(() => {
     if (!play) return;
-    t.value = withTiming(BLOOM_MS, { duration: BLOOM_MS, easing: Easing.linear }, (finished) => {
+    t.value = withDelay(delay, withTiming(BLOOM_MS, { duration: BLOOM_MS, easing: Easing.linear }, (finished) => {
       if (finished && onDone) runOnJS(onDone)();
-    });
+    }));
   }, [play]);
 
   useEffect(() => {

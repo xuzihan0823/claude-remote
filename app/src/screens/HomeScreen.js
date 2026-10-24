@@ -15,7 +15,7 @@ import { ProjectPicker } from '../components/ProjectPicker.js';
 import { useReducedMotion } from 'react-native-reanimated';
 import { BloomSpark } from '../components/Spark.js';
 import { FadeIn } from '../components/FadeIn.js';
-import { takeHandoff, takeIntro } from '../lib/intro.js';
+import { introDelay, takeHandoff, takeIntro } from '../lib/intro.js';
 import { NewChatComposer } from '../components/composer/NewChatComposer.js';
 import { useTheme } from '../theme.js';
 
@@ -34,7 +34,8 @@ export function HomeScreen() {
   // 刚在登录页连接成功：芒星从登录页的位置滑过来（不再二次绽放），其余元素更早渐入
   const [glideFrom] = useState(() => (reduceMotion ? null : takeHandoff()));
   const [intro] = useState(() => (takeIntro() || !!glideFrom) && !reduceMotion);
-  const d0 = glideFrom ? -350 : 0; // 滑入模式整体提前
+  // 滑入模式整体提前；冷启动时再整体推后，等原生启动屏淡出
+  const [d0] = useState(() => (glideFrom ? -350 : introDelay()));
 
   const { catalog, catalogLoaded, catalogError, target, setTarget, inheritCwd, noteCreated, setDraftActive, refresh } = useProjects();
   const [mode, setMode] = useState(getNewSessionMode);
@@ -99,7 +100,7 @@ export function HomeScreen() {
       </FadeIn>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 24 }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-        <BloomSpark size={48} play={intro && !glideFrom} glideFrom={glideFrom} style={{ marginBottom: 20 }} />
+        <BloomSpark size={48} play={intro && !glideFrom} delay={Math.max(0, d0)} glideFrom={glideFrom} style={{ marginBottom: 20 }} />
         <FadeIn play={intro} delay={600 + d0}>
           <Text style={{ color: colors.inkStrong, fontSize: 32, fontWeight: '400', letterSpacing: -0.8 }}>{greet}</Text>
         </FadeIn>
