@@ -145,9 +145,12 @@ export function BloomSpark({ size = 48, color, style, play = false, delay = 0, i
 
   // 静置时的装饰动画：光束依次轻轻伸缩、整体慢慢自转。停下时幅度渐收，自转回到最近的整圈，
   // 这样连接成功滑到首页时和首页的静态芒星角度一致。
+  const idleOnce = useRef(false);
   useEffect(() => {
     if (idle) {
-      const start = play ? delay + BLOOM_MS : 0;
+      // 只有第一次（刚绽放）要等绽放结束；连接失败回到静置时立即开始
+      const start = play && !idleOnce.current ? delay + BLOOM_MS : 0;
+      idleOnce.current = true;
       idleAmt.value = withDelay(start, withTiming(1, { duration: 900 }));
       drift.value = 0;
       drift.value = withDelay(start, withRepeat(withTiming(TWO_PI, { duration: IDLE_WAVE_MS, easing: Easing.linear }), -1, false));
