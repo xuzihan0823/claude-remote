@@ -9,6 +9,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createDrawerNavigator } from '@react-navigation/drawer';
 import * as Linking from 'expo-linking';
 import * as SplashScreen from 'expo-splash-screen';
+import { markSplashHidden, SPLASH_FADE_MS } from './lib/intro.js';
 
 import {
   baseUrl, BASE_KEY, clearToken, connErrMsg, connHost, loadBases, normalizeBase,
@@ -32,9 +33,10 @@ import { PairConfirm } from './components/PairConfirm.js';
 import { ApprovalLayer } from './components/ApprovalLayer.js';
 import { ToastLayer } from './components/Toast.js';
 
-// 原生启动屏只是纯底色（无图标），保持到连接校验结束，再淡出交给首页的芒星绽放动画。
+// 原生启动屏只是纯底色（图片是全透明占位，底色与 theme 的 bg 一致），保持到连接校验结束，
+// 再淡出交给首页 / 登录页的芒星绽放动画（动画按 introDelay 等启动屏淡出后再开始）。
 SplashScreen.preventAutoHideAsync().catch(() => { /* noop */ });
-try { SplashScreen.setOptions({ duration: 200, fade: true }); } catch { /* 旧版本无此 API */ }
+try { SplashScreen.setOptions({ duration: SPLASH_FADE_MS, fade: true }); } catch { /* 旧版本无此 API */ }
 const SPLASH_MAX_MS = 2500;
 applyAppearance(); // 设置里选的浅色 / 深色要在首帧前生效
 loadDevices(); // 旧版单连接数据迁移成设备列表 // 网络慢时最多等这么久，之后照常显示「连接中」
@@ -76,7 +78,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const hide = () => SplashScreen.hideAsync().catch(() => { /* noop */ });
+    const hide = () => { markSplashHidden(); SplashScreen.hideAsync().catch(() => { /* noop */ }); };
     if (auth !== 'checking') { hide(); return undefined; }
     const timer = setTimeout(hide, SPLASH_MAX_MS);
     return () => clearTimeout(timer);

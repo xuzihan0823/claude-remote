@@ -11,7 +11,7 @@ import { FadeIn } from '../components/FadeIn.js';
 import { Icon } from '../components/Icon.js';
 import { QrScanner } from '../components/QrScanner.js';
 import { haptics } from '../lib/haptics.js';
-import { setHandoff, takeIntro } from '../lib/intro.js';
+import { introDelay, setHandoff, takeIntro } from '../lib/intro.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const hostOf = (base) => String(base || '').replace(/^[a-z]+:\/\//i, '').replace(/[:/].*$/, '');
@@ -29,6 +29,7 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
   const reduceMotion = useReducedMotion();
   // 冷启动带 token 自动重连时（busy）不抢开屏，留给首页绽放
   const [intro] = useState(() => !busy && !reduceMotion && takeIntro());
+  const [d0] = useState(() => (intro ? introDelay() : 0)); // 冷启动时等原生启动屏淡出
   const [view, setView] = useState('choose'); // choose | manual
   const [scanOpen, setScanOpen] = useState(false);
   const [phase, setPhase] = useState('idle'); // idle | connecting | success | leaving
@@ -86,16 +87,16 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
       >
         <View style={{ flex: view === 'manual' ? 0 : 1, minHeight: view === 'manual' ? 0 : 340, alignItems: 'center', justifyContent: 'center', paddingTop: view === 'manual' ? 36 : 0 }}>
           <View ref={sparkRef} collapsable={false}>
-            <BloomSpark size={view === 'manual' ? 44 : 60} play={intro} busy={connecting} shake={shake} />
+            <BloomSpark size={view === 'manual' ? 44 : 60} play={intro} delay={d0} busy={connecting} shake={shake} />
           </View>
           <View style={{ alignItems: 'center', opacity: titleHidden ? 0 : 1 }}>
-            <FadeIn play={intro} delay={550}>
+            <FadeIn play={intro} delay={550 + d0}>
               <Text style={{ color: colors.inkStrong, fontFamily: fonts.serif, fontSize: view === 'manual' ? 24 : 30, marginTop: 18, letterSpacing: -0.4 }}>
                 Claude Remote
               </Text>
             </FadeIn>
             {view === 'choose' ? (
-              <FadeIn play={intro} delay={650}>
+              <FadeIn play={intro} delay={650 + d0}>
                 <Text style={{ color: colors.ink2, fontSize: 15, marginTop: 8 }}>连接你 Mac 上的 Claude Code</Text>
               </FadeIn>
             ) : null}
@@ -113,7 +114,7 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
 
         {showForm && view === 'choose' ? (
           <Animated.View exiting={ExitFade.duration(200)} style={{ gap: 12, paddingBottom: 8 }}>
-            <FadeIn play={intro} delay={800} dy={14}>
+            <FadeIn play={intro} delay={800 + d0} dy={14}>
               <TouchableOpacity
                 onPress={() => setScanOpen(true)}
                 activeOpacity={0.85}
@@ -124,7 +125,7 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
                 <Text style={{ color: '#fff', fontSize: 16, fontWeight: '500' }}>扫码连接</Text>
               </TouchableOpacity>
             </FadeIn>
-            <FadeIn play={intro} delay={880} dy={14}>
+            <FadeIn play={intro} delay={880 + d0} dy={14}>
               <TouchableOpacity
                 onPress={() => setView('manual')}
                 activeOpacity={0.7}
@@ -134,7 +135,7 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
                 <Text style={{ color: colors.ink, fontSize: 15.5 }}>输入地址和令牌</Text>
               </TouchableOpacity>
             </FadeIn>
-            <FadeIn play={intro} delay={960} dy={0}>
+            <FadeIn play={intro} delay={960 + d0} dy={0}>
               <Text style={{ color: colors.ink3, fontSize: 12, textAlign: 'center', marginTop: 18, lineHeight: 18 }}>
                 {'在 Mac 上运行 '}
                 <Text style={{ fontFamily: fonts.mono, color: colors.ink2 }}>cr</Text>
