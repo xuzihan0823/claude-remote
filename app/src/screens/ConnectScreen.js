@@ -87,7 +87,7 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
       >
         <View style={{ flex: view === 'manual' ? 0 : 1, minHeight: view === 'manual' ? 0 : 340, alignItems: 'center', justifyContent: 'center', paddingTop: view === 'manual' ? 36 : 0 }}>
           <View ref={sparkRef} collapsable={false}>
-            <BloomSpark size={view === 'manual' ? 44 : 60} play={intro} delay={d0} busy={connecting} shake={shake} />
+            <BloomSpark size={view === 'manual' ? 44 : 60} play={intro} delay={d0} idle={showForm && !reduceMotion} busy={connecting} shake={shake} />
           </View>
           <View style={{ alignItems: 'center', opacity: titleHidden ? 0 : 1 }}>
             <FadeIn play={intro} delay={550 + d0}>
