@@ -60,6 +60,7 @@ export function Spark({ size = 16, color, style }) {
 // ── 动画芒星 ─────────────────────────────────────────────────────
 // 一个组件覆盖开屏与登录的所有状态，结束时都与静态 Spark 完全重合：
 //   play           挂载即绽放：光芒按顺时针依次从中心长出并回弹，整体放大 1.35 倍再回落、轻转（≈0.9s）
+//   idle           静置（登录页）：一道光波顺时针依次掠过各光束，整体极慢自转
 //   busy           连接中：不旋转，各光束像星星闪烁一样各自轻微伸缩（±8% 左右）
 //   shake          数字每变一次左右抖一下（连接失败）
 //   glideFrom      { x, y, size }：从登录页芒星的窗口位置平移缩放到自身位置（登录成功衔接首页）
@@ -79,10 +80,13 @@ function backOut(x) {
 }
 
 const TWINKLE_AMP = 0.08;
+const IDLE_AMP = 0.1;
+const IDLE_WAVE_MS = 2600;
+const IDLE_SPIN_MS = 60000;
 // [频率, 相位]，固定伪随机值
 const TWINKLE = RAYS.map((_, i) => [1 + ((i * 7) % 3), ((i * 2.399) % 6.283)]);
 
-function AnimRay({ ray, index, t, pulse, busyAmt, fill }) {
+function AnimRay({ ray, index, t, pulse, busyAmt, drift, idleAmt, fill }) {
   const [angle, len, width] = ray;
   const props = useAnimatedProps(() => {
     const local = (t.value - 100 - index * RAY_STAGGER) / RAY_DUR;
@@ -90,7 +94,9 @@ function AnimRay({ ray, index, t, pulse, busyAmt, fill }) {
     // 每条光束用不同的整数频率和相位叠两个正弦，看起来无规律但一圈后无缝衔接
     const [k, ph] = TWINKLE[index];
     const wave = 0.65 * Math.sin(k * pulse.value + ph) + 0.35 * Math.sin((k + 2) * pulse.value + ph * 1.7);
-    const breathe = 1 + busyAmt.value * TWINKLE_AMP * wave;
+    // 静置：一道波顺时针绕一圈，经过的光束略微伸长
+    const idleWave = Math.pow(Math.max(0, Math.cos(drift.value - (index / RAYS.length) * TWO_PI)), 3);
+    const breathe = 1 + busyAmt.value * TWINKLE_AMP * wave + idleAmt.value * IDLE_AMP * idleWave;
     return { d: rayPath(angle, len, width, grow * breathe) };
   });
   return <AnimatedPath fill={fill} animatedProps={props} />;
@@ -104,7 +110,7 @@ function AnimHub({ t, fill }) {
   return <AnimatedCircle cx={C} cy={C} fill={fill} animatedProps={props} />;
 }
 
-export function BloomSpark({ size = 48, color, style, play = false, delay = 0, busy = false, shake = 0, glideFrom = null, onDone }) {
+export function BloomSpark({ size = 48, color, style, play = false, delay = 0, idle = false, busy = false, shake = 0, glideFrom = null, onDone }) {
   const { colors } = useTheme();
   const fill = color ?? colors.accent;
   const ref = useRef(null);
@@ -112,6 +118,9 @@ export function BloomSpark({ size = 48, color, style, play = false, delay = 0, b
   const pulse = useSharedValue(0); // busy 时 0→2π 循环
   const busyAmt = useSharedValue(0); // busy 的强度，0/1 之间过渡，避免停下时跳变
   const shakeX = useSharedValue(0);
+  const drift = useSharedValue(0); // idle 时 0→2π 循环：一道波沿顺时针依次经过各光束
+  const idleAmt = useSharedValue(0);
+  const spin = useSharedValue(0); // idle 时极慢的整体自转（弧度，累加）
   const glide = useSharedValue(glideFrom ? 0 : 1);
   const from = useSharedValue({ dx: 0, dy: 0, s: 1 });
   const ready = useSharedValue(glideFrom ? 0 : 1); // glide 量好位置之前先隐藏，避免闪一帧
@@ -133,6 +142,23 @@ export function BloomSpark({ size = 48, color, style, play = false, delay = 0, b
       busyAmt.value = withTiming(0, { duration: 300 }, () => cancelAnimation(pulse));
     }
   }, [busy]);
+
+  // 静置时的装饰动画：光束依次轻轻伸缩、整体慢慢自转。停下时幅度渐收，自转回到最近的整圈，
+  // 这样连接成功滑到首页时和首页的静态芒星角度一致。
+  useEffect(() => {
+    if (idle) {
+      const start = play ? delay + BLOOM_MS : 0;
+      idleAmt.value = withDelay(start, withTiming(1, { duration: 900 }));
+      drift.value = 0;
+      drift.value = withDelay(start, withRepeat(withTiming(TWO_PI, { duration: IDLE_WAVE_MS, easing: Easing.linear }), -1, false));
+      spin.value = withDelay(start, withRepeat(withTiming(spin.value + TWO_PI, { duration: IDLE_SPIN_MS, easing: Easing.linear }), -1, false));
+    } else {
+      idleAmt.value = withTiming(0, { duration: 300 }, () => cancelAnimation(drift));
+      cancelAnimation(spin);
+      const turns = Math.round(spin.value / TWO_PI);
+      spin.value = withTiming(turns * TWO_PI, { duration: 450, easing: Easing.out(Easing.cubic) });
+    }
+  }, [idle]);
 
   useEffect(() => {
     if (!shake) return;
@@ -166,7 +192,7 @@ export function BloomSpark({ size = 48, color, style, play = false, delay = 0, b
         { translateX: f.dx * (1 - g) + shakeX.value },
         { translateY: f.dy * (1 - g) },
         { scale: bloomScale * (f.s + (1 - f.s) * g) },
-        { rotate: `${bloomRot}rad` },
+        { rotate: `${bloomRot + spin.value}rad` },
       ],
     };
   });
@@ -175,7 +201,7 @@ export function BloomSpark({ size = 48, color, style, play = false, delay = 0, b
     <Animated.View ref={ref} onLayout={onLayout} collapsable={false} style={[{ width: size, height: size }, style, wrap]}>
       <Svg width={size} height={size} viewBox="0 0 24 24">
         <AnimHub t={t} fill={fill} />
-        {RAYS.map((ray, i) => <AnimRay key={i} ray={ray} index={i} t={t} pulse={pulse} busyAmt={busyAmt} fill={fill} />)}
+        {RAYS.map((ray, i) => <AnimRay key={i} ray={ray} index={i} t={t} pulse={pulse} busyAmt={busyAmt} drift={drift} idleAmt={idleAmt} fill={fill} />)}
       </Svg>
     </Animated.View>
   );

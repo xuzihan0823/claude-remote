@@ -9,7 +9,8 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createDrawerNavigator } from '@react-navigation/drawer';
 import * as Linking from 'expo-linking';
 import * as SplashScreen from 'expo-splash-screen';
-import { markSplashHidden, SPLASH_FADE_MS } from './lib/intro.js';
+import { markSplashHidden } from './lib/intro.js';
+import { SplashOverlay } from './components/SplashOverlay.js';
 
 import {
   baseUrl, BASE_KEY, clearToken, connErrMsg, connHost, loadBases, normalizeBase,
@@ -33,10 +34,11 @@ import { PairConfirm } from './components/PairConfirm.js';
 import { ApprovalLayer } from './components/ApprovalLayer.js';
 import { ToastLayer } from './components/Toast.js';
 
-// 原生启动屏只是纯底色（图片是全透明占位，底色与 theme 的 bg 一致），保持到连接校验结束，
-// 再淡出交给首页 / 登录页的芒星绽放动画（动画按 introDelay 等启动屏淡出后再开始）。
+// 原生启动屏是居中的芒星 + 「Claude Remote」字标（仿 Claude 官方开屏，不放公司名），保持到连接校验结束。
+// 收起时由 SplashOverlay 接管：同一张字标图放大淡出，露出登录页 / 首页的芒星绽放（按 introDelay 衔接）。
+// 原生启动屏本身不做淡出，由接管层负责动画。
 SplashScreen.preventAutoHideAsync().catch(() => { /* noop */ });
-try { SplashScreen.setOptions({ duration: SPLASH_FADE_MS, fade: true }); } catch { /* 旧版本无此 API */ }
+try { SplashScreen.setOptions({ duration: 0, fade: false }); } catch { /* 旧版本无此 API */ }
 const SPLASH_MAX_MS = 2500;
 applyAppearance(); // 设置里选的浅色 / 深色要在首帧前生效
 loadDevices(); // 旧版单连接数据迁移成设备列表 // 网络慢时最多等这么久，之后照常显示「连接中」
@@ -62,6 +64,7 @@ function MainStack() {
 export default function App() {
   const { dark, colors } = useTheme();
   const [auth, setAuth] = useState(token ? 'checking' : 'need');
+  const [splash, setSplash] = useState('show'); // show | leaving | gone
   const [authErr, setAuthErr] = useState('');
   const authRef = useRef(auth);
   authRef.current = auth;
@@ -78,7 +81,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const hide = () => { markSplashHidden(); SplashScreen.hideAsync().catch(() => { /* noop */ }); };
+    const hide = () => { markSplashHidden(); setSplash((v) => (v === 'show' ? 'leaving' : v)); };
     if (auth !== 'checking') { hide(); return undefined; }
     const timer = setTimeout(hide, SPLASH_MAX_MS);
     return () => clearTimeout(timer);
@@ -271,6 +274,7 @@ export default function App() {
               {auth === 'ok' ? <ApprovalLayer /> : null}
               {pairOverlay}
               <ToastLayer />
+              {splash !== 'gone' ? <SplashOverlay leaving={splash === 'leaving'} onDone={() => setSplash('gone')} /> : null}
             </ConnActions.Provider>
           </BottomSheetModalProvider>
         </SafeAreaProvider>

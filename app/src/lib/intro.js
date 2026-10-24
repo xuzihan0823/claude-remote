@@ -4,10 +4,10 @@
 let played = false;
 let splashHiddenAt = 0;
 
-// 原生启动屏淡出时长（App.js 里 SplashScreen.setOptions 用同一个值）
-export const SPLASH_FADE_MS = 220;
+// 开屏字标接管层（components/SplashOverlay.js）淡出时长
+export const SPLASH_FADE_MS = 420;
 
-/** App 调 SplashScreen.hideAsync 时记一下；之后挂载的页面就不用再等启动屏。 */
+/** App 开始收起启动屏时记一下；之后挂载的页面就不用再等启动屏。 */
 export function markSplashHidden() {
   if (!splashHiddenAt) splashHiddenAt = Date.now();
 }
@@ -17,7 +17,7 @@ export function markSplashHidden() {
  * 等它淡出到一半多再绽放，否则前几帧被启动屏挡住，看起来像「卡一下才出来」。
  */
 export function introDelay() {
-  const lead = Math.round(SPLASH_FADE_MS * 0.6);
+  const lead = Math.round(SPLASH_FADE_MS * 0.5);
   if (!splashHiddenAt) return lead;
   return Math.max(0, splashHiddenAt + lead - Date.now());
 }
