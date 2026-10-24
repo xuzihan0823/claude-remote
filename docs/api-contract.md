@@ -65,6 +65,22 @@
 }
 ```
 
+### GET /api/sessions/search?q=&full=&limit=50
+会话检索（2026-10-21 增补，cr 控制台用）。`q` 必填（空 → `400 {"error":"invalid_query"}`），大小写不敏感的子串匹配。
+
+- 默认只匹配 `title` / `cwd` / `lastPreview`，零额外 IO；
+- `full=1` 额外流式扫描 JSONL 原文（text / tool_result），按 `lastActiveAt` 降序，凑够 `limit`（≤200）即停；总读取量超过 256MB 预算时提前停止并返回 `truncated:true`。
+
+```jsonc
+{
+  "results": [{ /* SessionSummary 全部字段 */, "match": { "field": "title|cwd|preview|content", "snippet": "…命中前后文…", "seq": 42 /* 仅 content */ } }],
+  "truncated": false
+}
+```
+
+### GET /api/interactions/pending
+当前待决审批卡片（2026-10-21 增补）：`200 {"interactions":[ApprovalCard]}`，载荷同 WS `approval` 帧的 `interaction`。WS 广播只覆盖在线连接，后连上的客户端（如 cr 控制台）靠它补齐。
+
 ### GET /api/sessions/:id/messages?beforeSeq=&limit=100
 消息按 `seq` 升序返回主链消息（`offChain` 行不返回）。`beforeSeq` 缺省 = 从尾部取最新 `limit` 条。
 
@@ -109,6 +125,11 @@ Body 三选一：`{"type":"allow_once"}` | `{"type":"deny","message?":"…"}` | 
 ### server → client
 ```jsonc
 {"type":"message","sessionId":"…","message":RenderMessage}          // watcher 增量（含 daemon 自跑轮次落盘的行）
+{"type":"stream","sessionId":"…","key":"<apiMessageId>:<blockIndex>","offset":0,"text":"…","done?":true}
+    // daemon 自跑轮次的逐字草稿（约 40ms 合一帧）。offset = 本帧之前已发字符数；offset 0 为整段替换（订阅时补发的快照）。
+    // 草稿只用于「正在输出」显示，正文以随后的 message 帧为准：同文本的 assistant text 到达即删草稿。
+    // 仅 daemon 自己跑的轮次有；终端里跑的会话仍只有 message 帧。子代理的流不推。
+{"type":"stream","sessionId":"…","clear":true}   // 本轮结束，客户端稍候（~1.5s）清掉未被替换的草稿
 {"type":"resync","sessionId":"…"}   // daemon 侧链视图失效（终端 rewind/fork、文件截断）；客户端清空本地列表并重新 GET messages
 {"type":"status","sessionId":"…","status":"idle|terminal-driving|daemon-driving"}
 {"type":"run","sessionId":"…","runId":"…","state":"started|done|error","error?":"…"}

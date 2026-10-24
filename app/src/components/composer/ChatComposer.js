@@ -12,6 +12,8 @@ import { ComposerCard } from './ComposerCard.js';
 import { AttachmentChips } from './AttachmentChips.js';
 import { AttachmentPicker } from './AttachmentPicker.js';
 import { ModelPicker } from './ModelPicker.js';
+import { haptics } from '../../lib/haptics.js';
+import { tooLargeMessage, uploadAttachments, withAttachmentNote } from '../../lib/attachments.js';
 
 // 聊天 composer（发送/停止/附件/模型 pill/模式 pill/bypass 确认）。
 // 契约（不得更改）：props { sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped }
@@ -26,13 +28,15 @@ export function ChatComposer({
   const [draft, setDraft] = useState('');
   const [files, setFiles] = useState([]);
   const [sendBusy, setSendBusy] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null); // { done, total }
   const [modelOverride, setModelOverride] = useState('');
   const [inputH, setInputH] = useState(36);
   const lastH = useRef(36);
 
   const canSend = status === 'idle' && !sendBusy;
   const hasContent = draft.trim() !== '' || files.length > 0;
-  const disabledReason = sendBusy ? '发送中…'
+  const disabledReason = sendBusy ? (uploadProgress && uploadProgress.done < uploadProgress.total
+      ? `上传附件 ${uploadProgress.done + 1}/${uploadProgress.total}…` : '发送中…')
     : status === 'terminal-driving' ? '终端驾驶中，暂不可发送'
     : status === 'daemon-driving' ? 'Claude 正在运行…'
     : status == null ? '状态获取中…' : '';
@@ -45,6 +49,7 @@ export function ChatComposer({
         body: JSON.stringify({ runId: activeRunId || undefined }),
       });
       onStopped?.();
+      haptics.reject();
       toast('已停止当前运行', 'info');
     } catch (e) {
       if (e.status === 404 || e.status === 409 || e.code === 'no_active_run' || e.code === 'already_finished') {
@@ -56,24 +61,27 @@ export function ChatComposer({
     }
   }, [sessionId, activeRunId, isRunning, onStopped]);
 
+  // 终端驾驶误判（如上一轮报错后 CLI 收尾写入）时的手动出口：daemon 无 run 时 abort = 解除占用
+  const releaseSession = useCallback(async () => {
+    try {
+      const r = await api(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, { method: 'POST', body: '{}' });
+      onStopped?.();
+      haptics.reject();
+      toast(r?.status === 'aborted' ? '已停止当前运行' : '已解除占用', 'info');
+    } catch (e) {
+      if (e.code !== 'unauthorized') toast(`解除失败：${e.code}`, 'error');
+    }
+  }, [sessionId, onStopped]);
+
   const doSend = useCallback(async () => {
     if (!hasContent || !canSend) return;
     setSendBusy(true);
     try {
-      // 先传附件（存到 Mac 本地），再把路径写进消息文本让 Claude 直接读
-      const uploaded = [];
-      for (const f of files) {
-        const blob = await (await fetch(f.uri)).blob();
-        const r = await api(`/api/sessions/${encodeURIComponent(sessionId)}/upload?filename=${encodeURIComponent(f.name)}`, {
-          method: 'POST', body: blob, headers: { 'Content-Type': 'application/octet-stream' },
-        });
-        uploaded.push(r.path);
-      }
-      let text = draft.trim();
-      if (uploaded.length) {
-        const list = uploaded.map((p) => `- ${p}`).join('\n');
-        text = `${text || '请查看我上传的附件。'}\n\n[手机端上传的附件，已保存在本机，可直接读取]\n${list}`;
-      }
+      // 先传附件（存到 Mac 本地），再把路径写进消息文本让 Claude 直接读；失败重试不会重复上传
+      const uploaded = await uploadAttachments(files, `/api/sessions/${encodeURIComponent(sessionId)}/upload`, {
+        onProgress: (done, total) => setUploadProgress({ done, total }),
+      });
+      const text = withAttachmentNote(draft.trim(), uploaded);
       await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
         method: 'POST',
         body: JSON.stringify({
@@ -83,20 +91,24 @@ export function ChatComposer({
         }),
       });
       onSent?.(text);
+      haptics.success();
       setDraft('');
       setFiles([]);
     } catch (e) {
+      haptics.error();
       if (e.status === 409) {
         onStatusConflict?.(e.data?.status || null);
         const why = e.data?.status === 'terminal-driving' ? '会话正被终端驾驶'
           : e.data?.status === 'daemon-driving' ? 'Claude 正在运行' : '会话被占用';
         toast(`${why}，发送被拒`, 'error');
       } else if (e.status === 413) {
-        toast('附件过大（上限 25MB）', 'error');
+        toast(tooLargeMessage(e), 'error');
+      } else if (e.code === 'connection_changed') {
+        toast('连接已切换，请重新发送', 'info');
       } else if (e.code !== 'unauthorized') {
         toast(`发送失败：${e.code}`, 'error');
       }
-    } finally { setSendBusy(false); }
+    } finally { setSendBusy(false); setUploadProgress(null); }
   }, [draft, files, hasContent, canSend, sessionId, modelOverride, mode, onSent, onStatusConflict]);
 
   const onContentSizeChange = (e) => {
@@ -130,8 +142,13 @@ export function ChatComposer({
         </View>
       ) : null}
       {!canSend && !isRunning && disabledReason ? (
-        <View style={{ paddingHorizontal: 4, paddingVertical: 6 }}>
-          <Text style={{ color: colors.ink3, fontSize: 13 }}>{disabledReason}</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 4, paddingVertical: 6, gap: 8 }}>
+          <Text style={{ color: colors.ink3, fontSize: 13, flex: 1 }}>{disabledReason}</Text>
+          {status === 'terminal-driving' && !sendBusy ? (
+            <TouchableOpacity onPress={releaseSession} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }} accessibilityLabel="解除占用">
+              <Text style={{ color: colors.danger, fontSize: 13, fontWeight: '500' }}>解除占用</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
       ) : null}
       <ComposerCard disabled={!canSend}>

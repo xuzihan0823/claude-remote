@@ -2,9 +2,14 @@
 // 用 vendored marked 的 lexer 产 token 树，再 token -> RN 组件递归渲染。
 // 纯函数式：同一 text 重渲染稳定（列表 key 用索引即可）。
 import { useMemo } from 'react';
-import { Linking, ScrollView, Text, View } from 'react-native';
+import { ScrollView, Text, View } from 'react-native';
 import { marked } from '../../../../web/vendor/marked.esm.min.js';
+import { installLinkify, wholeUrl } from '../../../../web/core/linkify.js';
+import { openLink, shareLink } from '../../lib/links.js';
 import { useTheme } from '../../theme.js';
+import { usePref } from '../../lib/prefs.js';
+
+installLinkify(marked);
 
 // 基准字号 / 行高（规格约定）
 const BASE_FS = 17;
@@ -62,13 +67,18 @@ function renderInline(tokens, ctx, keyPrefix) {
           </Text>,
         );
         break;
-      case 'codespan':
+      case 'codespan': {
+        // 反引号里整段是链接（Claude 常写 `http://localhost:3000`）也可点
+        const codeHref = wholeUrl(tok.text);
         out.push(
           <Text
             key={key}
+            onPress={codeHref ? () => openLink(codeHref) : undefined}
+            onLongPress={codeHref ? () => shareLink(codeHref) : undefined}
             style={{
+              ...(codeHref ? { textDecorationLine: 'underline', color: ctx.colors.accent } : null),
               fontFamily: ctx.fonts.mono,
-              fontSize: BASE_FS * 0.86,
+              fontSize: ctx.fs * 0.86,
               backgroundColor: ctx.colors.bubble,
               color: ctx.colors.inkStrong,
             }}
@@ -77,20 +87,20 @@ function renderInline(tokens, ctx, keyPrefix) {
           </Text>,
         );
         break;
+      }
       case 'link':
       case 'image': {
         // image 无原生图片组件，退化为指向图片 URL 的链接（alt 文本作展示）
         const href = tok.href || '';
-        const safe = /^\s*javascript:/i.test(href) ? '#' : href;
         const kids = tok.tokens
           ? renderInline(tok.tokens, ctx, `${key}-`)
           : tok.text || '';
-        const press =
-          !safe || safe === '#' ? undefined : () => Linking.openURL(safe).catch(() => {});
         out.push(
           <Text
             key={key}
-            onPress={press}
+            accessibilityRole="link"
+            onPress={() => openLink(href)}
+            onLongPress={() => shareLink(href)}
             style={{ color: ctx.colors.accent, textDecorationLine: 'underline' }}
           >
             {kids}
@@ -115,7 +125,7 @@ function renderInline(tokens, ctx, keyPrefix) {
 }
 
 function renderHeading(tok, ctx, key) {
-  const fs = HEADING_FS[tok.depth] || BASE_FS;
+  const fs = (HEADING_FS[tok.depth] || BASE_FS) * ctx.scale;
   const serif = tok.depth <= 2;
   return (
     <Text
@@ -149,18 +159,23 @@ function renderCode(tok, ctx, key) {
         marginVertical: 8,
       }}
     >
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-        <Text
-          style={{
-            fontFamily: ctx.fonts.mono,
-            fontSize: BASE_FS * 0.84,
-            lineHeight: Math.round(BASE_LH * 0.92),
-            color: ctx.colors.ink,
-          }}
-        >
-          {tok.text || ''}
-        </Text>
-      </ScrollView>
+      {(() => {
+        const code = (
+          <Text
+            selectable
+            style={{
+              fontFamily: ctx.fonts.mono,
+              fontSize: ctx.fs * 0.84,
+              lineHeight: Math.round(ctx.lh * 0.92),
+              color: ctx.colors.ink,
+            }}
+          >
+            {tok.text || ''}
+          </Text>
+        );
+        // 设置里开了「代码自动换行」就折行显示，否则横向滚动
+        return ctx.codeWrap ? code : <ScrollView horizontal showsHorizontalScrollIndicator={false}>{code}</ScrollView>;
+      })()}
     </View>
   );
 }
@@ -197,8 +212,8 @@ function renderTable(tok, ctx, key) {
         <Text
           style={{
             fontFamily: ctx.fonts.mono,
-            fontSize: BASE_FS * 0.86,
-            lineHeight: Math.round(BASE_LH * 0.95),
+            fontSize: ctx.fs * 0.86,
+            lineHeight: Math.round(ctx.lh * 0.95),
             color: ctx.colors.ink,
           }}
         >
@@ -247,7 +262,7 @@ function renderListItem(item, ctx, key, index, ordered, start) {
         parts.push(
           <Text
             key={`t${i}`}
-            style={{ color: ctx.colors.ink, fontSize: BASE_FS, lineHeight: BASE_LH }}
+            style={{ color: ctx.colors.ink, fontSize: ctx.fs, lineHeight: ctx.lh }}
           >
             {kids}
           </Text>,
@@ -268,8 +283,8 @@ function renderListItem(item, ctx, key, index, ordered, start) {
         style={{
           width: 24,
           color: ctx.colors.ink2,
-          fontSize: BASE_FS,
-          lineHeight: BASE_LH,
+          fontSize: ctx.fs,
+          lineHeight: ctx.lh,
         }}
       >
         {bullet}
@@ -297,7 +312,7 @@ function renderBlock(tok, ctx, key) {
       return (
         <Text
           key={key}
-          style={{ color: ctx.colors.ink, fontSize: BASE_FS, lineHeight: BASE_LH, marginVertical: 4 }}
+          style={{ color: ctx.colors.ink, fontSize: ctx.fs, lineHeight: ctx.lh, marginVertical: 4 }}
         >
           {renderInline(tok.tokens, ctx, `${key}-`)}
         </Text>
@@ -318,8 +333,8 @@ function renderBlock(tok, ctx, key) {
           style={{
             color: ctx.colors.ink2,
             fontFamily: ctx.fonts.mono,
-            fontSize: BASE_FS * 0.86,
-            lineHeight: BASE_LH,
+            fontSize: ctx.fs * 0.86,
+            lineHeight: ctx.lh,
           }}
         >
           {tok.text || ''}
@@ -328,7 +343,7 @@ function renderBlock(tok, ctx, key) {
     case 'text':
       // 列表项里的 text token 兜底（正常路径在 renderListItem 内已处理）
       return (
-        <Text key={key} style={{ color: ctx.colors.ink, fontSize: BASE_FS, lineHeight: BASE_LH }}>
+        <Text key={key} style={{ color: ctx.colors.ink, fontSize: ctx.fs, lineHeight: ctx.lh }}>
           {tok.tokens ? renderInline(tok.tokens, ctx, `${key}-`) : decodeEntities(tok.text || '')}
         </Text>
       );
@@ -337,7 +352,7 @@ function renderBlock(tok, ctx, key) {
       return null;
     default:
       return tok.raw ? (
-        <Text key={key} style={{ color: ctx.colors.ink2, fontSize: BASE_FS, lineHeight: BASE_LH }}>
+        <Text key={key} style={{ color: ctx.colors.ink2, fontSize: ctx.fs, lineHeight: ctx.lh }}>
           {tok.raw}
         </Text>
       ) : null;
@@ -351,19 +366,22 @@ function renderBlocks(tokens, ctx, keyPrefix = '') {
 
 export function MarkdownView({ text }) {
   const { colors, fonts, radius } = useTheme();
-  const ctx = { colors, fonts, radius };
+  const scale = usePref('fontScale');
+  const codeWrap = usePref('codeWrap');
+  const ctx = { colors, fonts, radius, scale, codeWrap, fs: BASE_FS * scale, lh: Math.round(BASE_LH * scale) };
 
   // lexer 失败退回纯 <Text>；同一 text 稳定（useMemo 仅 memo token 树，渲染每帧用最新 ctx）
   const tokens = useMemo(() => {
     try {
-      return marked.lexer(String(text ?? ''), { gfm: true, breaks: true });
+      // 必须带上 marked.defaults：只传 {gfm, breaks} 会绕过 installLinkify 装的 url 分词器
+      return marked.lexer(String(text ?? ''), { ...marked.defaults, gfm: true, breaks: true });
     } catch {
       return null;
     }
   }, [text]);
 
   const fallback = (
-    <Text style={{ color: colors.ink, fontSize: BASE_FS, lineHeight: BASE_LH }}>
+    <Text style={{ color: colors.ink, fontSize: ctx.fs, lineHeight: ctx.lh }}>
       {String(text ?? '')}
     </Text>
   );

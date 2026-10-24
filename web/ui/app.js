@@ -18,13 +18,15 @@ import { PairConfirm, SetupGate } from './screens/setup.js';
 
 export function parseHash() {
   const h = location.hash || '#/';
-  const m = h.match(/^#\/s\/(.+)$/);
-  if (m) return { view: 'chat', sessionId: decodeURIComponent(m[1]) };
+  const m = h.match(/^#\/s\/([^?]+)(?:\?seq=(\d+)(?:&n=(\d+))?)?$/);
+  if (m) return { view: 'chat', sessionId: decodeURIComponent(m[1]), ...(m[2] ? { focusSeq: Number(m[2]), focusNonce: m[3] || '' } : {}) };
   if (h === '#/settings') return { view: 'settings' };
   if (h === '#/pair') return { view: 'pair' };
   return { view: 'list' };
 }
-const goChat = (id) => { location.hash = `#/s/${encodeURIComponent(id)}`; };
+const goChat = (id, focusSeq) => {
+  location.hash = focusSeq == null ? `#/s/${encodeURIComponent(id)}` : `#/s/${encodeURIComponent(id)}?seq=${focusSeq}&n=${Date.now()}`;
+};
 const goList = () => { location.hash = '#/'; };
 const goSettings = () => { location.hash = '#/settings'; };
 
@@ -181,7 +183,7 @@ export function App() {
     <div class="shell" data-route=${route.view}>
       <${Sidebar} route=${route} goList=${goList} goSettings=${goSettings} goChat=${goChat} />
       <main class="main">
-        ${route.view === 'chat' ? html`<${Chat} key=${route.sessionId} sessionId=${route.sessionId} goList=${goList} />`
+        ${route.view === 'chat' ? html`<${Chat} key=${route.sessionId} sessionId=${route.sessionId} focusSeq=${route.focusSeq} focusNonce=${route.focusNonce} goList=${goList} />`
         : route.view === 'settings' ? html`<${SettingsPage} onReconnect=${tryConnect} goList=${goList} />`
         : html`<${StartScreen} goChat=${goChat} goSettings=${goSettings} />`}
       </main>

@@ -6,11 +6,14 @@ import { api, fetchSessions, pendingSessionMessages, sessionCache } from '../../
 import { toast, useBus } from '../../../web/core/bus.js';
 import { PERMISSION_MODES, getSessionMode, setSessionMode } from '../../../web/core/modes.js';
 import { ws } from '../../../web/core/ws.js';
+import { applyStreamFrame, reconcileDrafts } from '../../../web/core/stream-drafts.js';
+import { findFocusIndex, loadUntilSeq } from '../../../web/core/search.js';
 import { cmpMsg, msgKey } from '../lib/format.js';
 import { ConversationHeader } from '../components/ConversationHeader.js';
 import { GlassSurface } from '../components/GlassSurface.js';
 import { Icon } from '../components/Icon.js';
 import { MessageRow } from '../components/MessageRow.js';
+import { MarkdownView } from '../components/markdown/MarkdownView.js';
 import { StatusBadge } from '../components/StatusBadge.js';
 import { Spark } from '../components/Spark.js';
 import { ChatComposer } from '../components/composer/ChatComposer.js';
@@ -22,6 +25,8 @@ import { useTheme } from '../theme.js';
 // - 向上翻更早消息 = onEndReached（视觉顶部），追加到数据尾端，无需 web 的 prepend 滚动补偿
 export function ChatScreen({ route }) {
   const sessionId = route.params.sessionId;
+  const focusSeq = route.params.focusSeq;
+  const focusNonce = route.params.focusNonce;
   const navigation = useNavigation();
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
@@ -41,6 +46,15 @@ export function ChatScreen({ route }) {
   const [showJump, setShowJump] = useState(false);
   const listRef = useRef(null);
   const loadingOlder = useRef(false);
+  // 分页游标的同步镜像：搜索定位在异步流程里要读最新值
+  const pageRef = useRef({ firstSeq: null, hasMore: false });
+  pageRef.current = { firstSeq, hasMore };
+  const [highlightKey, setHighlightKey] = useState(null);
+  const [focusTarget, setFocusTarget] = useState(null); // { key, nonce }
+  const highlightTimer = useRef(null);
+  // 流式草稿：daemon 的逐字增量，JSONL 落盘后被正式消息替换
+  const [drafts, setDrafts] = useState([]);
+  const clearTimer = useRef(null);
 
   const addMsgs = useCallback((list) => {
     const st = store.current;
@@ -63,6 +77,7 @@ export function ChatScreen({ route }) {
   useEffect(() => {
     store.current = { map: new Map(), sorted: [] };
     setVersion((v) => v + 1);
+    setDrafts([]);
     setInitLoading(true);
     setLoadErr('');
     const initialText = pendingSessionMessages.get(sessionId);
@@ -104,6 +119,7 @@ export function ChatScreen({ route }) {
     if (m.role === 'user' && m.kind === 'text') {
       setPending((p) => (p && m.text?.trim() === p.trim() ? null : p));
     }
+    if (m.role === 'assistant' && m.kind === 'text') setDrafts((d) => reconcileDrafts(d, m));
     if (!pendingBatch.current) {
       pendingBatch.current = [];
       queueMicrotask(() => {
@@ -114,6 +130,18 @@ export function ChatScreen({ route }) {
     }
     pendingBatch.current.push(m);
   }, [sessionId, addMsgs]);
+  useBus('ws:stream', (e) => {
+    if (e.sessionId !== sessionId) return;
+    if (e.clear) {
+      // run 结束：落盘的消息通常紧跟着到，留一点时间让它先替换，再清残留
+      clearTimeout(clearTimer.current);
+      clearTimer.current = setTimeout(() => setDrafts([]), 1500);
+      return;
+    }
+    clearTimeout(clearTimer.current);
+    setDrafts((d) => applyStreamFrame(d, e));
+  }, [sessionId]);
+  useEffect(() => () => clearTimeout(clearTimer.current), []);
   useBus('ws:status', (e) => { if (e.sessionId === sessionId) setStatus(e.status); }, [sessionId]);
   useBus('ws:run', (e) => {
     if (e.sessionId !== sessionId) return;
@@ -183,6 +211,36 @@ export function ChatScreen({ route }) {
     } finally { loadingOlder.current = false; }
   }, [sessionId, hasMore, firstSeq, addMsgs]);
 
+  // ---- 搜索结果定位：翻页直到覆盖命中的 seq，再滚过去高亮
+  useEffect(() => {
+    if (focusSeq == null || initLoading || loadErr) return;
+    let cancelled = false;
+    (async () => {
+      loadingOlder.current = true;
+      try {
+        const r = await loadUntilSeq(
+          (before) => api(`/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=500&beforeSeq=${before}`),
+          pageRef.current,
+          focusSeq,
+        );
+        if (cancelled) return;
+        if (r.messages.length) {
+          setFirstSeq(r.firstSeq);
+          setHasMore(r.hasMore);
+          addMsgs(r.messages);
+        }
+        const sorted = store.current.sorted;
+        const i = findFocusIndex(sorted, focusSeq);
+        if (i < 0) { toast('没找到这条消息，可能已被改写', 'info'); return; }
+        setFocusTarget({ key: msgKey(sorted[i]), nonce: focusNonce });
+      } catch (e) {
+        if (!cancelled) toast(`定位失败：${e.code}`, 'error');
+      } finally { loadingOlder.current = false; }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, focusSeq, focusNonce, initLoading, loadErr]);
+
   const onScroll = useCallback((e) => {
     const y = e.nativeEvent.contentOffset.y;
     setShowJump((s) => (y > 240 ? true : y < 120 ? false : s));
@@ -194,6 +252,27 @@ export function ChatScreen({ route }) {
 
   // inverted 数据：最新在前
   const msgsDesc = useMemo(() => [...store.current.sorted].reverse(), [version]);
+
+  // msgsDesc 更新后再滚动（inverted：index 0 = 最新）
+  useEffect(() => {
+    if (!focusTarget) return;
+    const index = msgsDesc.findIndex((m) => msgKey(m) === focusTarget.key);
+    if (index < 0) return;
+    const t = setTimeout(() => {
+      listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.5 });
+      setHighlightKey(focusTarget.key);
+      clearTimeout(highlightTimer.current);
+      highlightTimer.current = setTimeout(() => setHighlightKey(null), 2500);
+    }, 60);
+    setFocusTarget(null);
+    return () => clearTimeout(t);
+  }, [focusTarget, msgsDesc]);
+  useEffect(() => () => clearTimeout(highlightTimer.current), []);
+  const onScrollToIndexFailed = useCallback((info) => {
+    // 目标行尚未测量：先按平均行高粗滚过去，渲染出来后再精确对齐
+    listRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false });
+    setTimeout(() => listRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 }), 120);
+  }, []);
 
   const isRunning = runActive || status === 'daemon-driving';
   const title = meta?.title || sessionId.slice(0, 8);
@@ -214,7 +293,12 @@ export function ChatScreen({ route }) {
           </View>
         </View>
       ) : null}
-      {isRunning ? (
+      {drafts.map((d) => (
+        <View key={d.key} style={{ marginTop: 8, marginBottom: 20 }}>
+          <MarkdownView text={d.text} />
+        </View>
+      ))}
+      {isRunning && !drafts.some((d) => !d.done) ? (
         <View style={{ flexDirection: 'row', marginVertical: 6, gap: 8, alignItems: 'center' }}>
           <View style={{ width: 26, alignItems: 'center' }}><Spark size={16} /></View>
           <Text style={{ color: colors.ink2, fontSize: 18, letterSpacing: 2 }}>···</Text>
@@ -261,7 +345,11 @@ export function ChatScreen({ route }) {
           data={msgsDesc}
           inverted
           keyExtractor={(m) => msgKey(m)}
-          renderItem={({ item }) => <MessageRow m={item} />}
+          renderItem={({ item }) => (msgKey(item) === highlightKey
+            ? <View style={{ backgroundColor: colors.glassTintAccent, borderRadius: 12, marginHorizontal: -8, paddingHorizontal: 8 }}><MessageRow m={item} /></View>
+            : <MessageRow m={item} />)}
+          extraData={highlightKey}
+          onScrollToIndexFailed={onScrollToIndexFailed}
           maintainVisibleContentPosition={{ minIndexForVisible: 1, autoscrollToTopThreshold: 100 }}
           onEndReached={loadOlder}
           onEndReachedThreshold={0.6}

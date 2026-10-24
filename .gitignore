@@ -7,4 +7,3 @@ node_modules/
 dist/
 output/
 .playwright-cli/
-mac/.build/

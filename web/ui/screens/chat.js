@@ -3,10 +3,12 @@ import { api, fetchSessions, pendingSessionMessages, sessionCache } from "../../
 import { toast, useBus } from "../../core/bus.js";
 import { PERMISSION_MODES, getSessionMode, setSessionMode } from "../../core/modes.js";
 import { ws } from "../../core/ws.js";
+import { applyStreamFrame, reconcileDrafts } from "../../core/stream-drafts.js";
+import { findFocusIndex, loadUntilSeq } from "../../core/search.js";
 import { useModelCatalog } from "../hooks.js";
 import { cmpMsg, cwdTail, fmtBytes, fmtClock, msgKey, toolSummary, truncate } from "../utils.js";
 import { StatusBadge } from "../components/conn-bar.js";
-import { Markdown } from "../components/markdown.js";
+import { Linkified, Markdown } from "../components/markdown.js";
 import { ModePill, ModeSheet } from "../components/mode-sheet.js";
 import { ModelPicker } from "../components/model-picker.js";
 import { Spark } from "../components/spark.js";
@@ -18,7 +20,7 @@ export function MessageRow({ m }) {
     return html`
       <details class="block thinking">
         <summary><${Spark} cls="blk-spark" />思考过程</summary>
-        <div class="blk-body pre">${m.text}</div>
+        <div class="blk-body pre"><${Linkified} text=${m.text} /></div>
       </details>`;
   }
   if (m.kind === 'tool_use') {
@@ -33,7 +35,7 @@ export function MessageRow({ m }) {
     return html`
       <details class="block tool-result ${m.isError ? 'is-err' : ''}">
         <summary><span class="blk-ico">${m.isError ? '✕' : '✓'}</span>${m.isError ? '工具出错' : '工具结果'}<span class="blk-sub">${chars} 字符</span></summary>
-        <div class="blk-body pre mono">${m.text}</div>
+        <div class="blk-body pre mono"><${Linkified} text=${m.text} /></div>
       </details>`;
   }
   // kind === text
@@ -41,7 +43,7 @@ export function MessageRow({ m }) {
     return html`
       <div class="msg user">
         <span class="avatar user-avatar">我</span>
-        <div class="bubble">${m.text}</div>
+        <div class="bubble"><${Linkified} text=${m.text} /></div>
         <div class="msg-time">${fmtClock(m.timestamp)}</div>
       </div>`;
   }
@@ -55,7 +57,7 @@ export function MessageRow({ m }) {
     </div>`;
 }
 // ================================================================ 聊天页
-export function Chat({ sessionId, goList }) {
+export function Chat({ sessionId, focusSeq, focusNonce, goList }) {
   const catalog = useModelCatalog();
   const store = useRef({ map: new Map(), sorted: [] });
   const [version, setVersion] = useState(0);
@@ -142,6 +144,7 @@ export function Chat({ sessionId, goList }) {
     if (m.role === 'user' && m.kind === 'text') {
       setPending((p) => (p && m.text?.trim() === p.trim() ? null : p));
     }
+    if (m.role === 'assistant' && m.kind === 'text') setDrafts((d) => reconcileDrafts(d, m));
     if (!pendingBatch.current) {
       pendingBatch.current = [];
       queueMicrotask(() => {
@@ -152,6 +155,17 @@ export function Chat({ sessionId, goList }) {
     }
     pendingBatch.current.push(m);
   }, [sessionId, addMsgs]);
+  // ---- 流式草稿：daemon 的逐字增量，JSONL 落盘后被正式消息替换
+  const [drafts, setDrafts] = useState([]);
+  const clearTimer = useRef(null);
+  useEffect(() => { setDrafts([]); }, [sessionId]);
+  useEffect(() => () => clearTimeout(clearTimer.current), []);
+  useBus('ws:stream', (e) => {
+    if (e.sessionId !== sessionId) return;
+    clearTimeout(clearTimer.current);
+    if (e.clear) { clearTimer.current = setTimeout(() => setDrafts([]), 1500); return; }
+    setDrafts((d) => applyStreamFrame(d, e));
+  }, [sessionId]);
   useBus('ws:status', (e) => { if (e.sessionId === sessionId) setStatus(e.status); }, [sessionId]);
   useBus('ws:run', (e) => {
     if (e.sessionId !== sessionId) return;
@@ -223,6 +237,40 @@ export function Chat({ sessionId, goList }) {
       toast(`历史加载失败：${e.code}`, 'error');
     } finally { loadingOlder.current = false; }
   }, [sessionId, hasMore, firstSeq, addMsgs]);
+  // ---- 搜索结果定位：翻页直到覆盖命中的 seq，再滚到该条并短暂高亮
+  const [highlightKey, setHighlightKey] = useState(null);
+  const pageRef = useRef({ firstSeq: null, hasMore: false });
+  pageRef.current = { firstSeq, hasMore };
+  useEffect(() => {
+    if (focusSeq == null || initLoading || loadErr) return;
+    let cancelled = false;
+    let hlTimer;
+    (async () => {
+      loadingOlder.current = true;
+      try {
+        const r = await loadUntilSeq(
+          (before) => api(`/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=500&beforeSeq=${before}`),
+          pageRef.current,
+          focusSeq,
+        );
+        if (cancelled) return;
+        if (r.messages.length) { setFirstSeq(r.firstSeq); setHasMore(r.hasMore); addMsgs(r.messages); }
+        const sorted = store.current.sorted;
+        const i = findFocusIndex(sorted, focusSeq);
+        if (i < 0) { toast('没找到这条消息，可能已被改写', 'info'); return; }
+        const key = msgKey(sorted[i]);
+        stick.current = false;
+        setHighlightKey(key);
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          scrollRef.current?.querySelector(`[data-key="${key}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }));
+        hlTimer = setTimeout(() => setHighlightKey(null), 2500);
+      } catch (e) {
+        if (!cancelled) toast(`定位失败：${e.code}`, 'error');
+      } finally { loadingOlder.current = false; }
+    })();
+    return () => { cancelled = true; clearTimeout(hlTimer); };
+  }, [sessionId, focusSeq, focusNonce, initLoading, loadErr]);
   // ---- 滚动维护
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -233,7 +281,7 @@ export function Chat({ sessionId, goList }) {
     } else if (stick.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [version, runActive, pending, initLoading]);
+  }, [version, runActive, pending, initLoading, drafts]);
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -290,6 +338,17 @@ export function Chat({ sessionId, goList }) {
       } else if (e.code !== 'unauthorized') toast(`停止失败：${e.code}`, 'error');
     }
   }, [sessionId, activeRunId, isRunning]);
+  // 终端驾驶误判（如上一轮报错后 CLI 收尾写入）时的手动出口：daemon 无 run 时 abort = 解除占用
+  const releaseSession = useCallback(async () => {
+    try {
+      const r = await api(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, { method: 'POST', body: '{}' });
+      if (r?.status === 'aborted') { setRunActive(false); setActiveRunId(null); }
+      setStatus('idle');
+      toast(r?.status === 'aborted' ? '已停止当前运行' : '已解除占用', 'info');
+    } catch (e) {
+      if (e.code !== 'unauthorized') toast(`解除失败：${e.code}`, 'error');
+    }
+  }, [sessionId]);
   const doSend = useCallback(async () => {
     if (!hasContent || !canSend) return;
     setSendBusy(true);
@@ -354,14 +413,19 @@ export function Chat({ sessionId, goList }) {
           ${initLoading && html`<div class="empty">加载中…</div>`}
           ${loadErr && html`<div class="page-err">${loadErr}</div>`}
           ${!initLoading && !loadErr && msgs.length === 0 && html`<div class="empty">（空会话）</div>`}
-          ${msgs.map((m) => html`<${MessageRow} key=${msgKey(m)} m=${m} />`)}
+          ${msgs.map((m) => html`<div key=${msgKey(m)} data-key=${msgKey(m)} class=${msgKey(m) === highlightKey ? 'focus-hl' : ''}><${MessageRow} m=${m} /></div>`)}
           ${pending && html`
             <div class="msg user pending">
               <span class="avatar user-avatar">我</span>
               <div class="bubble">${pending}</div>
               <div class="msg-time">发送中…</div>
             </div>`}
-          ${runActive && html`
+          ${drafts.map((d) => html`
+            <div class="msg assistant streaming" key=${d.key}>
+              <span class="avatar ai-avatar"><${Spark} /></span>
+              <div class="msg-body"><${Markdown} text=${d.text} /></div>
+            </div>`)}
+          ${runActive && !drafts.some((d) => !d.done) && html`
             <div class="msg assistant typing">
               <span class="avatar ai-avatar"><${Spark} /></span>
               <div class="msg-body"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></div>
@@ -371,7 +435,7 @@ export function Chat({ sessionId, goList }) {
       ${showJump && html`<button class="jump-btn" onClick=${() => { stick.current = true; const el = scrollRef.current; el.scrollTop = el.scrollHeight; setShowJump(false); }}>↓</button>`}
       <footer class="composer">
         ${isRunning && html`<div class="runbar"><span class="pulse"></span>Claude 正在运行… <button class="stop-link" onClick=${stopRun}>停止</button></div>`}
-        ${!canSend && !isRunning && disabledReason && html`<div class="runbar muted">${disabledReason}</div>`}
+        ${!canSend && !isRunning && disabledReason && html`<div class="runbar muted">${disabledReason}${status === 'terminal-driving' && !sendBusy && html` <button class="stop-link" onClick=${releaseSession}>解除占用</button>`}</div>`}
         <div class="composer-card ${canSend ? '' : 'disabled'}">
           ${files.length > 0 && html`
             <div class="attach-chips">

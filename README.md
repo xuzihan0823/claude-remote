@@ -16,10 +16,25 @@ claude-remote/
 ├── task/                任务卡目录，每个 .md 是一个可分派的任务窗口
 │   └── INDEX.md         任务总览、依赖关系、并行组
 ├── reports/             各任务窗口执行完成后的结果文档
-├── packages/            daemon、interactions、agent-bridge
+├── packages/            daemon、interactions、agent-bridge、cli（cr 命令）
 ├── web/                 纯静态 Web UI（免构建）
 └── .trellis/ .claude/ .codex/   Trellis 工作流（Claude + Codex 双平台）
 ```
+
+## Mac 端：cr 控制台
+
+Mac 端只有一个命令行入口 `cr`（原菜单栏 App 已删除）。daemon 交给 launchd 常驻：登录即起、崩溃自动拉起。
+
+```sh
+npm install -g @anyu/claude-remote   # 给其他人用：npm 安装
+cr                                           # 首次运行自动初始化（token、查找 claude、注册 launchd），然后进入控制台
+
+# 或者从源码运行（开发）
+pnpm install
+node packages/cli/bin/cr.mjs setup
+```
+
+常用子命令：`cr status`、`cr up|down|restart`、`cr logs`、`cr pair`、`cr web`、`cr search <词> [--full]`、`cr open <id>`。详见 [docs/cli.md](docs/cli.md)。
 
 ## 协作规则
 

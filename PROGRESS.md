@@ -260,6 +260,15 @@ agent team：explorer-opus47 审计完成度正常；**coder-glm（glm-5.2[1m]�
 
 **选型结论（讨论所得）**：面向最终用户，Cloudflare 显著优于 Tailscale——`cloudflared` 跑在 Mac 侧，可被菜单栏 App 内置并自动管理，用户全程零配置且无需知道 CF 存在；Tailscale 要求双端安装、注册、登录同一账号，这部分复杂度无法替用户吸收。用户自己日常使用仍用 Tailscale（已装好，按需开关）。
 
+## 2026-10-21·cr 命令行取代菜单栏 App（分支 feat/cli-tui）
+
+- 新增 `packages/cli`（命令 `cr`）：不带参数进 Ink 全屏控制台（会话列表 + 搜索 + 预览、会话实时视图与回复、审批、配对二维码、日志、启停）；子命令 `setup/up/down/restart/uninstall/status/logs/pair/web/ls/search/show/open`。用法见 `docs/cli.md`。
+- launchd 控制逻辑从 `scripts/launchd/install.sh` 移到 `packages/cli/src/launchd.ts`（Label 不变，旧安装可接管）；`down` 额外 `launchctl disable`，跨登录保持停止。`install.sh` 删除，`run-daemon.sh` 保留为 launchd 入口。
+- `cr setup` 把旧菜单栏 App 存在 Keychain 的 token 迁移进 `.env`，已配对手机不受影响。
+- daemon 新增 `GET /api/sessions/search`（默认标题/路径/预览，`full=1` 流式全文、256MB 预算）与 `GET /api/interactions/pending`（后连客户端补齐待审批）。
+- 删除 `mac/` Swift 菜单栏 App。
+- 测试：daemon server 19/19，cli 18/18（含 ink-testing-library 的 TUI 交互测试）；在 Linux 伪终端里实跑过 TUI。**未在 macOS 实测 launchctl 与 `claude --resume` 接管**。
+
 ## 2026-10-21·进程守护修复（分支 fix/daemon-supervision）
 
 针对「nohup 起的 daemon 会随会话消失」（7-31 坑 3）：

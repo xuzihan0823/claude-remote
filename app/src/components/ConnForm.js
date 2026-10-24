@@ -31,7 +31,7 @@ export function ConnForm({ initBase, initToken, busy, submitLabel, onSubmit }) {
   return (
     <View style={{ gap: 14 }}>
       <View style={{ gap: 4 }}>
-        <Text style={labelStyle}>Mac 服务器地址</Text>
+        <Text style={labelStyle}>服务器地址</Text>
         <TextInput
           value={base}
           onChangeText={setBase}
@@ -39,14 +39,14 @@ export function ConnForm({ initBase, initToken, busy, submitLabel, onSubmit }) {
           autoCapitalize="none"
           autoCorrect={false}
           autoComplete="off"
-          placeholder="如 http://100.64.0.5:8787（留空 = 当前地址）"
+          placeholder="http://100.64.0.5:8787"
           placeholderTextColor={colors.ink3}
           style={inputStyle}
         />
-        <Text style={hintStyle}>填 Mac 的 Tailscale IP 或局域网 IP + daemon 端口</Text>
+        <Text style={hintStyle}>Mac 的 Tailscale IP 或局域网 IP + 端口，cr 配对页（按 p）里有</Text>
       </View>
       <View style={{ gap: 4 }}>
-        <Text style={labelStyle}>访问令牌（BRIDGE_TOKEN）</Text>
+        <Text style={labelStyle}>访问令牌</Text>
         <TextInput
           value={tok}
           onChangeText={setTok}
@@ -54,19 +54,19 @@ export function ConnForm({ initBase, initToken, busy, submitLabel, onSubmit }) {
           autoCapitalize="none"
           autoCorrect={false}
           autoComplete="off"
-          placeholder="daemon .env 里的 BRIDGE_TOKEN"
+          placeholder="BRIDGE_TOKEN"
           placeholderTextColor={colors.ink3}
           style={inputStyle}
         />
-        <Text style={hintStyle}>与 Mac 上 daemon 配置的 token 一致</Text>
+        <Text style={hintStyle}>Mac 上 ~/.claude-remote/config.env 里的 BRIDGE_TOKEN</Text>
       </View>
       <TouchableOpacity
         onPress={submit}
         disabled={disabled}
         activeOpacity={0.85}
         style={{
-          borderRadius: radius.sm,
-          paddingVertical: 9,
+          borderRadius: 24,
+          paddingVertical: 13,
           paddingHorizontal: 18,
           borderWidth: 1,
           borderColor: colors.accent,
@@ -75,7 +75,7 @@ export function ConnForm({ initBase, initToken, busy, submitLabel, onSubmit }) {
           opacity: disabled ? 0.5 : 1,
         }}
       >
-        <Text style={{ color: '#fff', fontSize: 14.5, fontWeight: '500' }}>
+        <Text style={{ color: '#fff', fontSize: 15.5, fontWeight: '500' }}>
           {busy ? '连接中…' : submitLabel}
         </Text>
       </TouchableOpacity>
