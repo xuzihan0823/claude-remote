@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Image, StyleSheet, useColorScheme } from 'react-native';
 import Animated, { Easing, runOnJS, useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from 'react-native-reanimated';
 import * as SplashScreen from 'expo-splash-screen';
@@ -11,6 +11,7 @@ import { SPLASH_FADE_MS } from '../lib/intro.js';
 // 露出登录页 / 首页的芒星绽放。改字标时用 design/gen-splash.py 重新生成两张图并同步 LOCKUP_W。
 export const LOCKUP_W = 254; // pt，等于 app.json 里的 imageWidth
 const LOCKUP_H = LOCKUP_W * (128 / 763);
+const IMAGE_WAIT_MS = 500;
 const LIGHT = require('../../assets/splash-lockup.png');
 const DARK = require('../../assets/splash-lockup-dark.png');
 
@@ -20,9 +21,17 @@ export function SplashOverlay({ leaving, onDone }) {
   const bgOp = useSharedValue(1);
   const markOp = useSharedValue(1);
   const markScale = useSharedValue(1);
+  // 字标图是异步加载的：没加载完就收起原生启动屏，会露出一帧空白。兜底计时防止图片迟迟不回调时卡在启动屏。
+  const [imageReady, setImageReady] = useState(false);
 
   useEffect(() => {
-    if (!leaving) return;
+    if (!leaving) return undefined;
+    const timer = setTimeout(() => setImageReady(true), IMAGE_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [leaving]);
+
+  useEffect(() => {
+    if (!leaving || !imageReady) return;
     SplashScreen.hideAsync().catch(() => { /* noop */ });
     const ease = Easing.out(Easing.cubic);
     markOp.value = withTiming(0, { duration: SPLASH_FADE_MS * 0.75, easing: ease });
@@ -30,7 +39,7 @@ export function SplashOverlay({ leaving, onDone }) {
     bgOp.value = withTiming(0, { duration: SPLASH_FADE_MS, easing: Easing.inOut(Easing.quad) }, (finished) => {
       if (finished && onDone) runOnJS(onDone)();
     });
-  }, [leaving]);
+  }, [leaving, imageReady]);
 
   const bgStyle = useAnimatedStyle(() => ({ opacity: bgOp.value }));
   const markStyle = useAnimatedStyle(() => ({ opacity: markOp.value, transform: [{ scale: markScale.value }] }));
@@ -38,7 +47,7 @@ export function SplashOverlay({ leaving, onDone }) {
   return (
     <Animated.View pointerEvents={leaving ? 'none' : 'auto'} style={[StyleSheet.absoluteFill, styles.center, bgStyle, { backgroundColor: palettes[dark ? 'dark' : 'light'].bg }]}>
       <Animated.View style={markStyle}>
-        <Image source={dark ? DARK : LIGHT} style={{ width: LOCKUP_W, height: LOCKUP_H }} resizeMode="contain" />
+        <Image source={dark ? DARK : LIGHT} style={{ width: LOCKUP_W, height: LOCKUP_H }} resizeMode="contain" onLoadEnd={() => setImageReady(true)} />
       </Animated.View>
     </Animated.View>
   );
