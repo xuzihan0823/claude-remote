@@ -25,15 +25,21 @@ export function GlassMenu({ visible, anchor, items, onClose }) {
     run?.();
   };
 
+  const open = () => {
+    progress.stopAnimation();
+    Animated.spring(progress, { toValue: 1, damping: 20, stiffness: 320, mass: 0.9, useNativeDriver: true }).start();
+  };
+
+  // 首次打开等 Modal onShow 再起动画：Modal 呈现是异步的，提前起跑会丢掉开头几帧，菜单像是「跳」出来
   useEffect(() => {
     if (visible) {
-      setMounted(true);
-      progress.stopAnimation();
-      Animated.spring(progress, { toValue: 1, damping: 20, stiffness: 320, mass: 0.9, useNativeDriver: true }).start();
+      if (mounted) open();
+      else setMounted(true);
     } else if (mounted) {
       progress.stopAnimation();
       Animated.timing(progress, { toValue: 0, duration: 150, easing: Easing.bezier(...spring), useNativeDriver: true })
-        .start(() => {
+        .start(({ finished }) => {
+          if (!finished) return;
           setMounted(false);
           // iOS 优先由 Modal.onDismiss 触发；其它平台无该回调，兜底定时执行（flush 幂等）
           setTimeout(flush, Platform.OS === 'ios' ? 400 : 0);
@@ -57,7 +63,7 @@ export function GlassMenu({ visible, anchor, items, onClose }) {
   const contentOpacity = progress.interpolate({ inputRange: [0, 0.55, 1], outputRange: [0, 0.6, 1], extrapolate: 'clamp' });
 
   return (
-    <Modal transparent visible={mounted} animationType="none" statusBarTranslucent onRequestClose={onClose} onDismiss={flush}>
+    <Modal transparent visible={mounted} animationType="none" statusBarTranslucent onRequestClose={onClose} onShow={() => visible && open()} onDismiss={flush}>
       <Pressable
         style={StyleSheet.absoluteFill}
         onPress={onClose}
