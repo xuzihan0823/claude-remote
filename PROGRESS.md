@@ -336,5 +336,7 @@ agent team：explorer-opus47 审计完成度正常；**coder-glm（glm-5.2[1m]�
 - M4 `deploy/relay/`：一行安装脚本（重跑即升级、保留密钥）、compose（relay + Caddy 自动 HTTPS / 自带证书）、GHCR 多架构镜像工作流（`relay-v*` 标签触发）。DinD 实测安装与升级、本机 buildx amd64/arm64 构建通过。
 - M5 App 设备页：显示当前通道、通道偏好（自动/仅直连/仅 relay）、地址按通道标注。
 - 规格：`.trellis/spec/backend/relay-tunnel.md`、`.trellis/spec/frontend/connection-channels.md`。
-- 待办：镜像推 GHCR 并设为公开；真实服务器部署验证；真机测"直连断开 10 秒内切到 relay"。
+- 已部署到华为云 60.204.203.202：`https://cr.anyyu.cloud:8443`（宿主 Caddy 共用 8443 按域名分流，relay 以 systemd `claude-remote-relay` 运行，未用 Docker——机器无 Docker、内存 768MB、80 端口被宿主 Caddy 占用）。公网 HTTPS 端到端验证通过：token 200/401、配对端点 403、WS ping/pong、relay 重启后 Mac 约 1s 重连。
+- 实测：国内服务器上未备案域名（含 sslip.io）访问 80 端口被「非法阻断」，sslip.io 兜底在国内不可用。
+- 待办：合并本分支后在常用 daemon 上 `cr relay add`；真机测"直连断开 10 秒内切到 relay"；镜像推 GHCR（可选）。
 - 教训：本仓库多个 worktree 共用 stash 列表，临时保存文件别用 `git stash`。
