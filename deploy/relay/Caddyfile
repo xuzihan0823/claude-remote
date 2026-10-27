@@ -1,0 +1,10 @@
+# RELAY_TLS 为空时自动申请证书；使用已有证书时 install.sh 把它设为
+#   tls /certs/fullchain.pem /certs/privkey.pem
+# Caddy 在解析前做环境变量替换，所以它可以展开成一整条指令。
+{$RELAY_DOMAIN} {
+	{$RELAY_TLS}
+	reverse_proxy relay:8790 {
+		# 流式响应（搜索、上传进度）不缓冲，收到就转给手机
+		flush_interval -1
+	}
+}

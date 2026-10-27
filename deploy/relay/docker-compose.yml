@@ -1,0 +1,33 @@
+# claude-remote relay：relay（透明隧道，无状态）+ Caddy（HTTPS 终止与反代）。
+# 由 install.sh 安装到 /opt/claude-remote-relay/，变量来自同目录 .env。
+# 与本机情况相关的端口与证书挂载写在 install.sh 生成的 docker-compose.override.yml 里。
+
+services:
+  relay:
+    image: ${RELAY_IMAGE:-ghcr.io/xuzihan0823/claude-remote-relay}:${RELAY_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      RELAY_SECRET: ${RELAY_SECRET:?RELAY_SECRET is required}
+      RELAY_HOST: 0.0.0.0
+      RELAY_PORT: "8790"
+    expose:
+      - "8790"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - relay
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?RELAY_DOMAIN is required}
+    ports:
+      - "${RELAY_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # 只保存证书与 ACME 账号，避免每次重建都重新签发而撞上速率限制
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,35 @@
+# 不用 Docker 时的 systemd 单元样例，配合你已有的反向代理（nginx / Caddy）使用。
+#
+# 准备：
+#   useradd --system --no-create-home --shell /usr/sbin/nologin claude-relay
+#   git clone https://github.com/xuzihan0823/claude-remote /opt/claude-remote
+#   cd /opt/claude-remote && pnpm install --frozen-lockfile --filter @claude-remote/relay...
+#   pnpm --filter @claude-remote/relay build      # 生成 packages/relay/dist/relay.mjs
+#   printf 'RELAY_SECRET=%s\n' "$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')" > /etc/claude-remote-relay.env
+#   chmod 600 /etc/claude-remote-relay.env
+#   cp deploy/relay/relay.service /etc/systemd/system/claude-remote-relay.service
+#   systemctl daemon-reload && systemctl enable --now claude-remote-relay
+#
+# 反向代理把 https://你的域名/ 全部转发到 http://127.0.0.1:8790，并支持 WebSocket upgrade、关闭响应缓冲。
+
+[Unit]
+Description=claude-remote relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=claude-relay
+EnvironmentFile=/etc/claude-remote-relay.env
+Environment=RELAY_HOST=127.0.0.1
+Environment=RELAY_PORT=8790
+ExecStart=/usr/bin/node /opt/claude-remote/packages/relay/dist/relay.mjs
+Restart=always
+RestartSec=2
+MemoryMax=512M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
