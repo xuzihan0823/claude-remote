@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Alert } from 'react-native';
-import { api } from '../../../../web/core/api.js';
+import { api, baseUrl } from '../../../../web/core/api.js';
 import { bus, toast } from '../../../../web/core/bus.js';
-import { getDevice, hostOf, removeDeviceAction, updateDevice } from '../../../../web/core/devices.js';
+import { baseChannel, candidateBases, channelPrefOf, getDevice, hostOf, removeDeviceAction, syncBases, updateDevice } from '../../../../web/core/devices.js';
 import { useConnActions } from '../../lib/conn-context.js';
 import { useDevices } from '../../lib/useDevices.js';
 import { QrScanner } from '../../components/QrScanner.js';
@@ -10,9 +10,16 @@ import { useTheme } from '../../theme.js';
 import { Group, Row, SettingsPage } from './ui.js';
 import { agoText } from './labels.js';
 
+const CHANNEL_LABELS = { tailscale: '直连 · Tailscale', lan: '直连 · 局域网', mdns: '直连 · 局域网', relay: 'relay' };
+const PREF_OPTIONS = [
+  { key: 'auto', label: '自动', sub: '优先直连，直连不通时走 relay' },
+  { key: 'direct', label: '只走直连', sub: 'Tailscale / 局域网' },
+  { key: 'relay', label: '只走 relay', sub: '经自建 relay 服务器' },
+];
+
 export function DeviceDetailScreen({ navigation, route }) {
   const { colors } = useTheme();
-  const { switchDevice, tryConnectBases } = useConnActions();
+  const { switchDevice, tryConnectBases, reselect } = useConnActions();
   const { list, current } = useDevices();
   const d = list.find((x) => x.id === route.params?.deviceId);
   const isCurrent = !!d && d.id === current;
@@ -37,7 +44,7 @@ export function DeviceDetailScreen({ navigation, route }) {
   const reconnect = async (next) => {
     if (!isCurrent) return;
     setBusy(true);
-    await tryConnectBases(next.bases, next.token);
+    await tryConnectBases(candidateBases(next), next.token);
     setBusy(false);
   };
 
@@ -90,13 +97,25 @@ export function DeviceDetailScreen({ navigation, route }) {
   const onScan = async ({ token: tok, bases }) => {
     setScanOpen(false);
     setBusy(true);
-    // 重新配对：拿到新 token / 地址后替换这台设备的凭据
-    updateDevice(d.id, { token: tok, bases: [...bases, ...d.bases] });
+    // 重新配对：二维码里的地址就是 Mac 当前的完整列表，按 daemon 报告的地址同步（手填地址保留）
+    updateDevice(d.id, { token: tok });
+    const synced = syncBases(d.id, bases);
     changed();
-    const ok = await tryConnectBases(bases, tok);
+    const ok = await tryConnectBases(synced ? candidateBases(synced) : bases, tok);
     setBusy(false);
     if (ok) toast('已重新配对', 'info');
   };
+
+  const pref = channelPrefOf(d);
+  const setPref = async (key) => {
+    if (key === pref) return;
+    updateDevice(d.id, { channelPref: key });
+    changed();
+    if (isCurrent) await reselect();
+  };
+  const hasRelay = d.bases.some((b) => baseChannel(b) === 'relay');
+  const hasDirect = d.bases.some((b) => baseChannel(b) !== 'relay');
+  const prefAvailable = (key) => key === 'auto' || (key === 'relay' ? hasRelay : hasDirect);
 
   const status = isCurrent
     ? (health === null ? { label: '检查中…', dot: colors.ink3 } : health ? { label: '已连接', dot: colors.ok } : { label: '连不上', dot: colors.danger })
@@ -107,6 +126,7 @@ export function DeviceDetailScreen({ navigation, route }) {
     <SettingsPage title={d.name}>
       <Group title="状态">
         <Row icon="pulse" label={status.label} dot={status.dot} value={isCurrent && latency != null && health ? `${latency} ms` : (!isCurrent && d.lastConnectedAt ? `上次 ${agoText(d.lastConnectedAt)}` : undefined)} />
+        {isCurrent && health ? <Row icon="globe" label="通道" value={CHANNEL_LABELS[baseChannel(baseUrl)]} /> : null}
         <Row icon="info" label="daemon" value={info.version ? `v${info.version}` : '-'} />
         <Row icon="spark" label="Claude CLI" value={info.claudeCliVersion || '-'} />
       </Group>
@@ -116,13 +136,26 @@ export function DeviceDetailScreen({ navigation, route }) {
         <Row icon="key" label="Token" value={`••••${String(d.token).slice(-4)}`} onPress={() => navigation.navigate('AddDevice', { deviceId: d.id })} />
       </Group>
 
-      <Group title="地址（按顺序尝试）" footer={'自动用第一个能连通的地址。长按地址可删除。'}>
+      <Group title="通道偏好" footer={hasRelay ? undefined : '这台 Mac 还没有 relay 地址。在 Mac 上执行 cr relay add 后，连上一次就会自动出现。'}>
+        {PREF_OPTIONS.map((o) => (
+          <Row
+            key={o.key}
+            label={o.label}
+            sub={o.sub}
+            checked={pref === o.key}
+            disabled={busy || (!prefAvailable(o.key) && pref !== o.key)}
+            onPress={() => setPref(o.key)}
+          />
+        ))}
+      </Group>
+
+      <Group title="地址" footer={'同时尝试所有地址，按通道偏好选择。长按地址可删除。'}>
         {d.bases.map((b) => (
           <Row
             key={b}
             icon="globe"
             label={hostOf(b)}
-            value={b === d.lastBase ? '上次使用' : undefined}
+            value={`${CHANNEL_LABELS[baseChannel(b)]}${b === d.lastBase ? ' · 上次使用' : ''}`}
             onLongPress={() => removeAddress(b)}
           />
         ))}
