@@ -19,7 +19,7 @@ import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
 import type { DaemonConfig } from "./config.js";
-import { enumeratePairBases, isLoopbackAddress, looksProxied, pairPayload, type PairInfo } from "./pair.js";
+import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
 import { readSessionCwd, resolveSessionFile } from "./session-files.js";
 import { StreamBuffer } from "./run/stream-buffer.js";
@@ -67,6 +67,16 @@ export interface DaemonServerOptions {
   claudeCliVersion: () => string;
   /** 测试/嵌入方可注入；默认每次请求重新读取 Mac 设置，以反映即时切换。 */
   modelCatalog?: () => Promise<ModelCatalog>;
+  /** relay connector 只读状态；缺省视为未启用。 */
+  relayStatus?: () => RelayStatus;
+}
+
+export interface RelayStatus {
+  state: "disabled" | "connecting" | "connected" | "error";
+  error?: string;
+  /** relay 启用时手机可用的 base（`${RELAY_URL}/d/<deviceId>`），追加在直连地址之后。 */
+  base?: string;
+  since?: number;
 }
 
 interface ClientState {
@@ -132,7 +142,7 @@ export class DaemonServer {
   /** 配对信息（候选地址每次现查——Tailscale 可能在 daemon 启动后才拉起）；listen() 后用实际端口。 */
   get pairInfo(): PairInfo {
     const { token } = this.#options.config;
-    return { bases: enumeratePairBases(this.#pairPort), token };
+    return { bases: pairBases(this.#pairPort, this.#options.relayStatus?.().base), token };
   }
 
   /** 实际监听地址（测试用 port 0）。 */
@@ -233,6 +243,12 @@ export class DaemonServer {
         claudeCliVersion: this.#options.claudeCliVersion(),
         hostname: hostname(),
       });
+      return;
+    }
+
+    if (method === "GET" && path === "/api/connect-info") {
+      const relay = this.#options.relayStatus?.() ?? { state: "disabled" };
+      this.#json(res, 200, { bases: pairBases(this.#pairPort, relay.base), relay });
       return;
     }
 
@@ -748,6 +764,11 @@ export class DaemonServer {
     }
     if (typeof frame !== "object" || frame === null) return;
     const { type, sessionId } = frame as { type?: unknown; sessionId?: unknown };
+    // 应用层心跳：RN 的 WebSocket 看不到协议层 ping，客户端靠 pong 判断半开连接
+    if (type === "ping") {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "pong" }));
+      return;
+    }
     if (typeof sessionId !== "string" || sessionId === "") return;
 
     if (type === "subscribe") {

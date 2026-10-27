@@ -94,3 +94,66 @@ test('存储损坏时不崩溃，按空列表处理', () => {
   values.set('bridge_devices', JSON.stringify([{ id: 'x', bases: ['http://a:1'], token: 't' }, { bad: 1 }, null]));
   assert.deepEqual(D.loadDevices().map((d) => d.id), ['x']);
 });
+
+const RELAY = 'https://relay.example.com/d/abc123';
+
+test('baseChannel：relay / Tailscale(100.64/10) / mDNS / 局域网', () => {
+  assert.equal(D.baseChannel(RELAY), 'relay');
+  assert.equal(D.baseChannel('http://100.64.0.1:8787'), 'tailscale');
+  assert.equal(D.baseChannel('http://100.127.255.1:8787'), 'tailscale');
+  assert.equal(D.baseChannel('http://100.63.0.1:8787'), 'lan', '100.63 不在 CGNAT 段');
+  assert.equal(D.baseChannel('http://100.128.0.1:8787'), 'lan');
+  assert.equal(D.baseChannel('http://Example-Mac.local:8787'), 'mdns');
+  assert.equal(D.baseChannel('http://192.168.1.2:8787'), 'lan');
+  assert.equal(D.baseChannel('https://relay.example.com/other'), 'lan', '无 /d/<id> 前缀不算 relay');
+});
+
+test('candidateBases 按通道偏好过滤；旧记录无偏好按 auto；auto 保持 lastBase 优先', () => {
+  const bases = ['http://100.64.1.1:8787', RELAY, 'http://192.168.1.2:8787'];
+  const legacy = { lastBase: RELAY, bases };
+  assert.deepEqual(D.candidateBases(legacy), [RELAY, 'http://100.64.1.1:8787', 'http://192.168.1.2:8787']);
+  assert.deepEqual(D.candidateBases({ ...legacy, channelPref: 'direct' }), ['http://100.64.1.1:8787', 'http://192.168.1.2:8787']);
+  assert.deepEqual(D.candidateBases({ ...legacy, channelPref: 'relay' }), [RELAY]);
+  assert.deepEqual(D.candidateBases({ ...legacy, channelPref: 'bogus' }), D.candidateBases(legacy));
+  assert.equal(D.channelPrefOf({}), 'auto');
+});
+
+test('updateDevice 设置通道偏好，非法值忽略', () => {
+  const a = D.upsertDevice({ base: 'http://a:1', token: 't' });
+  D.updateDevice(a.id, { channelPref: 'relay' });
+  assert.equal(D.getDevice(a.id).channelPref, 'relay');
+  D.updateDevice(a.id, { channelPref: 'nope' });
+  assert.equal(D.getDevice(a.id).channelPref, 'relay');
+});
+
+test('syncBases：daemon 列表为准淘汰旧地址，手填地址保留，lastBase 不在新列表时清空', () => {
+  const a = D.upsertDevice({ bases: ['http://192.168.1.2:8787', 'http://100.64.1.1:8787'], base: 'http://192.168.1.2:8787', token: 't' });
+  D.upsertDevice({ base: 'http://my-mac.example:9000', token: 't', manual: true });
+  D.syncBases(a.id, ['http://100.64.1.1:8787', 'http://192.168.1.9:8787', RELAY]);
+  const d = D.getDevice(a.id);
+  assert.deepEqual(d.bases, ['http://100.64.1.1:8787', 'http://192.168.1.9:8787', RELAY, 'http://my-mac.example:9000']);
+  assert.equal(d.lastBase, 'http://my-mac.example:9000', '手填地址仍在列表里，lastBase 保留');
+
+  D.updateDevice(a.id, { bases: d.bases.filter((b) => b !== 'http://my-mac.example:9000') });
+  assert.deepEqual(D.getDevice(a.id).manualBases, [], '删掉的地址也从手填里去掉');
+  D.syncBases(a.id, ['http://100.64.1.1:8787']);
+  assert.deepEqual(D.getDevice(a.id).bases, ['http://100.64.1.1:8787']);
+  assert.equal(D.getDevice(a.id).lastBase, '', 'lastBase 被淘汰');
+});
+
+test('syncBases：本次连通的地址即使 daemon 未报告也保留；daemon 报告为空时不动', () => {
+  const a = D.upsertDevice({ bases: ['http://localhost:8788', 'http://192.168.1.2:8787'], base: 'http://localhost:8788', token: 't' });
+  D.syncBases(a.id, [], 'http://localhost:8788');
+  assert.deepEqual(D.getDevice(a.id).bases, ['http://localhost:8788', 'http://192.168.1.2:8787']);
+  D.syncBases(a.id, ['http://100.64.1.1:8787'], 'http://localhost:8788');
+  assert.deepEqual(D.getDevice(a.id).bases, ['http://100.64.1.1:8787', 'http://localhost:8788']);
+  assert.equal(D.getDevice(a.id).lastBase, 'http://localhost:8788');
+  assert.equal(D.syncBases('nope', ['http://x:1']), null);
+});
+
+test('设置页手动新增的地址记为手填，syncBases 不会淘汰', () => {
+  const a = D.upsertDevice({ base: 'http://100.64.1.1:8787', token: 't' });
+  D.updateDevice(a.id, { bases: ['http://100.64.1.1:8787', 'http://mac.tailnet.ts.net:8787'] });
+  D.syncBases(a.id, ['http://100.64.1.1:8787']);
+  assert.deepEqual(D.getDevice(a.id).bases, ['http://100.64.1.1:8787', 'http://mac.tailnet.ts.net:8787']);
+});

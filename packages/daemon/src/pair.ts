@@ -40,7 +40,7 @@ function isIpv4(address: string): boolean {
   return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(address);
 }
 
-function isTailscaleAddress(address: string): boolean {
+export function isTailscaleAddress(address: string): boolean {
   const [a, b] = address.split(".").map(Number);
   return a === 100 && b !== undefined && b >= 64 && b <= 127;
 }
@@ -62,6 +62,13 @@ export function enumeratePairBases(port: number): string[] {
   const localHostname = hostname().toLowerCase().endsWith(".local") ? hostname().toLowerCase() : `${hostname().toLowerCase()}.local`;
   const addresses = [...tailscale, ...(lan === undefined ? [] : [lan]), localHostname];
   return [...new Set(addresses)].map((address) => `http://${address}:${port}`);
+}
+
+/** 配对/同步用的全部候选地址：直连在前，relay base（启用时）追加在最后。 */
+export function pairBases(port: number, relayBase?: string): string[] {
+  const bases = enumeratePairBases(port);
+  if (relayBase !== undefined && !bases.includes(relayBase)) bases.push(relayBase);
+  return bases;
 }
 
 export function pairPayload(info: PairInfo): string {

@@ -18,7 +18,7 @@ import {
 } from '../../web/core/api.js';
 import { api } from '../../web/core/api.js';
 import { bus, toast, useBus } from '../../web/core/bus.js';
-import { candidateBases, currentDeviceId, displayName, getDevice, loadDevices, updateDevice, upsertDevice } from '../../web/core/devices.js';
+import { candidateBases, currentDeviceId, displayName, getDevice, loadDevices, syncBases, updateDevice, upsertDevice } from '../../web/core/devices.js';
 import { applyAppearance } from './lib/prefs.js';
 import { ws } from '../../web/core/ws.js';
 import { parseDeepLink } from './lib/deep-link.js';
@@ -42,6 +42,7 @@ try { SplashScreen.setOptions({ duration: 0, fade: false }); } catch { /* 旧版
 const SPLASH_MAX_MS = 2500;
 applyAppearance(); // 设置里选的浅色 / 深色要在首帧前生效
 loadDevices(); // 旧版单连接数据迁移成设备列表 // 网络慢时最多等这么久，之后照常显示「连接中」
+ws.setAutoReselect(true); // 连接失败 / 半开时由 App 重新选通道（reselect）
 
 const Stack = createNativeStackNavigator();
 const navigationRef = createNavigationContainerRef();
@@ -104,14 +105,20 @@ export default function App() {
   }, []);
 
   // opts.beforeCommit：探测成功后、切到首页前调用（登录页借此播放「已连接」衔接动画）
-  // 连接成功后记下这台 Mac（设备列表），再异步取主机名 / 版本补全显示信息
-  const rememberDevice = useCallback((bases, base, tok) => {
-    const d = upsertDevice({ bases, base, token: tok });
+  // 连接成功后记下这台 Mac（设备列表），再异步取主机名 / 版本补全显示信息，并按 daemon 报告同步候选地址。
+  // manual：地址是用户手填的，之后同步地址时永远保留。
+  const rememberDevice = useCallback((bases, base, tok, manual) => {
+    const d = upsertDevice({ bases, base, token: tok, manual });
     bus.emit('devices');
     api('/api/health').then((h) => {
       updateDevice(d.id, { autoName: h?.hostname ? displayName(h.hostname, base) : undefined, info: { version: h?.version, claudeCliVersion: h?.claudeCliVersion } });
       bus.emit('devices');
     }).catch(() => { /* 显示信息缺失不影响使用 */ });
+    api('/api/connect-info').then((info) => {
+      if (!Array.isArray(info?.bases)) return;
+      syncBases(d.id, info.bases, base);
+      bus.emit('devices');
+    }).catch(() => { /* 旧 daemon 无此接口（404）或网络问题：沿用已有地址 */ });
     return d;
   }, []);
 
@@ -123,7 +130,7 @@ export default function App() {
       await probeBase(nextBase, tok);
       if (opts?.beforeCommit) await opts.beforeCommit();
       saveConn(nextBase, tok);
-      rememberDevice([nextBase], nextBase, tok);
+      rememberDevice([nextBase], nextBase, tok, true);
       commitConn();
       setAuth('ok');
       ws.stop();
@@ -145,7 +152,7 @@ export default function App() {
       if (opts?.beforeCommit) await opts.beforeCommit();
       saveBases(bases);
       saveConn(base, tok);
-      rememberDevice(bases, base, tok);
+      rememberDevice(bases, base, tok, !!opts?.manual);
       commitConn();
       setAuth('ok');
       ws.stop();
@@ -178,13 +185,42 @@ export default function App() {
     else tryConnect(baseUrl, token);
   }, []);
 
-  // RN 后台会挂起 timer，回前台必须主动重连（迁移计划 §4）
+  // 对当前设备的候选地址重新探测，换到当前最优通道。只换 base、重启 ws，不重挂导航、不清缓存。
+  const reselectingRef = useRef(false);
+  const reselect = useCallback(async () => {
+    if (reselectingRef.current || authRef.current !== 'ok') return;
+    const d = getDevice(currentDeviceId());
+    if (!d || d.token !== token) { ws.reconnectNow(); return; }
+    reselectingRef.current = true;
+    const fromBase = baseUrl;
+    const fromToken = token;
+    try {
+      const next = await probeBases(candidateBases(d), d.token);
+      if (baseUrl !== fromBase || token !== fromToken) return; // 期间切了设备 / 退出，交给那条路径
+      if (next === baseUrl) { ws.reconnectNow(); return; }
+      saveConn(next, d.token);
+      connKeyRef.current = `${baseUrl}\n${token}`;
+      upsertDevice({ bases: [next], base: next, token: d.token });
+      bus.emit('devices');
+      ws.stop();
+      ws.start();
+    } catch (e) {
+      if (baseUrl !== fromBase || token !== fromToken) return;
+      if (e.code === 'unauthorized') bus.emit('unauthorized');
+      else ws.resume();
+    } finally {
+      reselectingRef.current = false;
+    }
+  }, []);
+  useBus('ws-reselect', () => { reselect(); }, [reselect]);
+
+  // RN 后台会挂起 timer，回前台重新选通道（网络可能已从 Wi-Fi 换成蜂窝）
   useEffect(() => {
     const sub = AppState.addEventListener('change', (s) => {
-      if (s === 'active' && authRef.current === 'ok') ws.reconnectNow();
+      if (s === 'active') reselect();
     });
     return () => sub.remove();
-  }, []);
+  }, [reselect]);
 
   // claude-remote:// 深链（冷启动 + 运行中）：
   //   setup    → 配对确认
@@ -250,7 +286,7 @@ export default function App() {
       <KeyboardProvider>
         <SafeAreaProvider>
           <BottomSheetModalProvider>
-            <ConnActions.Provider value={{ tryConnect, tryConnectBases, switchDevice }}>
+            <ConnActions.Provider value={{ tryConnect, tryConnectBases, switchDevice, reselect }}>
               <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
               {auth !== 'ok' ? (
                 <ConnectScreen busy={auth === 'checking'} error={authErr} onSubmit={tryConnect} onScan={tryConnectBases} />

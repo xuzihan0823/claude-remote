@@ -13,6 +13,20 @@
 ### GET /api/health
 `200 {"ok":true,"version":"<daemon版本>","claudeCliVersion":"<检测值|unknown>"}`
 
+### GET /api/connect-info
+
+手机连上后同步这台 Mac 的候选地址，沿用 Bearer 鉴权，不含 token：
+
+```jsonc
+{
+  "bases": ["http://100.x.x.x:8787", "http://192.168.1.2:8787", "http://Mac.local:8787"],
+  "relay": { "state": "disabled" }   // disabled | connecting | connected | error；启用后另有 base / error / since
+}
+```
+
+- `bases` 与配对二维码同源（`enumeratePairBases()`：Tailscale / 局域网 / mDNS），每次请求现查；relay 启用时其 base（`<RELAY_URL>/d/<deviceId>`）追加在最后。
+- 客户端以此为准刷新设备地址（`syncBases`），手填地址保留；旧 daemon 返回 404 时客户端忽略。
+
 ### GET /api/models
 
 返回 Mac 模型目录：`200 {"models":[{"id":"provider/model","alias":"provider/model","displayName":"Model label"}],"defaultModel":"provider/model"}`。`defaultModel` 可省略；本接口沿用 Bearer 鉴权。
@@ -120,10 +134,14 @@ Body 三选一：`{"type":"allow_once"}` | `{"type":"deny","message?":"…"}` | 
 ```jsonc
 {"type":"subscribe","sessionId":"…"}    // 可多会话；列表页可订阅 "*" 仅收 status/approval
 {"type":"unsubscribe","sessionId":"…"}
+{"type":"ping"}                         // 应用层心跳，daemon 立即回 pong；无需 sessionId
 ```
+
+应用层心跳：RN 的 WebSocket 看不到协议层 ping（daemon 仍每 30 秒发协议层 ping 清理死连接），客户端每 10 秒发 `ping`。收到过至少一次 `pong` 后，若 `ping` 发出 5 秒内没收到任何帧即判定半开、主动断开并重新选通道；从未收到 `pong`（旧 daemon）则不做此判定。
 
 ### server → client
 ```jsonc
+{"type":"pong"}                                                     // 回应客户端 ping，不进业务分发
 {"type":"message","sessionId":"…","message":RenderMessage}          // watcher 增量（含 daemon 自跑轮次落盘的行）
 {"type":"stream","sessionId":"…","key":"<apiMessageId>:<blockIndex>","offset":0,"text":"…","done?":true}
     // daemon 自跑轮次的逐字草稿（约 40ms 合一帧）。offset = 本帧之前已发字符数；offset 0 为整段替换（订阅时补发的快照）。
@@ -187,3 +205,10 @@ Body 三选一：`{"type":"allow_once"}` | `{"type":"deny","message?":"…"}` | 
 | `INTERACTIONS_DB_PATH` | | `.data/interactions.sqlite` | 审批状态库 |
 | `PERMISSION_TIMEOUT_MS` | | `300000` | 审批超时（超时即 deny） |
 | `BARK_URL` / `NTFY_URL` | | — | 推送通知（可选，二选一） |
+| `RELAY_URL` | | — | 自建 relay 地址：`https://`；`http://` 仅限 `localhost` / `127.0.0.1`；不能带参数或凭据 |
+| `RELAY_SECRET` | | — | relay 服务器的 `RELAY_SECRET`（≥32 个可见 ASCII 字符，不含引号、`#`、反斜杠） |
+| `RELAY_DEVICE_ID` | | — | 设备 ID，必须由 `RELAY_DEVICE_KEY` 派生 |
+| `RELAY_DEVICE_KEY` | | — | 设备私钥（`cr relay add` 生成） |
+| `RELAY_ENABLED` | | `on` | `on` / `off`；`off` 时不连接 relay、不校验其余 `RELAY_*` |
+
+`RELAY_*` 由 `cr relay` 管理。前四项齐全且 `RELAY_ENABLED` 不是 `off` 时启用 relay；缺任一项视为未启用；值非法时 daemon 拒绝启动（`ConfigError`）。

@@ -289,6 +289,29 @@ test("配对端点：本机直连放行；带代理特征头（隧道/反代）�
   assert.equal(qr.status, 403);
 });
 
+test("GET /api/connect-info：需鉴权；返回直连地址与 relay 状态，不含 token", async () => {
+  const anon = await fetch(`${harness.base}/api/connect-info`);
+  assert.equal(anon.status, 401);
+  const res = await fetch(`${harness.base}/api/connect-info`, authed());
+  assert.equal(res.status, 200);
+  const info = (await res.json()) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(info).sort(), ["bases", "relay"]);
+  assert.deepEqual(info.bases, harness.server.pairInfo.bases);
+  assert.deepEqual(info.relay, { state: "disabled" });
+  assert.equal(JSON.stringify(info).includes(TOKEN), false);
+});
+
+test("WS 应用层心跳：ping 立即回 pong，且不影响后续订阅帧", async (t) => {
+  const sink = new FrameSink(harness.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  sink.send({ type: "ping" });
+  await sink.waitFor((frame) => frame.type === "pong", 1000);
+  assert.deepEqual(sink.frames, [{ type: "pong" }]);
+  sink.send({ type: "ping", sessionId: SESSION_ID });
+  await sink.waitFor((frame) => frame.type === "pong" && sink.frames.length === 2, 1000);
+});
+
 test("POST upload：落盘到 uploadsDir/sessionId、文件名消毒；空体 400；未知会话 404", async () => {
   const res = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/upload?filename=${encodeURIComponent("../evil/no te.txt")}`, authed({
     method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: "hello upload",

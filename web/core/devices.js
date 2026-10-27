@@ -1,7 +1,7 @@
 // 已配对设备（Mac）列表。每台 Mac 一个 daemon、一个 BRIDGE_TOKEN、若干候选地址（Tailscale / 局域网…）。
 // 当前连接仍由 api.js 的 baseUrl/token 表示；这里只负责记住「有哪些 Mac」以及切换时用哪组凭据。
 // 旧版本只存一台（bridge_base / bridge_bases / bridge_token），首次读取时迁移成一条设备记录。
-import { BASE_KEY, BASES_KEY, TOKEN_KEY, normalizeBase } from './api.js';
+import { BASE_KEY, BASES_KEY, TOKEN_KEY, isRelayBase, normalizeBase } from './api.js';
 
 export const DEVICES_KEY = 'bridge_devices';
 export const CURRENT_DEVICE_KEY = 'bridge_device_current';
@@ -26,6 +26,21 @@ const uniqBases = (list) => {
   }
   return out;
 };
+
+export const CHANNEL_PREFS = ['auto', 'direct', 'relay'];
+
+/** 地址属于哪种通道：relay | tailscale | mdns | lan。后三种都是直连，细分只用于展示。 */
+export function baseChannel(base) {
+  if (isRelayBase(base)) return 'relay';
+  let host = '';
+  try { host = new URL(normalizeBase(base)).hostname.toLowerCase(); } catch { return 'lan'; }
+  if (host.endsWith('.local')) return 'mdns';
+  const m = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
+  if (m && Number(m[1]) === 100 && Number(m[2]) >= 64 && Number(m[2]) <= 127) return 'tailscale';
+  return 'lan';
+}
+
+export function channelPrefOf(d) { return CHANNEL_PREFS.includes(d?.channelPref) ? d.channelPref : 'auto'; }
 
 function read() {
   try {
@@ -72,7 +87,7 @@ export function sortedDevices(list = loadDevices(), cur = currentDeviceId()) {
  * 连接成功后记下这台设备。匹配规则：同 token 视为同一台；否则地址有交集视为同一台（token 换过）。
  * 新地址排在前面（刚连通的最可能还能用），保留原有其他地址。返回该设备并设为当前。
  */
-export function upsertDevice({ bases, base, token, name }) {
+export function upsertDevice({ bases, base, token, name, manual }) {
   const list = loadDevices();
   const connected = normalizeBase(base || bases?.[0] || '');
   const incoming = uniqBases([connected, ...(bases || [])]);
@@ -86,6 +101,7 @@ export function upsertDevice({ bases, base, token, name }) {
     d = { id: newId(), name: name || hostOf(connected), bases: incoming, token };
     list.push(d);
   }
+  if (manual) d.manualBases = uniqBases([...(d.manualBases || []), ...incoming]);
   d.lastBase = connected;
   d.lastConnectedAt = Date.now();
   write(list);
@@ -98,7 +114,14 @@ export function updateDevice(id, patch) {
   const d = list.find((x) => x.id === id);
   if (!d) return null;
   if (patch.name !== undefined) { d.name = String(patch.name).trim() || d.name; d.nameEdited = true; }
-  if (patch.bases !== undefined) d.bases = uniqBases(patch.bases);
+  if (patch.bases !== undefined) {
+    // 设置页里改地址都是用户手动操作：新增的记为手填（不会被 syncBases 淘汰），删掉的同时从手填里去掉
+    const next = uniqBases(patch.bases);
+    const added = next.filter((b) => !d.bases.includes(b));
+    d.manualBases = uniqBases([...(d.manualBases || []), ...added]).filter((b) => next.includes(b));
+    d.bases = next;
+  }
+  if (patch.channelPref !== undefined && CHANNEL_PREFS.includes(patch.channelPref)) d.channelPref = patch.channelPref;
   if (patch.token !== undefined) d.token = patch.token;
   if (patch.autoName && !d.nameEdited) d.name = patch.autoName;
   if (patch.info !== undefined) d.info = { ...(d.info || {}), ...patch.info };
@@ -117,9 +140,29 @@ export function removeDevice(id) {
   return next;
 }
 
-/** 切换设备时按顺序尝试的地址：上次连通的优先。 */
+/** 探测用的候选地址：上次连通的优先，再按通道偏好过滤（auto 全保留）。 */
 export function candidateBases(d) {
-  return uniqBases([d.lastBase, ...d.bases]);
+  const all = uniqBases([d.lastBase, ...d.bases]);
+  const pref = channelPrefOf(d);
+  if (pref === 'auto') return all;
+  return all.filter((b) => (baseChannel(b) === 'relay') === (pref === 'relay'));
+}
+
+/**
+ * 用 daemon 报告的地址（/api/connect-info）刷新设备地址：daemon 列表为准（Mac 换 IP 后旧地址被淘汰），
+ * 手填地址永远保留。connectedBase 为本次实际连通的地址，即使 daemon 没报告也保留，免得把能用的地址丢掉。
+ * daemon 报告为空时不动。
+ */
+export function syncBases(id, daemonBases, connectedBase) {
+  const reported = uniqBases(daemonBases);
+  if (!reported.length) return getDevice(id);
+  const list = loadDevices();
+  const d = list.find((x) => x.id === id);
+  if (!d) return null;
+  d.bases = uniqBases([...reported, ...(d.manualBases || []), connectedBase]);
+  if (d.lastBase && !d.bases.includes(normalizeBase(d.lastBase))) d.lastBase = '';
+  write(list);
+  return d;
 }
 
 /**
