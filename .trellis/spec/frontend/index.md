@@ -21,6 +21,7 @@ This directory contains guidelines for frontend development. Fill in each file w
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
 | [Type Safety](./type-safety.md) | Type patterns, validation | To fill |
 | [Project Conversations](./project-conversations.md) | Native browsing filters, workspace targeting, and refresh boundaries | Documented |
+| [Connection Channels](./connection-channels.md) | Multi-base probing, channel preference, WS heartbeat and reselect | Documented |
 
 ---
 

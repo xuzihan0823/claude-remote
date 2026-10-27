@@ -327,3 +327,14 @@ agent team：explorer-opus47 审计完成度正常；**coder-glm（glm-5.2[1m]�
 **待人工真机验收**：按 `docs/rn-migration-plan.md` §6 检查键盘逐帧跟手、交互式收起、sheet/审批卡位置、表情面板高度切换和暗色模式。当前源码未提交：`app/metro.config.js` 与本进度记录。
 
 
+
+## 2026-10-27·自建 relay（分支 feat/self-hosted-relay，任务 10-26-self-hosted-relay）
+
+- M1 手机端多通道：`probeBases` 并行探测（直连优先，relay 宽限 1.5s，401 短路）；WS 应用层 ping/pong 识别半开连接，连续失败或半开时 `ws-reselect` 重新选路；`GET /api/connect-info` 让已配对手机自动拿到新通道（`syncBases`）。
+- M2 `packages/relay`：无状态 relay（设备 ID 由设备私钥派生），HTTP/WS 经 agent 长连接多路复用，256KiB 流量窗口；esbuild 打成单文件镜像。
+- M3 daemon connector + `cr relay add/status/on/off/remove`；配对端点经 relay 一律 403（WHATWG 路径规范化 + X-Forwarded-* 双层）。
+- M4 `deploy/relay/`：一行安装脚本（重跑即升级、保留密钥）、compose（relay + Caddy 自动 HTTPS / 自带证书）、GHCR 多架构镜像工作流（`relay-v*` 标签触发）。DinD 实测安装与升级、本机 buildx amd64/arm64 构建通过。
+- M5 App 设备页：显示当前通道、通道偏好（自动/仅直连/仅 relay）、地址按通道标注。
+- 规格：`.trellis/spec/backend/relay-tunnel.md`、`.trellis/spec/frontend/connection-channels.md`。
+- 待办：镜像推 GHCR 并设为公开；真实服务器部署验证；真机测"直连断开 10 秒内切到 relay"。
+- 教训：本仓库多个 worktree 共用 stash 列表，临时保存文件别用 `git stash`。
