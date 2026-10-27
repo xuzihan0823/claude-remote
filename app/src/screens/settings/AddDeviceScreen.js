@@ -45,7 +45,7 @@ export function AddDeviceScreen({ navigation, route }) {
       navigation.goBack();
       return;
     }
-    const ok = await tryConnectBases([b], t);
+    const ok = await tryConnectBases([b], t, { manual: true });
     if (ok) finishNew(name.trim());
     else setBusy(false);
   };

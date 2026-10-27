@@ -81,31 +81,88 @@ export async function api(path, opts = {}) {
   return data;
 }
 
-export async function probeBase(base, tok) {
+export const PROBE_TIMEOUT_MS = 8_000;
+export const DIRECT_GRACE_MS = 1_500;
+const RELAY_PATH = /\/d\/[A-Za-z0-9_-]+$/;
+/** relay 地址形如 https://relay.example.com/d/<deviceId>（relay 在反代子路径下时前面还有路径前缀），其余都是直连。 */
+export function isRelayBase(base) {
+  try { return RELAY_PATH.test(new URL(normalizeBase(base)).pathname.replace(/\/+$/, '')); } catch { return false; }
+}
+
+// opts 供测试注入：fetchImpl / timers（setTimeout + clearTimeout）/ signal（外部中止）/ timeoutMs
+export async function probeBase(base, tok, opts = {}) {
+  const { fetchImpl = globalThis.fetch, timers = globalThis, signal, timeoutMs = PROBE_TIMEOUT_MS } = opts;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 8_000);
+  let timedOut = false;
+  const timer = timers.setTimeout(() => { timedOut = true; ctrl.abort(); }, timeoutMs);
+  const onAbort = () => ctrl.abort();
+  signal?.addEventListener('abort', onAbort);
   try {
-    const res = await fetch(`${base}/api/health`, { headers: { Authorization: `Bearer ${tok}` }, signal: ctrl.signal });
+    const res = await fetchImpl(`${base}/api/health`, { headers: { Authorization: `Bearer ${tok}` }, signal: ctrl.signal });
     if (res.status === 401) throw new ApiError(401, 'unauthorized');
     if (!res.ok) throw new ApiError(res.status, `http_${res.status}`);
   } catch (e) {
     if (e instanceof ApiError) throw e;
-    throw new ApiError(0, ctrl.signal.aborted ? 'network_timeout' : 'network_error');
-  } finally { clearTimeout(timer); }
-}
-export async function probeBases(bases, tok) {
-  let lastErr = new ApiError(0, 'network_error');
-  for (const raw of bases) {
-    const base = normalizeBase(raw);
-    if (!base) continue;
-    try { await probeBase(base, tok); return base; }
-    catch (e) { if (e.code === 'unauthorized') throw e; lastErr = e; }
+    throw new ApiError(0, timedOut ? 'network_timeout' : 'network_error');
+  } finally {
+    timers.clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
   }
-  throw lastErr;
+}
+
+/**
+ * 并行探测同一台 Mac 的全部候选地址，返回选中的 base：
+ * 直连先通即用；relay 先通则再等 DIRECT_GRACE_MS 给直连机会；任一 401 立即抛；全失败抛最后一个错误。
+ * 决定后中止其余进行中的探测。
+ */
+export function probeBases(bases, tok, opts = {}) {
+  const { timers = globalThis, graceMs = DIRECT_GRACE_MS } = opts;
+  const list = [];
+  for (const raw of bases || []) {
+    const b = normalizeBase(raw);
+    if (b && !list.includes(b)) list.push(b);
+  }
+  if (!list.length) return Promise.reject(new ApiError(0, 'network_error'));
+  return new Promise((resolve, reject) => {
+    const ctrl = new AbortController();
+    let done = false;
+    let pending = list.length;
+    let relayHit = '';
+    let graceTimer = null;
+    let lastErr = new ApiError(0, 'network_error');
+    const finish = (fn, value) => {
+      if (done) return;
+      done = true;
+      if (graceTimer !== null) timers.clearTimeout(graceTimer);
+      ctrl.abort();
+      fn(value);
+    };
+    const settled = () => {
+      if (--pending > 0) return;
+      if (relayHit) finish(resolve, relayHit);
+      else finish(reject, lastErr);
+    };
+    for (const base of list) {
+      probeBase(base, tok, { ...opts, signal: ctrl.signal }).then(() => {
+        if (done) return;
+        if (!isRelayBase(base)) { finish(resolve, base); return; }
+        if (!relayHit) {
+          relayHit = base;
+          graceTimer = timers.setTimeout(() => finish(resolve, relayHit), graceMs);
+        }
+        settled();
+      }, (e) => {
+        if (done) return;
+        if (e.code === 'unauthorized') { finish(reject, e); return; }
+        lastErr = e;
+        settled();
+      });
+    }
+  });
 }
 export function connErrMsg(e) {
   if (e.code === 'unauthorized') return 'token 不正确';
-  if (e.code === 'network_timeout') return '连接超时（Mac 不可达）：检查 Mac 上 daemon 是否在跑、Tailscale 是否开启';
+  if (e.code === 'network_timeout') return '连接超时（Mac 不可达）：检查 Mac 上 daemon 是否在跑，以及 Tailscale 或 relay 是否可用';
   return '无法连接 daemon（地址或网络错误）';
 }
 
