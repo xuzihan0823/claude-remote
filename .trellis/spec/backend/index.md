@@ -21,6 +21,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
 | [Model Catalog](./model-catalog.md) | Mac picker projection, model validation, and alias compatibility | Documented |
 | [Project Catalog](./project-catalog.md) | Repository/worktree aggregation, session filtering, and actual cwd targeting | Documented |
+| [Relay Tunnel](./relay-tunnel.md) | Relay frame protocol, agent auth, pairing-endpoint isolation | Documented |
 
 ---
 

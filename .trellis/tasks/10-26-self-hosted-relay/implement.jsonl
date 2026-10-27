@@ -1,0 +1,9 @@
+{"file":".trellis/tasks/10-26-self-hosted-relay/research/current-state.md","reason":"Verified current client probing, device model, daemon pairing guard, and CLI config facts."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Relay touches relay server, daemon connector, CLI, and mobile client boundaries."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Reuse existing config, pairing, device, and ws patterns; share one protocol module."}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Place the new packages/relay and daemon relay module consistently."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Keep structured error responses such as device_offline and loopback_only."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Relay and connector logs must never include tokens or query strings."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Backend testing and lifecycle expectations for relay and connector."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Channel preference, reselect, and connection state follow existing bus/device patterns."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Mobile validation expectations for probing and settings UI."}
