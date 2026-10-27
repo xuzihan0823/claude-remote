@@ -69,6 +69,19 @@ export type ServerFrame =
   | { type: "approval"; interaction: ApprovalCard }
   | { type: "approval.resolved"; interactionId: string; status: string };
 
+/** relay connector 状态（daemon /api/connect-info 的 relay 字段）。 */
+export interface RelayStatus {
+  state: "disabled" | "connecting" | "connected" | "error";
+  error?: string;
+  base?: string;
+  since?: number;
+}
+
+export interface ConnectInfo {
+  bases: string[];
+  relay: RelayStatus;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -111,6 +124,10 @@ export class Api {
 
   health(): Promise<{ ok: boolean; version: string; claudeCliVersion: string }> {
     return this.#request("GET", "/api/health");
+  }
+
+  connectInfo(): Promise<ConnectInfo> {
+    return this.#request("GET", "/api/connect-info");
   }
 
   async sessions(limit = 200): Promise<{ sessions: SessionSummary[]; total: number }> {

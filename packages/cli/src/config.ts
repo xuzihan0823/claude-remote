@@ -175,6 +175,11 @@ function writeText(envFile: string, text: string): void {
   chmodSync(envFile, 0o600); // mode 只在新建文件时生效；.env 里有 token，已有文件也收紧权限
 }
 
+/** 读-改-写配置文件（0600）；cr relay 管理 RELAY_* 也走这里。 */
+export function editEnvFile(envFile: string, edit: (text: string) => string): void {
+  writeText(envFile, edit(readText(envFile)));
+}
+
 /**
  * 设置一项（value 为展示单位；空字符串 = 恢复默认，即从 .env 删除）。
  * 校验失败抛错，错误信息可直接展示给用户。

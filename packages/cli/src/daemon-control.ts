@@ -5,12 +5,14 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { enumeratePairBases, pairPayload, type PairInfo } from "@claude-remote/daemon/pair";
+import { loadRelaySettings, relayBase } from "@claude-remote/daemon/config";
+import { pairBases, pairPayload, type PairInfo } from "@claude-remote/daemon/pair";
 
-import { Api, ApiError, type ApprovalCard, type SessionSummary } from "./api.js";
+import { Api, ApiError, type ApprovalCard, type ConnectInfo, type SessionSummary } from "./api.js";
 import { AttachedDaemon } from "./attached.js";
 import { readDotenv, type CliEnv } from "./env.js";
 import { Launchd, packageProgram, repoProgram, type LaunchdState, type LaunchProgram } from "./launchd.js";
+import { readRelayFile, type RelayFileState, type RestartResult } from "./relay.js";
 
 export interface Context {
   env: CliEnv;
@@ -128,12 +130,23 @@ export interface DaemonSnapshot {
   uptimeMs?: number;
   sessions: SessionSummary[];
   pending: ApprovalCard[];
+  /** daemon 报告的候选地址与 relay 状态（旧 daemon 没有该接口时缺省）。 */
+  connect?: ConnectInfo;
+  /** 配置文件里的 relay 设置（daemon 没在跑时也能展示）。 */
+  relayFile?: RelayFileState;
   error?: string;
 }
 
 export async function snapshot(ctx: Context, opts: { withSessions?: boolean } = {}): Promise<DaemonSnapshot> {
   const launchd = process.platform === "darwin" ? ctx.launchd.status() : { loaded: false, installed: false };
-  const snap: DaemonSnapshot = { launchd, reachable: false, unauthorized: false, sessions: [], pending: [] };
+  const snap: DaemonSnapshot = {
+    launchd,
+    reachable: false,
+    unauthorized: false,
+    sessions: [],
+    pending: [],
+    relayFile: readRelayFile(ctx.env.envFile),
+  };
   const pid = launchd.pid ?? ctx.attached.ownedPid;
   if (pid !== undefined) {
     const up = processUptime(pid);
@@ -148,12 +161,14 @@ export async function snapshot(ctx: Context, opts: { withSessions?: boolean } = 
     snap.reachable = true;
     snap.version = health.version;
     snap.claudeCliVersion = health.claudeCliVersion;
-    const [sessions, pending] = await Promise.all([
+    const [sessions, pending, connect] = await Promise.all([
       opts.withSessions === false ? Promise.resolve({ sessions: [] as SessionSummary[] }) : ctx.api.sessions(200),
       ctx.api.pending().catch(() => [] as ApprovalCard[]),
+      ctx.api.connectInfo().catch(() => undefined),
     ]);
     snap.sessions = sessions.sessions;
     snap.pending = pending;
+    if (connect !== undefined) snap.connect = connect;
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       snap.reachable = true;
@@ -180,9 +195,32 @@ export async function waitHealthy(ctx: Context, timeoutMs = 20_000): Promise<boo
   return false;
 }
 
+/** 配置文件里已启用的 relay 的手机地址；未启用或配置非法（daemon 会拒启并报错）时 undefined。 */
+export function configuredRelayBase(envFile: string): string | undefined {
+  try {
+    const settings = loadRelaySettings(readDotenv(envFile));
+    return settings === undefined ? undefined : relayBase(settings);
+  } catch {
+    return undefined;
+  }
+}
+
 export function pairInfo(ctx: Context): PairInfo | undefined {
   if (ctx.env.token === undefined) return undefined;
-  return { bases: enumeratePairBases(ctx.env.port), token: ctx.env.token };
+  return { bases: pairBases(ctx.env.port, configuredRelayBase(ctx.env.envFile)), token: ctx.env.token };
+}
+
+/**
+ * 改了 RELAY_* 之后让 daemon 重新读配置。launchd 托管时直接重启；
+ * 随 cr 运行的 daemon 归拉起它的那个 cr 进程，这里不能代为重启（新进程会随本命令退出而停止）。
+ */
+export async function restartForRelay(ctx: Context): Promise<RestartResult> {
+  if (process.platform === "darwin" && ctx.launchd.isLoaded()) {
+    await ctx.launchd.restart();
+    return (await waitHealthy(ctx)) ? { kind: "restarted" } : { kind: "unhealthy" };
+  }
+  if (!(await probeHealth(ctx.env.baseUrl))) return { kind: "skipped", note: "已保存。daemon 没在运行：下次启动（打开 cr）时生效" };
+  return { kind: "skipped", note: "已保存。daemon 不归 launchd 托管（随 cr 运行或手动启动）：在 cr 里按 r 重启，或重启 daemon 后生效" };
 }
 
 export { pairPayload };

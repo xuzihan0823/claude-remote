@@ -11,16 +11,20 @@ import {
   copyToClipboard,
   openUrl,
   pairInfo,
+  restartForRelay,
   resumeInTerminal,
   makeContext,
   snapshot,
   terminalQr,
+  type DaemonSnapshot,
   waitHealthy,
   type Context,
 } from "./daemon-control.js";
 import { CONFIG_FIELDS, findField, readConfig, rotateToken, setConfig } from "./config.js";
 import { countProjects, detectClaude, inspectClaude, type DetectDeps, type DetectedClaude } from "./detect.js";
 import { ensureToken, loadCliEnv } from "./env.js";
+import { isTailscaleAddress } from "@claude-remote/daemon/pair";
+import { readRelayFile, runRelay, snapshotRelayLine } from "./relay.js";
 import {
   describeMessage,
   fit,
@@ -46,6 +50,7 @@ export const HELP = `cr — Claude Remote 控制台
   cr pair               终端打印配对二维码
   cr config             查看配置；cr config set <项> <值> / unset <项> / reset-token
                         项：host port bark ntfy timeout cooldown claude uploads autostart（改完自动重启 daemon）
+  cr relay              自建 relay：add <地址> <密钥> | status | on | off | remove
   cr web                浏览器打开 Web 界面（token 复制到剪贴板）
   cr ls [-n 20]         最近会话
   cr search <词> [--full]  搜标题/项目路径；--full 连对话全文一起搜
@@ -189,12 +194,47 @@ export async function cmdStatus(ctx: Context): Promise<void> {
   if (snap.claudeCliVersion !== undefined) console.log(`claude   ${snap.claudeCliVersion}`);
   const info = pairInfo(ctx);
   if (info !== undefined) console.log(`地址     ${info.bases.join(" · ")}`);
+  for (const line of channelLines(snap, info?.bases ?? [], ctx.env.envFile)) console.log(line);
   if (snap.reachable && !snap.unauthorized) {
     const running = snap.sessions.filter((s) => s.status !== "idle").length;
     console.log(`会话     共 ${snap.sessions.length} 个 · ${running} 个运行中 · ${snap.pending.length} 个待审批`);
   }
   if (snap.error !== undefined && !snap.reachable) console.log(`提示     ${snap.error}`);
   if (!snap.reachable || snap.unauthorized) process.exitCode = 1;
+}
+
+function tailscaleHosts(bases: string[]): string[] {
+  return bases.flatMap((base) => {
+    try {
+      const host = new URL(base).hostname;
+      return isTailscaleAddress(host) ? [host] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/** 「通道」一节：Tailscale 以 daemon 报告的地址为准（daemon 不通时用本机枚举），relay 取 connector 状态。 */
+function channelLines(snap: DaemonSnapshot, localBases: string[], envFile: string): string[] {
+  const tailscale = tailscaleHosts(snap.connect?.bases ?? localBases);
+  return [
+    `通道     Tailscale  ${tailscale.length > 0 ? `在线（${tailscale.join("、")}）` : "未检测到 Tailscale 地址"}`,
+    `         relay      ${snapshotRelayLine(snap, readRelayFile(envFile))}`,
+  ];
+}
+
+export async function cmdRelay(ctx: Context, args: string[]): Promise<void> {
+  const api = ctx.api;
+  process.exitCode = await runRelay(args, {
+    envFile: ctx.env.envFile,
+    out: (line) => console.log(line),
+    fetch,
+    restart: () => restartForRelay(ctx),
+    connectInfo: () => {
+      if (api === undefined) return Promise.reject(new Error("没有找到 BRIDGE_TOKEN，先运行 cr setup"));
+      return api.connectInfo();
+    },
+  });
 }
 
 export async function cmdLogs(ctx: Context): Promise<void> {

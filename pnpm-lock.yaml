@@ -57,6 +57,9 @@ importers:
       '@claude-remote/daemon':
         specifier: workspace:*
         version: link:../daemon
+      '@claude-remote/relay':
+        specifier: workspace:*
+        version: link:../relay
       ink:
         specifier: ^8.0.0
         version: 8.0.0(@types/react@19.3.0)(react@19.3.1)
@@ -103,6 +106,9 @@ importers:
       '@claude-remote/interactions':
         specifier: workspace:*
         version: link:../interactions
+      '@claude-remote/relay':
+        specifier: workspace:*
+        version: link:../relay
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4

@@ -298,3 +298,26 @@ test("设置：重置 token 需 y 确认，之后重载并打开配对", async (
   assert.deepEqual(exited, { kind: "reload", then: "pair" });
   ui.unmount();
 });
+
+test("设置：只读显示 relay 状态（取自 daemon 快照，光标不会停在这一行）", async () => {
+  const base = { launchd: { loaded: true, installed: true }, reachable: true, unauthorized: false, sessions: [], pending: [] };
+  const file = { configured: true, enabled: true, url: "https://r.example.com", base: "https://r.example.com/d/abc" };
+  const cases: Array<[DaemonSnapshot, RegExp]> = [
+    [{ ...base, relayFile: file, connect: { bases: [], relay: { state: "connected", base: file.base, since: now } } }, /relay\s+已连接.*https:\/\/r\.example\.com\/d\/abc/],
+    [{ ...base, relayFile: file, connect: { bases: [], relay: { state: "error", error: "auth", since: now } } }, /relay 密钥错误/],
+    [{ ...base, relayFile: { configured: false, enabled: false } }, /relay\s+未配置/],
+  ];
+  for (const [snap, expected] of cases) {
+    const { deps } = fakeDeps({ snapshot: async () => snap });
+    const ui = render(<App deps={deps} onExit={() => {}} initialView="settings" />);
+    await settle(300);
+    for (let i = 0; i < CONFIG_FIELDS.length + 3; i += 1) {
+      ui.stdin.write("j");
+      await settle(20);
+    }
+    const frame = ui.lastFrame() ?? "";
+    assert.match(frame, expected);
+    assert.match(frame, /❯ 重置 token/);
+    ui.unmount();
+  }
+});
