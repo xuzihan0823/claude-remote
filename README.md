@@ -36,6 +36,17 @@ node packages/cli/bin/cr.mjs setup
 
 常用子命令：`cr status`、`cr up|down|restart`、`cr logs`、`cr pair`、`cr web`、`cr search <词> [--full]`、`cr open <id>`。详见 [docs/cli.md](docs/cli.md)。
 
+## 接入方式
+
+手机连到 Mac 有两种方式，可以同时启用，手机会自动选当前能用的那条（能直连时优先直连）：
+
+- **Tailscale**（没有服务器时用）：Mac 和手机装 Tailscale 并登录同一账号，`cr pair` 扫码即可。在同一 Wi-Fi 下也能直接走局域网。
+- **自建 relay**（有一台公网 Linux 服务器时用）：在服务器上执行一行安装命令，再在 Mac 上执行它打印出的 `cr relay add …`。详见 [deploy/relay/README.md](deploy/relay/README.md)。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xuzihan0823/claude-remote/main/deploy/relay/install.sh | sudo bash
+```
+
 ## 协作规则
 
 1. 每个任务卡 `task/NN-*.md` 是一个独立"任务窗口"，只由一个 Claude/Codex 会话处理。
@@ -48,7 +59,7 @@ node packages/cli/bin/cr.mjs setup
 
 - 数据真相是 `~/.claude/projects/**/*.jsonl`；daemon 对其**只读**（写入只发生在 SDK resume 的天然落盘）。
 - 已实测（Claude Code 2.1.209）：`--resume` 同 session_id 同文件追加；`--fork-session` 新文件全量复制历史。
-- 网络边界是 Tailscale；不开公网端口，不自建加密协议，应用层仅一个固定 Bearer token。
+- 网络边界是 Tailscale 或用户自建的 relay；Mac 不开公网端口（relay 由 Mac 主动连出），不自建加密协议，应用层仅一个固定 Bearer token。
 - 零构建：daemon 用 tsx 直跑，Web UI 纯静态 + vendored 依赖，无打包工序。
 - 审批 fail-closed：超时、断线、重启、异常一律 deny；不引入自动批准。
 - 统一测试 runner：`tsx --test`（node:test），不混用多套框架。
