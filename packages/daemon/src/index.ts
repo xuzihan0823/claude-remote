@@ -19,6 +19,7 @@ import QRCode from "qrcode";
 
 import { ConfigError, loadConfig } from "./config.js";
 import { pairPayload } from "./pair.js";
+import { RelayConnector } from "./relay/connector.js";
 import { ApprovalBridge, TurnRunner, createNotifier, type ActivityGate, type ApprovalEvent } from "./run/index.js";
 import { DaemonServer } from "./server.js";
 import { ActivityTracker } from "./watch/activity.js";
@@ -93,6 +94,9 @@ async function main(): Promise<void> {
     claudeCliVersion = version;
   });
 
+  // relay：没配置或 RELAY_ENABLED=off 时不创建，daemon 行为与未接入 relay 时一致
+  const connector = config.relay === undefined ? undefined : new RelayConnector({ settings: config.relay });
+
   server = new DaemonServer({
     config,
     webRoot: findWebRoot(),
@@ -103,11 +107,18 @@ async function main(): Promise<void> {
     notifier,
     version: pkg.version,
     claudeCliVersion: () => claudeCliVersion,
+    ...(connector === undefined ? {} : { relayStatus: () => connector.status() }),
   });
 
   await server.listen();
   const { host, port } = server.address();
   console.log(`${pkg.name} ${pkg.version} listening on http://${host}:${port} (projects: ${config.projectsDir})`);
+  if (connector === undefined) {
+    console.log("relay: 未启用");
+  } else {
+    connector.start({ host, port });
+    console.log(`relay: 已启用，正在连接（手机地址 ${connector.status().base}）`);
+  }
 
   // 配对引导：候选地址 + 终端二维码（iPhone 相机扫码即可配对，见 docs/pairing-plan.md §3.4）
   const pairInfo = server.pairInfo;
@@ -130,6 +141,11 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.log(`${signal} received, shutting down…`);
     void (async () => {
+      try {
+        await connector?.stop();
+      } catch (error) {
+        console.error("relay connector stop failed:", error);
+      }
       try {
         await server.close(); // 停新连接、关 WS、abort 活跃 run 并等 settle
       } catch (error) {

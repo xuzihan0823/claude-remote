@@ -73,9 +73,10 @@ cr setup                 首次安装（见上）
 cr up | down | restart   autostart=on：启动 / 停止（并取消自启，跨登录保持）/ 重启
                          autostart=off：cr up 前台运行 daemon（Ctrl-C 停）；cr down 停止；restart 提示重开 cr
 cr uninstall             移除 launchd 服务（不删数据）
-cr status                daemon、launchd、地址、会话与待审批数量；daemon 不通时退出码 1
+cr status                daemon、launchd、地址、通道（Tailscale / relay）、会话与待审批数量；daemon 不通时退出码 1
 cr logs                  tail -F ~/Library/Logs/claude-remote/daemon.log
 cr pair                  终端二维码 + 候选地址（本地生成，不依赖 daemon 在跑）
+cr relay ...             自建 relay（见下）
 cr web                   打开 Web 界面
 cr ls [-n 20]            最近会话
 cr search <词> [--full]  默认搜标题/项目路径/最后一条消息；--full 连对话全文
@@ -91,6 +92,33 @@ cr open <id> [--force]   claude --resume 接管
 - `BRIDGE_PORT` / `BRIDGE_HOST`：`cr` 访问 `http://127.0.0.1:<port>`；若 `BRIDGE_HOST` 绑定的是具体 IP（如 Tailscale IP），改为直连该 IP。
 - `CLAUDE_BIN`：`cr open` 与 daemon 使用的 claude 路径；launchd 下由 `run-daemon.sh` 自动探测。
 - `CLAUDE_REMOTE_REPO`：仓库位置（默认按 `cr.mjs` 所在位置推断）。
+
+## 自建 relay（cr relay）
+
+手机不在 Tailscale / 局域网时，可经自己部署的 relay 服务器访问这台 Mac（服务器部署见 `deploy/relay/`）。daemon 主动向 relay 建立出站连接，Mac 不需要公网 IP 或开端口。
+
+```sh
+cr relay add https://relay.example.com <密钥>   # 地址与密钥见服务器安装脚本最后打印的命令
+cr relay status                                 # 连接状态与手机用的 relay 地址
+cr relay off                                    # 临时停用（保留配置）
+cr relay on                                     # 重新启用
+cr relay remove                                 # 删除全部 relay 配置（含设备私钥）
+```
+
+`add` 会先访问 `<地址>/healthz` 确认对面是 claude-remote relay，再把 `RELAY_*` 写进 `.env`（权限 600）。设备私钥只在第一次 `add` 时生成，之后再 `add`（换地址或密钥）会沿用，所以设备 ID 和手机上的 relay 地址 `<地址>/d/<设备 ID>` 保持不变；`remove` 会连私钥一起删掉，再 `add` 得到新的设备 ID。
+
+写完配置后，launchd 托管的 daemon 会自动重启，并最多等 15 秒报告结果：
+
+```
+… 检查 https://relay.example.com
+✓ relay 在线
+✓ 已写入配置（设备 ID 3k…，已生成设备私钥）
+✓ 已连接 relay，手机地址 https://relay.example.com/d/3k…
+```
+
+daemon 随 `cr` 运行（autostart=off）时，`cr relay` 无法替它重启，会提示在 `cr` 里按 `r` 重启后生效。密钥写错时会直接报「relay 密钥错误」，不必等满 15 秒。
+
+relay 地址会出现在 `cr pair` 的候选地址末尾；已配对的手机在直连可用时会同步到 relay 地址。经 relay 的请求无法打开配对接口（`/api/pair-info`、`/api/pair-qr.svg`），token 不会经 relay 外泄。`RELAY_*` 只能用 `cr relay` 管理，不在 `cr config` 里出现，也不要手改。
 
 ## 从菜单栏 App 迁移
 

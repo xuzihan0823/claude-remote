@@ -9,6 +9,7 @@ import {
   cmdLs,
   cmdOpen,
   cmdPair,
+  cmdRelay,
   cmdRestart,
   cmdSearch,
   cmdSetup,
@@ -116,6 +117,8 @@ export async function main(argv: string[], binPath: string): Promise<void> {
         return await cmdPair(ctx);
       case "config":
         return await cmdConfig(ctx, args);
+      case "relay":
+        return await cmdRelay(ctx, args);
       case "web":
         return await cmdWeb(ctx);
       case "ls":
