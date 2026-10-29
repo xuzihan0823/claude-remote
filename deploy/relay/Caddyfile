@@ -1,8 +1,30 @@
-# RELAY_TLS 为空时自动申请证书；使用已有证书时 install.sh 把它设为
-#   tls /certs/fullchain.pem /certs/privkey.pem
-# Caddy 在解析前做环境变量替换，所以它可以展开成一整条指令。
+# 证书模式由 install.sh 写入的 RELAY_TLS_MODE 选择：
+#   acme   域名，自动申请证书
+#   ip     直接用公网 IP，申请 Let's Encrypt 短期 IP 证书（约 6 天，自动续期，公网要能访问 80 端口）
+#   files  使用挂载到 /certs 的已有证书
+{
+	# 用 IP 访问时客户端不发 SNI，Caddy 靠它选证书
+	default_sni {$RELAY_DOMAIN}
+}
+
+(tls-acme) {
+}
+
+(tls-ip) {
+	tls {
+		issuer acme {
+			profile shortlived
+			disable_tlsalpn_challenge
+		}
+	}
+}
+
+(tls-files) {
+	tls /certs/fullchain.pem /certs/privkey.pem
+}
+
 {$RELAY_DOMAIN} {
-	{$RELAY_TLS}
+	import tls-{$RELAY_TLS_MODE:acme}
 	reverse_proxy relay:8790 {
 		# 流式响应（搜索、上传进度）不缓冲，收到就转给手机
 		flush_interval -1

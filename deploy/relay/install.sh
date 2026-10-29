@@ -5,7 +5,7 @@
 #   curl -fsSL …/install.sh | sudo bash -s -- --domain relay.example.com
 #
 # 参数（全部可省略；省略时沿用上次安装的值，首次安装用默认值）：
-#   --domain <域名>          默认用服务器公网 IP 生成 <ip>.sslip.io
+#   --domain <域名或 IP>     默认直接用服务器公网 IP（Let's Encrypt IP 证书，无需域名）
 #   --https-port <端口>      默认 443
 #   --cert <fullchain> --key <私钥>   使用已有证书（如 acme.sh DNS 验证签发），不自动申请
 #   --auto-cert              取消之前设置的 --cert/--key，改回自动申请证书
@@ -126,16 +126,27 @@ detect_public_ip() {
   return 1
 }
 
+is_ipv4() {
+  [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]
+}
+
 if [ -z "$domain" ] && [ -t 0 ]; then
-  read -r -p "relay 域名（留空则用服务器公网 IP 生成 sslip.io 域名）：" domain
+  read -r -p "relay 域名（留空则直接用服务器公网 IP）：" domain
 fi
 if [ -z "$domain" ]; then
   [ -z "$cert_file" ] || die "使用 --cert/--key 时必须同时指定 --domain"
-  ip=$(detect_public_ip) || die "探测公网 IP 失败，请用 --domain 指定域名"
-  domain="${ip//./-}.sslip.io"
-  log "未指定域名，使用 $domain"
+  domain=$(detect_public_ip) || die "探测公网 IP 失败，请用 --domain 指定域名或公网 IP"
+  log "未指定域名，直接使用公网 IP $domain"
 fi
 [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || die "域名格式不正确：$domain"
+
+if [ -n "$cert_file" ]; then
+  tls_mode=files
+elif is_ipv4 "$domain"; then
+  tls_mode=ip
+else
+  tls_mode=acme
+fi
 
 if [ -z "$secret" ]; then
   secret=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')
@@ -166,8 +177,10 @@ port_in_use() {
   [ -n "$(ss -Hltn "sport = :$1" 2>/dev/null)" ]
 }
 
+# IP 证书只能走 HTTP-01；域名证书在 443 上可用 TLS-ALPN-01，不需要 80
 need_http01=0
-[ -z "$cert_file" ] && [ "$https_port" != 443 ] && need_http01=1
+[ "$tls_mode" = ip ] && need_http01=1
+[ "$tls_mode" = acme ] && [ "$https_port" != 443 ] && need_http01=1
 
 running=""
 if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
@@ -176,6 +189,9 @@ fi
 if [ -z "$running" ]; then
   port_in_use "$https_port" && die "端口 $https_port 已被占用，请用 --https-port 换一个端口"
   if [ "$need_http01" -eq 1 ] && port_in_use 80; then
+    if [ "$tls_mode" = ip ]; then
+      die "IP 证书的签发和续期需要占用 80 端口，但 80 已被占用；可以改用自己的域名（--domain），或参考 README 用已有反向代理部署"
+    fi
     die "非 443 端口自动申请证书需要占用 80 端口，但 80 已被占用；可改用 --https-port 443，或用 --cert/--key 提供已有证书"
   fi
 fi
@@ -216,6 +232,7 @@ RELAY_IMAGE=$image
 RELAY_VERSION=$version
 RELAY_SECRET=$secret
 RELAY_DOMAIN=$domain
+RELAY_TLS_MODE=$tls_mode
 RELAY_HTTPS_PORT=$https_port
 RELAY_CERT_FILE=$cert_file
 RELAY_KEY_FILE=$key_file
@@ -228,15 +245,13 @@ if [ -n "$cert_file" ]; then
 # 由 install.sh 生成：使用已有证书。
 services:
   caddy:
-    environment:
-      RELAY_TLS: "tls /certs/fullchain.pem /certs/privkey.pem"
     volumes:
       - "$cert_file:/certs/fullchain.pem:ro"
       - "$key_file:/certs/privkey.pem:ro"
 EOF
 elif [ "$need_http01" -eq 1 ]; then
   cat >"$OVERRIDE_FILE" <<EOF
-# 由 install.sh 生成：HTTPS 不在 443 时，自动申请证书需要公网能访问 80 端口（HTTP-01 验证）。
+# 由 install.sh 生成：IP 证书或 HTTPS 不在 443 时，自动申请证书需要公网能访问 80 端口（HTTP-01 验证）。
 services:
   caddy:
     ports:
@@ -269,7 +284,7 @@ fi
 healthy=0
 deadline=$((SECONDS + HEALTH_TIMEOUT_S))
 while [ $SECONDS -lt $deadline ]; do
-  if curl -fsS --max-time 5 --resolve "$domain:$https_port:127.0.0.1" "https://$domain:$https_port/healthz" >/dev/null 2>&1; then
+  if curl -fsS --max-time 5 --connect-to "$domain:$https_port:127.0.0.1:$https_port" "https://$domain:$https_port/healthz" >/dev/null 2>&1; then
     healthy=1
     break
   fi
@@ -284,12 +299,17 @@ if [ "$healthy" -eq 1 ]; then
     log "安装完成。"
   fi
 else
-  warn "relay 在 ${HEALTH_TIMEOUT_S} 秒内没有就绪。常见原因：云厂商安全组没放行端口、域名没解析到本机、证书签发失败。"
+  if [ "$tls_mode" = ip ]; then
+    warn "relay 在 ${HEALTH_TIMEOUT_S} 秒内没有就绪。常见原因：云厂商安全组没放行 80 端口，IP 证书签发失败。"
+  else
+    warn "relay 在 ${HEALTH_TIMEOUT_S} 秒内没有就绪。常见原因：云厂商安全组没放行端口、域名没解析到本机、证书签发失败。"
+  fi
   warn "查看日志：cd $INSTALL_DIR && docker compose logs --tail 50 caddy relay"
 fi
 
 echo
 echo "请确认云厂商安全组 / 防火墙已放行 TCP $https_port$([ "$need_http01" -eq 1 ] && echo " 和 80")。"
+[ "$tls_mode" = ip ] && echo "IP 证书有效期约 6 天，Caddy 会自动续期，续期同样需要 80 端口一直对公网开放。"
 echo
 echo "在 Mac 上执行下面这条命令接入 relay（密钥只显示在这里，也保存在 $ENV_FILE）："
 echo
