@@ -8,6 +8,7 @@ import { installLinkify, wholeUrl } from '../../../../web/core/linkify.js';
 import { openLink, shareLink } from '../../lib/links.js';
 import { useTheme } from '../../theme.js';
 import { usePref } from '../../lib/prefs.js';
+import { highlightCode } from './highlight.js';
 
 installLinkify(marked);
 
@@ -76,11 +77,10 @@ function renderInline(tokens, ctx, keyPrefix) {
             onPress={codeHref ? () => openLink(codeHref) : undefined}
             onLongPress={codeHref ? () => shareLink(codeHref) : undefined}
             style={{
-              ...(codeHref ? { textDecorationLine: 'underline', color: ctx.colors.accent } : null),
               fontFamily: ctx.fonts.mono,
               fontSize: ctx.fs * 0.86,
-              backgroundColor: ctx.colors.bubble,
-              color: ctx.colors.inkStrong,
+              color: ctx.colors.code,
+              ...(codeHref ? { textDecorationLine: 'underline', color: ctx.colors.accent } : null),
             }}
           >
             {tok.text || ''}
@@ -160,6 +160,7 @@ function renderCode(tok, ctx, key) {
       }}
     >
       {(() => {
+        const segments = highlightCode(tok.text || '', tok.lang);
         const code = (
           <Text
             selectable
@@ -170,7 +171,23 @@ function renderCode(tok, ctx, key) {
               color: ctx.colors.ink,
             }}
           >
-            {tok.text || ''}
+            {segments
+              ? segments.map((s, i) =>
+                  s.kind ? (
+                    <Text
+                      key={i}
+                      style={{
+                        color: ctx.colors.syntax[s.kind],
+                        ...(s.kind === 'comment' ? { fontStyle: 'italic' } : null),
+                      }}
+                    >
+                      {s.text}
+                    </Text>
+                  ) : (
+                    s.text
+                  ),
+                )
+              : tok.text || ''}
           </Text>
         );
         // 设置里开了「代码自动换行」就折行显示，否则横向滚动

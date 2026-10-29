@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
 import { MarkdownView } from './markdown/MarkdownView.js';
 import { Icon } from './Icon.js';
 import { Spark } from './Spark.js';
@@ -52,7 +52,7 @@ function MonoBody({ text, err }) {
   return wrap ? body : <ScrollView horizontal showsHorizontalScrollIndicator={false}>{body}</ScrollView>;
 }
 
-export function MessageRow({ m }) {
+export function MessageRow({ m, sending = false }) {
   const { colors } = useTheme();
   const scale = usePref('fontScale');
   const showThinking = usePref('showThinking');
@@ -101,7 +101,8 @@ export function MessageRow({ m }) {
   }
   if (m.role === 'user') {
     return (
-      <View style={{ alignItems: 'flex-end', marginTop: 12, marginBottom: 20 }}>
+      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', marginTop: 12, marginBottom: 20 }}>
+        {sending ? <ActivityIndicator size="small" color={colors.ink3} style={{ marginRight: 10 }} accessibilityLabel="发送中" /> : null}
         <View style={{ backgroundColor: colors.bubble, borderRadius: 26, borderCurve: 'continuous',
           paddingHorizontal: 18, paddingVertical: 12, maxWidth: '88%' }}>
           <LinkText text={m.text} style={{ color: colors.inkStrong, fontSize: 17 * scale, lineHeight: Math.round(26 * scale) }} selectable />

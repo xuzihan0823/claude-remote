@@ -2,11 +2,13 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import { Animated, Easing, Modal, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { GlassSurface } from './GlassSurface.js';
 import { Icon } from './Icon.js';
-import { spring, useTheme } from '../theme.js';
+import { useTheme } from '../theme.js';
 
 const MENU_WIDTH = 248;
 const GAP = 8;
 const EDGE = 12;
+const CLOSE_MS = 180;
+const GLASS_DISSOLVE = { style: 'none', animate: true, animationDuration: CLOSE_MS / 1000 };
 
 // 液态玻璃下拉菜单：锚定在触发按钮下方，从按钮所在角「弹出」。
 // anchor 为触发元素的 measureInWindow 结果 { x, y, width, height }。
@@ -37,7 +39,7 @@ export function GlassMenu({ visible, anchor, items, onClose }) {
       else setMounted(true);
     } else if (mounted) {
       progress.stopAnimation();
-      Animated.timing(progress, { toValue: 0, duration: 150, easing: Easing.bezier(...spring), useNativeDriver: true })
+      Animated.timing(progress, { toValue: 0, duration: CLOSE_MS, easing: Easing.inOut(Easing.quad), useNativeDriver: true })
         .start(({ finished }) => {
           if (!finished) return;
           setMounted(false);
@@ -58,9 +60,13 @@ export function GlassMenu({ visible, anchor, items, onClose }) {
   const top = anchor.y + anchor.height + GAP;
   const width = Math.min(MENU_WIDTH, screenW - EDGE * 2);
 
-  const scale = progress.interpolate({ inputRange: [0, 1], outputRange: [0.35, 1] });
+  // 收起时玻璃不能靠透明度淡出，缩到 0.35 会剩一块不透明的玻璃停到 Modal 卸载（录屏可见）。
+  // 改为原生动画把玻璃材质消融掉，外层只做轻微收缩，再把剩下的描边和阴影一起淡出
+  const closing = !visible;
+  const scale = progress.interpolate({ inputRange: [0, 1], outputRange: [closing ? 0.9 : 0.35, 1] });
   const translateY = progress.interpolate({ inputRange: [0, 1], outputRange: [-6, 0] });
   const contentOpacity = progress.interpolate({ inputRange: [0, 0.55, 1], outputRange: [0, 0.6, 1], extrapolate: 'clamp' });
+  const shellOpacity = closing ? progress : 1;
 
   return (
     <Modal transparent visible={mounted} animationType="none" statusBarTranslucent onRequestClose={onClose} onShow={() => visible && open()} onDismiss={flush}>
@@ -80,9 +86,10 @@ export function GlassMenu({ visible, anchor, items, onClose }) {
           maxHeight: screenH - top - EDGE * 3,
           transformOrigin: 'top right',
           transform: [{ translateY }, { scale }],
+          opacity: shellOpacity,
         }}
       >
-        <GlassSurface style={{ borderRadius: 24 }}>
+        <GlassSurface style={{ borderRadius: 24 }} effectStyle={closing ? GLASS_DISSOLVE : 'regular'}>
           <Animated.View accessibilityRole="menu" style={{ opacity: contentOpacity, paddingVertical: 6 }}>
             {items.map((item, i) => (
               <Fragment key={item.key}>

@@ -31,8 +31,38 @@ export function reconcileDrafts(drafts, message) {
   if (!drafts.length || message?.role !== 'assistant' || message.kind !== 'text') return drafts;
   const t = norm(message.text);
   if (!t) return drafts;
-  let i = drafts.findIndex((d) => norm(d.text) === t);
-  if (i < 0) i = drafts.findIndex((d) => d.done && (t.startsWith(norm(d.text)) || norm(d.text).startsWith(t)));
+  // Claude Code 落盘时一行只放一个 block，blockIndex 多为 0，与流式下标对不上；
+  // 消息 ID 只用来限定范围（避免误删其他轮次的同文草稿），块仍按文本认
+  const id = message.apiMessageId;
+  const inScope = id ? (d) => d.key.startsWith(`${id}:`) : () => true;
+  const exactKey = id && Number.isInteger(message.blockIndex) ? `${id}:${message.blockIndex}` : null;
+  let i = drafts.findIndex((d) => d.key === exactKey && norm(d.text) === t);
+  if (i < 0) i = drafts.findIndex((d) => inScope(d) && norm(d.text) === t);
+  if (i < 0) i = drafts.findIndex((d) => inScope(d) && d.done && (t.startsWith(norm(d.text)) || norm(d.text).startsWith(t)));
   if (i < 0) return drafts;
   return [...drafts.slice(0, i), ...drafts.slice(i + 1)];
+}
+
+/** 只清理指定 run 已存在的草稿 key，后续 run 的新草稿不受影响。 */
+export function removeDraftKeys(drafts, keys) {
+  const next = drafts.filter((d) => !keys.has(d.key));
+  return next.length === drafts.length ? drafts : next;
+}
+
+/** 只用当前一轮的正式消息对账，避免历史里的相同短句误删新草稿。 */
+export function reconcileCurrentTurnDrafts(drafts, messages, minSeq = 0) {
+  let turnStart = 0;
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i]?.role === 'user' && messages[i]?.kind === 'text') turnStart = i + 1;
+  }
+  let next = drafts;
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    const identified = message?.apiMessageId && Number.isInteger(message.blockIndex);
+    if (identified || (i >= turnStart && (message?.seq ?? 0) >= minSeq)) {
+      next = reconcileDrafts(next, message);
+    }
+    if (!next.length) break;
+  }
+  return next;
 }

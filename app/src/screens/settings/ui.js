@@ -150,7 +150,7 @@ export function Row({
           disabled={disabled}
           trackColor={{ true: colors.accent, false: colors.controlBorder }}
           ios_backgroundColor={colors.controlBorder}
-          style={{ marginLeft: 8 }}
+          style={{ marginLeft: 8, alignSelf: 'center' }}
         />
       ) : null}
       {checked ? <View style={{ marginLeft: 8 }}><Icon name="check" size={20} color={colors.accent} strokeWidth={2.2} /></View> : null}

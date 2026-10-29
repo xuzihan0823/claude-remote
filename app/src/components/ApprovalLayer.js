@@ -150,7 +150,6 @@ function ApprovalCard({ item, onDecide }) {
         shadowRadius: 17,
         shadowOffset: { width: 0, height: 10 },
         elevation: 6,
-        opacity: item.resolved ? 0.8 : 1,
         position: 'relative',
         overflow: 'hidden',
       }}

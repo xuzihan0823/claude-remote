@@ -8,7 +8,7 @@ import { fetchModels, modelCache } from '../../../web/core/api.js';
 export function useModelCatalog() {
   const [catalog, setCatalog] = useState(modelCache);
   const load = useCallback(async () => {
-    try { setCatalog(await fetchModels()); } catch { /* 拿不到就用 Mac 默认，composer 仍可用 */ }
+    try { setCatalog(await fetchModels()); } catch { /* 拿不到就跟随项目默认，composer 仍可用 */ }
   }, []);
   useEffect(() => { load(); }, [load]);
   useBus('ws-open', load, [load]);

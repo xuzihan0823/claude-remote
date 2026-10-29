@@ -14,7 +14,7 @@ import { SplashOverlay } from './components/SplashOverlay.js';
 
 import {
   baseUrl, BASE_KEY, clearToken, connErrMsg, connHost, loadBases, normalizeBase,
-  pendingSessionMessages, probeBase, probeBases, saveBases, saveConn, sessionCache, token, TOKEN_KEY,
+  pendingSessionMessages, probeBase, probeBases, resetModelCache, saveBases, saveConn, sessionCache, token, TOKEN_KEY,
 } from '../../web/core/api.js';
 import { api } from '../../web/core/api.js';
 import { bus, toast, useBus } from '../../web/core/bus.js';
@@ -56,6 +56,7 @@ function MainStack() {
         name="Chat"
         component={ChatScreen}
         getId={({ params }) => params?.sessionId}
+        options={({ route }) => (route.params?.fromNew ? { animation: 'fade', animationDuration: 200 } : {})}
       />
       <Stack.Screen name="Settings" component={SettingsNavigator} options={{ presentation: 'modal' }} />
     </Stack.Navigator>
@@ -78,6 +79,7 @@ export default function App() {
     connKeyRef.current = key;
     sessionCache.clear();
     pendingSessionMessages.clear();
+    resetModelCache();
     setConn({ key, base: baseUrl });
   }, []);
 
