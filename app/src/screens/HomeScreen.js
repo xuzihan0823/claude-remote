@@ -41,7 +41,7 @@ export function HomeScreen() {
   const [mode, setMode] = useState(getNewSessionMode);
   useBus('new-session-mode', setMode, []);
   const pickerRef = useRef(null);
-  const openPicker = useCallback(() => { Keyboard.dismiss(); pickerRef.current?.present(); }, []);
+  const openPicker = useCallback((anc) => { Keyboard.dismiss(); pickerRef.current?.present(anc); }, []);
 
   // 从会话页「新建」带来的实际 cwd；nonce 保证同一 cwd 重复进入也生效
   const fromNonce = route.params?.nonce;
