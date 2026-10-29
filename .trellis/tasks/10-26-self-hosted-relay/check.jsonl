@@ -1,6 +1,0 @@
-{"file":".trellis/tasks/10-26-self-hosted-relay/research/current-state.md","reason":"Baseline facts to confirm compatibility with old daemon/app versions."}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check payload contracts across relay, daemon, CLI, and mobile."}
-{"file":".trellis/spec/backend/error-handling.md","reason":"Verify relay and connector error shapes."}
-{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify no token or query leakage in logs."}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify backend tests are meaningful and lifecycle cleanup is correct."}
-{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Verify mobile probing and UI changes meet frontend standards."}
