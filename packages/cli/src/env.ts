@@ -22,7 +22,7 @@ export type InstallMode = "repo" | "package";
 
 export interface CliEnv {
   mode: InstallMode;
-  /** repo 模式：仓库根目录；package 模式：npm 包根目录（含 dist/、web/）。 */
+  /** repo 模式：仓库根目录；package 模式：npm 包根目录（含 dist/）。 */
   repoDir: string;
   /** 配置与数据目录（package 模式 ~/.claude-remote；repo 模式即仓库根目录）。 */
   dataDir: string;

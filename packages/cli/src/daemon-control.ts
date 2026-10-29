@@ -230,21 +230,6 @@ export async function terminalQr(info: PairInfo): Promise<string> {
   return QRCode.toString(pairPayload(info), { type: "terminal", small: true });
 }
 
-export function openUrl(url: string): void {
-  const cmd = process.platform === "darwin" ? "open" : "xdg-open";
-  spawn(cmd, [url], { stdio: "ignore", detached: true }).unref();
-}
-
-/** 复制到剪贴板（仅 macOS pbcopy），失败静默。 */
-export function copyToClipboard(text: string): boolean {
-  if (process.platform !== "darwin") return false;
-  try {
-    execFileSync("pbcopy", [], { input: text });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /** claude 可执行文件：环境变量 CLAUDE_BIN > .env 里的 CLAUDE_BIN（cr config set claude）> PATH。 */
 export function claudeBin(envFile: string): string {

@@ -5,8 +5,6 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 import type { Api, EventStream, ServerFrame, SessionSummary } from "../api.js";
 import {
   autostartEnabled,
-  copyToClipboard,
-  openUrl,
   pairInfo,
   snapshot,
   terminalQr,
@@ -31,7 +29,6 @@ export interface TuiDeps {
     restart: () => Promise<boolean>;
   };
   pair: () => Promise<{ qr: string; bases: string[] } | undefined>;
-  openWeb: () => string;
   readLogTail: (maxLines: number) => string[];
   config: {
     read: () => ConfigValue[];
@@ -99,12 +96,6 @@ export function realDeps(ctx: Context): TuiDeps {
       const info = pairInfo(ctx);
       if (info === undefined) return undefined;
       return { qr: await terminalQr(info), bases: info.bases };
-    },
-    openWeb: () => {
-      const url = `${ctx.env.baseUrl}/`;
-      openUrl(url);
-      const copied = ctx.env.token !== undefined && copyToClipboard(ctx.env.token);
-      return copied ? "已打开浏览器，token 已复制到剪贴板" : `已打开 ${url}`;
     },
     readLogTail: (n) => readTailLines(ctx.env.logFile, n),
     config: {

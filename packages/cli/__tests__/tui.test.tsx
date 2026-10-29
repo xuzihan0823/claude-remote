@@ -76,7 +76,6 @@ function fakeDeps(overrides: Partial<TuiDeps> = {}) {
       rotateToken: () => void rotateToken(envFile),
     },
     pair: async () => ({ qr: "[QR]", bases: ["http://100.64.0.10:8787"] }),
-    openWeb: () => "已打开浏览器",
     readLogTail: () => ["line 1", "error: boom"],
     ...overrides,
   };
