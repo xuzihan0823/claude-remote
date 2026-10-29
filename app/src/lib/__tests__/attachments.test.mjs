@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 const values = new Map();
 globalThis.localStorage = { getItem: (k) => values.get(k) ?? null, setItem: (k, v) => values.set(k, String(v)) };
-const { MAX_UPLOAD_BYTES, normalizeAsset, uploadAttachments, withAttachmentNote, tooLargeMessage } = await import('../attachments.js');
+const { MAX_UPLOAD_BYTES, normalizeAsset, uploadAttachments, withAttachmentNote, parseAttachmentNote, uploadImageSource, tooLargeMessage } = await import('../attachments.js');
 const { saveConn } = await import('../../../../web/core/api.js');
 
 test('normalizeAsset：HEIC 原名按实际 JPEG 改扩展名', () => {
@@ -24,6 +24,23 @@ test('normalizeAsset：拍照无文件名、文档保留原名', () => {
 test('withAttachmentNote', () => {
   assert.equal(withAttachmentNote('hi', []), 'hi');
   assert.match(withAttachmentNote('', ['/u/a.png']), /^请查看我上传的附件。[\s\S]*- \/u\/a\.png$/);
+});
+
+test('parseAttachmentNote：还原原话与路径；默认占位文本视为空；普通文本原样返回', () => {
+  const paths = ['/Users/m/.claude-remote/uploads/s1/1-a.jpg', '/Users/m/.claude-remote/uploads/s1/2-b.pdf'];
+  assert.deepEqual(parseAttachmentNote(withAttachmentNote('看看\n\n这两张', paths)), { text: '看看\n\n这两张', paths });
+  assert.deepEqual(parseAttachmentNote(withAttachmentNote('', paths.slice(0, 1))), { text: '', paths: paths.slice(0, 1) });
+  assert.deepEqual(parseAttachmentNote('普通消息'), { text: '普通消息', paths: [] });
+  const tampered = `${withAttachmentNote('x', paths)}\n后面又写了字`;
+  assert.deepEqual(parseAttachmentNote(tampered), { text: tampered, paths: [] });
+});
+
+test('uploadImageSource：取最后两级拼回读地址并带鉴权', () => {
+  saveConn('http://mac:8788', 'tk');
+  assert.deepEqual(uploadImageSource('/Users/m/.claude-remote/uploads/new/17-IMG 1.jpg'), {
+    uri: 'http://mac:8788/api/uploads/new/17-IMG%201.jpg',
+    headers: { Authorization: 'Bearer tk' },
+  });
 });
 
 test('uploadAttachments：进度、失败重试不重复上传', async () => {

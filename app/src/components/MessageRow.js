@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ActivityIndicator, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Image, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
 import { MarkdownView } from './markdown/MarkdownView.js';
 import { Icon } from './Icon.js';
 import { Spark } from './Spark.js';
@@ -9,6 +9,7 @@ import { ToolInputView } from './ToolInputView.js';
 import { useTheme } from '../theme.js';
 import { LinkText } from './LinkText.js';
 import { usePref } from '../lib/prefs.js';
+import { isImagePath, parseAttachmentNote, uploadImageSource } from '../lib/attachments.js';
 
 // 折叠块：thinking / tool_use / tool_result 共用（web 的 <details> 对应物）
 function Block({ icon, title, sub, err, children, defaultOpen = false }) {
@@ -50,6 +51,58 @@ function MonoBody({ text, err }) {
   const wrap = usePref('codeWrap');
   const body = <LinkText text={text} style={{ color: err ? colors.danger : colors.ink, fontFamily: fonts.mono, fontSize: 12, lineHeight: 18 }} selectable />;
   return wrap ? body : <ScrollView horizontal showsHorizontalScrollIndicator={false}>{body}</ScrollView>;
+}
+
+const fileName = (p) => p.split('/').pop().replace(/^\d+-/, '');
+
+function SentImage({ path, single }) {
+  const { colors } = useTheme();
+  const [ratio, setRatio] = useState(1);
+  const [failed, setFailed] = useState(false);
+  const source = uploadImageSource(path);
+  const width = single ? 220 : 120;
+  const height = single ? Math.min(Math.max(width / ratio, 120), 320) : 120;
+  const frame = { width, height, borderRadius: 18, borderCurve: 'continuous', backgroundColor: colors.bubble };
+  if (failed || !source) {
+    return (
+      <View style={[frame, { alignItems: 'center', justifyContent: 'center', padding: 8, gap: 6 }]}>
+        <Icon name="image" size={24} color={colors.ink3} />
+        <Text numberOfLines={1} style={{ color: colors.ink3, fontSize: 11 }}>{fileName(path)}</Text>
+      </View>
+    );
+  }
+  return (
+    <Image
+      source={source}
+      resizeMode="cover"
+      accessibilityLabel={fileName(path)}
+      onLoad={(e) => { const { width: w, height: h } = e.nativeEvent.source || {}; if (w && h) setRatio(w / h); }}
+      onError={() => setFailed(true)}
+      style={frame}
+    />
+  );
+}
+
+function UserAttachments({ paths }) {
+  const { colors, fonts } = useTheme();
+  const images = paths.filter(isImagePath);
+  const others = paths.filter((p) => !isImagePath(p));
+  return (
+    <View style={{ alignItems: 'flex-end', gap: 6, maxWidth: '88%' }}>
+      {images.length ? (
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 6 }}>
+          {images.map((p) => <SentImage key={p} path={p} single={images.length === 1} />)}
+        </View>
+      ) : null}
+      {others.map((p) => (
+        <View key={p} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.bubble,
+          borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8 }}>
+          <Icon name="paperclip" size={16} color={colors.ink2} />
+          <Text numberOfLines={1} style={{ color: colors.ink, fontSize: 13, fontFamily: fonts.mono, flexShrink: 1 }}>{fileName(p)}</Text>
+        </View>
+      ))}
+    </View>
+  );
 }
 
 export function MessageRow({ m, sending = false }) {
@@ -100,13 +153,21 @@ export function MessageRow({ m, sending = false }) {
     );
   }
   if (m.role === 'user') {
+    const { text, paths } = parseAttachmentNote(m.text);
     return (
-      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', marginTop: 12, marginBottom: 20 }}>
-        {sending ? <ActivityIndicator size="small" color={colors.ink3} style={{ marginRight: 10 }} accessibilityLabel="发送中" /> : null}
-        <View style={{ backgroundColor: colors.bubble, borderRadius: 26, borderCurve: 'continuous',
-          paddingHorizontal: 18, paddingVertical: 12, maxWidth: '88%' }}>
-          <LinkText text={m.text} style={{ color: colors.inkStrong, fontSize: 17 * scale, lineHeight: Math.round(26 * scale) }} selectable />
-        </View>
+      <View style={{ alignItems: 'flex-end', gap: 6, marginTop: 12, marginBottom: 20 }}>
+        {paths.length ? <UserAttachments paths={paths} /> : null}
+        {text || sending ? (
+          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' }}>
+            {sending ? <ActivityIndicator size="small" color={colors.ink3} style={{ marginRight: 10 }} accessibilityLabel="发送中" /> : null}
+            {text ? (
+              <View style={{ backgroundColor: colors.bubble, borderRadius: 26, borderCurve: 'continuous',
+                paddingHorizontal: 18, paddingVertical: 12, maxWidth: '88%' }}>
+                <LinkText text={text} style={{ color: colors.inkStrong, fontSize: 17 * scale, lineHeight: Math.round(26 * scale) }} selectable />
+              </View>
+            ) : null}
+          </View>
+        ) : null}
       </View>
     );
   }

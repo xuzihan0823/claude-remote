@@ -32,11 +32,37 @@ export function normalizeAsset(a, { now = Date.now() } = {}) {
   };
 }
 
+const DEFAULT_NOTE_TEXT = '请查看我上传的附件。';
+const NOTE_HEADER = '[手机端上传的附件，已保存在本机，可直接读取]';
+
 /** 把已上传的路径附到消息正文。 */
 export function withAttachmentNote(text, paths) {
   if (!paths.length) return text;
   const list = paths.map((p) => `- ${p}`).join('\n');
-  return `${text || '请查看我上传的附件。'}\n\n[手机端上传的附件，已保存在本机，可直接读取]\n${list}`;
+  return `${text || DEFAULT_NOTE_TEXT}\n\n${NOTE_HEADER}\n${list}`;
+}
+
+/** withAttachmentNote 的逆过程：消息气泡里只显示用户原话，附件单独渲染。 */
+export function parseAttachmentNote(text) {
+  const s = String(text || '');
+  const at = s.lastIndexOf(`\n\n${NOTE_HEADER}\n`);
+  if (at < 0) return { text: s, paths: [] };
+  const lines = s.slice(at + NOTE_HEADER.length + 3).split('\n');
+  if (!lines.every((l) => l.startsWith('- '))) return { text: s, paths: [] };
+  const body = s.slice(0, at);
+  return { text: body === DEFAULT_NOTE_TEXT ? '' : body, paths: lines.map((l) => l.slice(2)) };
+}
+
+export const isImagePath = (p) => IMAGE_EXT.has(extOf(p));
+
+/** 已上传图片在 daemon 上的回读地址（GET /api/uploads/<subdir>/<name>）。 */
+export function uploadImageSource(path) {
+  const [subdir, name] = String(path).split('/').slice(-2);
+  if (!subdir || !name) return null;
+  return {
+    uri: `${baseUrl}/api/uploads/${encodeURIComponent(subdir)}/${encodeURIComponent(name)}`,
+    headers: { Authorization: `Bearer ${token}` },
+  };
 }
 
 /**

@@ -9,7 +9,7 @@
 // 匹配，见 05 报告对表第 4 条）。
 
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { homedir, hostname } from "node:os";
@@ -35,6 +35,10 @@ import type { SessionWatcher } from "./watch/watcher.js";
 
 const BODY_LIMIT_BYTES = 1024 * 1024;
 const UPLOAD_LIMIT_BYTES = 25 * 1024 * 1024;
+const IMAGE_TYPES: Record<string, string> = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
+  webp: "image/webp", heic: "image/heic", heif: "image/heif",
+};
 const MESSAGES_LIMIT_DEFAULT = 100;
 const MESSAGES_LIMIT_MAX = 500;
 const WS_HEARTBEAT_MS = 30_000;
@@ -298,6 +302,12 @@ export class DaemonServer {
     const uploadMatch = /^\/api\/sessions\/([^/]+)\/upload$/.exec(path);
     if (uploadMatch !== null && method === "POST") {
       await this.#handleUpload(req, res, url, decodeURIComponent(uploadMatch[1] ?? ""));
+      return;
+    }
+
+    const uploadFileMatch = /^\/api\/uploads\/([^/]+)\/([^/]+)$/.exec(path);
+    if (uploadFileMatch !== null && method === "GET") {
+      await this.#serveUpload(res, decodeURIComponent(uploadFileMatch[1] ?? ""), decodeURIComponent(uploadFileMatch[2] ?? ""));
       return;
     }
 
@@ -685,6 +695,28 @@ export class DaemonServer {
     const file = join(dir, `${Date.now()}-${safeName}`);
     await writeFile(file, Buffer.concat(chunks));
     this.#json(res, 200, { path: file, name: safeName, sizeBytes: size });
+  }
+
+  /** 回读已上传的图片，供手机在消息里显示。只认 uploadsDir/<subdir>/<name> 两级，且只给图片。 */
+  async #serveUpload(res: ServerResponse, subdir: string, name: string): Promise<void> {
+    const type = IMAGE_TYPES[name.split(".").pop()?.toLowerCase() ?? ""];
+    const unsafe = (s: string) => !s || s === "." || s === ".." || /[\/\\\0]/.test(s);
+    if (unsafe(subdir) || unsafe(name) || type === undefined) {
+      this.#json(res, 404, { error: "not_found" });
+      return;
+    }
+    let data: Buffer;
+    try {
+      data = await readFile(join(this.#options.config.uploadsDir, subdir, name));
+    } catch (error) {
+      if (isEnoent(error)) {
+        this.#json(res, 404, { error: "not_found" });
+        return;
+      }
+      throw error;
+    }
+    res.writeHead(200, { "Content-Type": type, "Content-Length": data.length, "Cache-Control": "private, max-age=31536000, immutable" });
+    res.end(data);
   }
 
   async #handleDecision(req: IncomingMessage, res: ServerResponse, interactionId: string): Promise<void> {

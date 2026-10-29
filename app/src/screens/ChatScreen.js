@@ -371,7 +371,7 @@ export function ChatScreen({ route }) {
     if (context.revision === stateRevision.current && runId) applyRunState('daemon-driving', runId);
     else if (activeRunIdRef.current !== runId) return;
     if (lastUserEcho.current === text.trim()) { setPending(null); return; }
-    setPending((p) => (p ? { ...p, match: text, sent: true } : { id: Date.now(), text, match: text, after: lastKey(), sent: true }));
+    setPending((p) => (p ? { ...p, text, match: text, sent: true } : { id: Date.now(), text, match: text, after: lastKey(), sent: true }));
   }, [applyRunState]);
 
   const kbOffset = Math.max(insets.bottom, 8); // 与 ChatComposer 底部安全区间距一致
