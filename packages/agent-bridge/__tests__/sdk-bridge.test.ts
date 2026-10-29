@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { QueryFactory } from "../src/sdk-bridge.js";
-import { startSdkQuery, queryModelCapabilities, type EffortLevel } from "../src/sdk-bridge.js";
+import { startSdkQuery, type EffortLevel } from "../src/sdk-bridge.js";
 
 type QueryParams = Parameters<QueryFactory>[0];
 type SdkQuery = ReturnType<QueryFactory>;
@@ -145,25 +145,4 @@ test("effort override reaches SDK and default stays omitted", () => {
     assert.equal(Object.hasOwn(fake.params()?.options ?? {}, "effort"), effort !== undefined);
     handle.close();
   }
-});
-
-test("capability query never queues a user message and closes input and process", async () => {
-  let pending: Promise<IteratorResult<unknown>> | undefined;
-  let closed = false;
-  const factory = ((params: QueryParams) => {
-    pending = (params.prompt as AsyncIterable<unknown>)[Symbol.asyncIterator]().next();
-    assert.equal(params.options?.persistSession, false);
-    assert.equal(params.options?.cwd, "/tmp/capabilities");
-    return { supportedModels: async () => [], close: () => { closed = true; } } as unknown as SdkQuery;
-  }) as QueryFactory;
-  assert.deepEqual(await queryModelCapabilities("/tmp/capabilities", factory), []);
-  assert.deepEqual(await pending, { done: true, value: undefined });
-  assert.equal(closed, true);
-});
-
-test("capability timeout closes the CLI", async () => {
-  let closed = false;
-  const factory = (() => ({ supportedModels: () => new Promise(() => {}), close: () => { closed = true; } })) as unknown as QueryFactory;
-  await assert.rejects(queryModelCapabilities("/tmp", factory, 5), /timed out/);
-  assert.equal(closed, true);
 });

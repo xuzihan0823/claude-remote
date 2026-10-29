@@ -4,6 +4,7 @@ import { connErrMsg, normalizeBase, probeBases } from '../../../../web/core/api.
 import { bus, toast } from '../../../../web/core/bus.js';
 import { currentDeviceId, getDevice, updateDevice } from '../../../../web/core/devices.js';
 import { useConnActions } from '../../lib/conn-context.js';
+import { haptics } from '../../lib/haptics.js';
 import { QrScanner } from '../../components/QrScanner.js';
 import { Icon } from '../../components/Icon.js';
 import { useTheme } from '../../theme.js';
@@ -35,27 +36,30 @@ export function AddDeviceScreen({ navigation, route }) {
     if (editing) {
       try {
         await probeBases([b], t);
-      } catch (e) { setBusy(false); toast(connErrMsg(e), 'error'); return; }
+      } catch (e) { setBusy(false); haptics.error(); toast(connErrMsg(e), 'error'); return; }
       const bases = [b, ...editing.bases.filter((x) => x !== b)];
       updateDevice(editing.id, { token: t, bases, ...(name.trim() && name.trim() !== editing.name ? { name } : {}) });
       bus.emit('devices');
-      if (editing.id === currentDeviceId()) await tryConnectBases(bases, t);
+      if (editing.id === currentDeviceId()) {
+        const ok = await tryConnectBases(bases, t, { beforeCommit: () => haptics.success() });
+        if (!ok) haptics.error();
+      } else haptics.confirm();
       setBusy(false);
       toast('已保存', 'info');
       navigation.goBack();
       return;
     }
-    const ok = await tryConnectBases([b], t, { manual: true });
+    const ok = await tryConnectBases([b], t, { manual: true, beforeCommit: () => haptics.success() });
     if (ok) finishNew(name.trim());
-    else setBusy(false);
+    else { setBusy(false); haptics.error(); }
   };
 
   const onScan = async ({ token: t, bases }) => {
     setScanOpen(false);
     setBusy(true);
-    const ok = await tryConnectBases(bases, t);
+    const ok = await tryConnectBases(bases, t, { beforeCommit: () => haptics.success() });
     if (ok) finishNew(name.trim());
-    else setBusy(false);
+    else { setBusy(false); haptics.error(); }
   };
 
   const input = { flex: 1, color: colors.inkStrong, fontSize: 16, paddingVertical: 14 };

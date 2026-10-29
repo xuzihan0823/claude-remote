@@ -83,6 +83,7 @@ function ApprovalCard({ item, onDecide }) {
   const decide = async (body) => {
     const status = body.type === 'deny' ? 'denied' : (body.type === 'answer' ? 'answered' : 'allowed');
     setBusy(true);
+    haptics.confirm();
     onDecide(it.interactionId, 'resolve', status);
     try {
       const data = await api(
@@ -90,13 +91,12 @@ function ApprovalCard({ item, onDecide }) {
         { method: 'POST', body: JSON.stringify(body) }
       );
       if (data && data.status) onDecide(it.interactionId, 'resolve', data.status);
-      if (status === 'denied') haptics.reject(); else haptics.success();
     } catch (e) {
       if (e.status === 409) toast('该审批已在别处处理', 'info');
       else if (e.status === 404) toast('审批已不存在', 'info');
       else {
         onDecide(it.interactionId, 'rollback');
-        haptics.error();
+        if (e.code !== 'unauthorized') haptics.error();
         if (e.code !== 'unauthorized') toast(`提交失败：${e.code}`, 'error');
       }
     } finally {
@@ -382,6 +382,20 @@ export function ApprovalLayer() {
   const insets = useSafeAreaInsets();
   const [items, setItems] = useState([]);
   const removalTimers = useRef(new Map());
+  const attentionIds = useRef(new Map());
+  const notifyApprovals = useCallback((interactions) => {
+    const now = Date.now();
+    for (const [id, expiresAt] of attentionIds.current) {
+      if (expiresAt <= now) attentionIds.current.delete(id);
+    }
+    let fresh = false;
+    for (const interaction of interactions) {
+      if (interaction.expiresAt <= now || attentionIds.current.has(interaction.interactionId)) continue;
+      attentionIds.current.set(interaction.interactionId, (interaction.expiresAt || now + 600000) + 60000);
+      fresh = true;
+    }
+    if (fresh) haptics.attention();
+  }, []);
 
   const scheduleRemoval = useCallback((id) => {
     if (removalTimers.current.has(id)) return; // 幂等：本地与 WS 双触发不重置计时
@@ -402,7 +416,7 @@ export function ApprovalLayer() {
   const has = (id) => itemsRef.current.some((x) => x.interaction.interactionId === id);
 
   useBus('ws:approval', ({ interaction }) => {
-    if (!has(interaction.interactionId)) haptics.attention();
+    notifyApprovals([interaction]);
     setItems((xs) => (
       xs.some((x) => x.interaction.interactionId === interaction.interactionId)
         ? xs
@@ -420,7 +434,7 @@ export function ApprovalLayer() {
     }
     const list = (data?.interactions || []).slice().sort((a, b) => a.expiresAt - b.expiresAt);
     const ids = new Set(list.map((c) => c.interactionId));
-    if (list.some((c) => !has(c.interactionId))) haptics.attention();
+    notifyApprovals(list);
     setItems((xs) => {
       const kept = xs.filter((x) => x.resolved || ids.has(x.interaction.interactionId));
       const known = new Set(kept.map((x) => x.interaction.interactionId));
@@ -428,7 +442,7 @@ export function ApprovalLayer() {
       return fresh.length === 0 && kept.length === xs.length ? xs : [...kept, ...fresh];
     });
     return ids;
-  }, []);
+  }, [notifyApprovals]);
   useEffect(() => { syncPending(); }, [syncPending]);
   useBus('ws-open', () => { syncPending(); }, [syncPending]);
 

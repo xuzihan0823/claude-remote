@@ -4,16 +4,13 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { createSession } from '../../lib/create-session.js';
 import { tooLargeMessage } from '../../lib/attachments.js';
 import { usePref } from '../../lib/prefs.js';
+import { haptics } from '../../lib/haptics.js';
 import { toast } from '../../../../web/core/bus.js';
 import { setSessionMode } from '../../../../web/core/modes.js';
 import { fetchModels, modelSelection, setSessionModel } from '../../../../web/core/api.js';
-import {
-  effortSelection,
-  resolveDeviceKey,
-  setSessionEffort,
-} from '../../../../web/core/effort.js';
+import { effortLabel, effortUsable, setSessionEffort } from '../../../../web/core/effort.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
-import { useModelCapabilities } from '../../lib/useModelCapabilities.js';
+import { useEffortLevels } from '../../lib/useEffortLevels.js';
 import { useTheme } from '../../theme.js';
 import { Icon } from '../Icon.js';
 import { ComposerActions } from './ComposerActions.js';
@@ -22,6 +19,7 @@ import { ComposerCard } from './ComposerCard.js';
 import { AttachmentChips } from './AttachmentChips.js';
 import { AttachmentPicker } from './AttachmentPicker.js';
 import { ModelPicker } from './ModelPicker.js';
+import { EffortPicker } from './EffortPicker.js';
 
 // 新建会话 composer：cwd 由父层显式传入（目录入口在顶栏三点菜单；未选目录时点发送也会调 onPickCwd），不做隐式回退；
 // 附件走 /api/upload（新建会话专用端点），POST /api/sessions {cwd, text, model?, effort?, permissionMode?}；
@@ -35,44 +33,27 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
   // null = 本次草稿没手动选过，跟随设置里的默认模型；'' = 手动选了「跟随项目默认」
   const [modelChoice, setModelChoice] = useState(null);
   const model = modelChoice ?? defaultModel;
-  const { capabilities, reload: reloadCapabilities, applyServerCapabilities } = useModelCapabilities({
-    cwd: cwd && cwdKnown ? cwd : '',
-    model,
-  });
-  const [effortRecord, setEffortRecord] = useState(() => ({
-    effort: '',
-    model: '',
-    revision: '',
-    deviceId: resolveDeviceKey(),
-    stale: false,
-  }));
+  const { options: effortOptions, reload: reloadEffortLevels } = useEffortLevels({ cwd: cwd && cwdKnown ? cwd : '', model });
+  const [effort, setEffort] = useState('');
   const [files, setFiles] = useState([]);
   const [busy, setBusy] = useState(false);
   const [inputH, setInputH] = useState(44);
   const lastH = useRef(44);
 
-  useEffect(() => {
-    if (!effortRecord.effort || effortRecord.stale || effortRecord.revision) return;
-    if (!capabilities?.loaded || !capabilities.revision) return;
-    const sel = effortSelection(capabilities, effortRecord, { model });
-    if (sel.canSend) {
-      setEffortRecord((prev) => (
-        prev.effort && !prev.revision && !prev.stale
-          ? { ...prev, model, revision: capabilities.revision, deviceId: resolveDeviceKey() }
-          : prev
-      ));
-    }
-  }, [capabilities, effortRecord, model]);
-
-  const pickEffort = useCallback((nextEffort) => {
-    setEffortRecord({
-      effort: nextEffort || '',
-      model,
-      revision: nextEffort ? (capabilities?.revision || '') : '',
-      deviceId: resolveDeviceKey(),
-      stale: false,
-    });
-  }, [model, capabilities?.revision]);
+  const [effortOpen, setEffortOpen] = useState(false);
+  const openEffort = useCallback(() => {
+    reloadEffortLevels();
+    setEffortOpen(true);
+  }, [reloadEffortLevels]);
+  const effortOk = effortUsable(effortOptions, effort);
+  const effortMenuItem = {
+    key: 'effort',
+    icon: 'brain',
+    label: '思考程度',
+    detail: effortLabel(effort),
+    detailTone: effortOk ? undefined : 'danger',
+    onPress: openEffort,
+  };
 
   const hasDraft = draft.trim() !== '' || files.length > 0;
   useEffect(() => {
@@ -87,64 +68,40 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
       toast('所选模型已不可用，请重新选择', 'error');
       return;
     }
-    let effortCheck = effortSelection(capabilities, effortRecord, { model, deviceId: resolveDeviceKey() });
-    if (!effortCheck.canSend) {
-      toast(effortCheck.message || '所选思考程度当前不可用，请重新选择', 'error');
+    if (!effortOk) {
+      toast(`当前模型不支持思考程度「${effortLabel(effort)}」，请重新选择`, 'error');
       return;
     }
     setBusy(true);
+    haptics.tap();
     try {
-      if (effortRecord.effort) {
-        const latest = await reloadCapabilities();
-        if (!latest || latest.error) { toast('无法确认思考配置，请重试或恢复默认', 'error'); return; }
-        effortCheck = effortSelection(latest, effortRecord, { model, deviceId: resolveDeviceKey() });
-        if (!effortCheck.canSend) { toast(effortCheck.message, 'error'); return; }
-      }
       const { result, body } = await createSession({
         cwd,
         text,
         model,
-        effort: effortCheck.sendEffort,
+        effort,
         mode,
         files,
       });
       setSessionMode(result.sessionId, mode);
       setSessionModel(result.sessionId, model);
-      setSessionEffort(result.sessionId, {
-        effort: effortCheck.sendEffort || '',
-        model,
-        revision: capabilities?.revision || effortRecord.revision || '',
-      });
+      setSessionEffort(result.sessionId, effort);
       onCreated?.(result, body);
       setDraft('');
       setFiles([]);
       setModelChoice(null);
-      setEffortRecord({
-        effort: '',
-        model: '',
-        revision: '',
-        deviceId: resolveDeviceKey(),
-        stale: false,
-      });
+      setEffort('');
     } catch (e) {
+      if (e.code !== 'connection_changed' && e.code !== 'unauthorized') haptics.error();
       if (e.status === 409) toast('所选项目当前不可创建新会话', 'error');
       else if (e.status === 413) toast(tooLargeMessage(e), 'error');
       else if (e.code === 'unknown_model') { toast('该模型已不可用，请重新选择', 'error'); fetchModels().catch(() => {}); }
-      else if (e.code === 'unsupported_effort') {
-        toast(
-          e.data?.capabilities?.thinkingEnabled === false
-            ? '本机已关闭思考，请将思考程度恢复为默认'
-            : '当前模型不支持所选思考程度，请重新选择',
-          'error',
-        );
-        applyServerCapabilities(e.data?.capabilities);
-      } else if (e.code === 'invalid_effort') {
-        toast('思考程度参数无效，请重新选择', 'error');
-      } else if (e.code === 'unknown_cwd') toast('该项目已不可用，请刷新后重试', 'error');
+      else if (e.code === 'invalid_effort') toast('思考程度参数无效，请重新选择', 'error');
+      else if (e.code === 'unknown_cwd') toast('该项目已不可用，请刷新后重试', 'error');
       else if (e.code === 'connection_changed') toast('连接已切换，请在当前连接重新发送', 'info');
       else if (e.code !== 'unauthorized') toast(`新建失败：${e.code}`, 'error');
     } finally { setBusy(false); }
-  }, [draft, cwd, cwdKnown, catalog, model, capabilities, effortRecord, mode, busy, files, onCreated, applyServerCapabilities, reloadCapabilities]);
+  }, [draft, cwd, cwdKnown, catalog, model, effort, effortOk, mode, busy, files, onCreated]);
 
   const onContentSizeChange = (e) => {
     const h = Math.min(Math.max(Math.ceil(e.nativeEvent.contentSize.height), 44), 150);
@@ -191,20 +148,25 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
           }}
         />
         <ComposerActions
-          attachment={<AttachmentPicker disabled={busy} onPicked={(items) => setFiles((xs) => [...xs, ...items])} />}
+          attachment={<AttachmentPicker disabled={busy} onPicked={(items) => setFiles((xs) => [...xs, ...items])} extraItems={[effortMenuItem]} />}
           model={(
             <ModelPicker
               value={model}
               onChange={setModelChoice}
               catalog={catalog}
-              effortRecord={effortRecord}
-              onEffortChange={pickEffort}
-              capabilities={capabilities}
-              onOpen={() => { reloadCapabilities(); fetchModels().catch(() => {}); }}
-              onRefreshCapabilities={() => { reloadCapabilities({ refresh: true }); fetchModels().catch(() => {}); }}
+              onOpen={() => { fetchModels().catch(() => {}); }}
             />
           )}
-          mode={null}
+          mode={(
+            <EffortPicker
+              open={effortOpen}
+              onOpen={openEffort}
+              onClose={() => setEffortOpen(false)}
+              effort={effort}
+              options={effortOptions}
+              onPick={setEffort}
+            />
+          )}
           action={<TouchableOpacity
             onPress={onSendPress}
             disabled={!canSend}

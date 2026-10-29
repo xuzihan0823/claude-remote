@@ -5,6 +5,7 @@ import { bus, toast } from '../../../../web/core/bus.js';
 import { baseChannel, candidateBases, channelPrefOf, getDevice, hostOf, removeDeviceAction, syncBases, updateDevice } from '../../../../web/core/devices.js';
 import { useConnActions } from '../../lib/conn-context.js';
 import { useDevices } from '../../lib/useDevices.js';
+import { haptics } from '../../lib/haptics.js';
 import { QrScanner } from '../../components/QrScanner.js';
 import { useTheme } from '../../theme.js';
 import { Group, Row, SettingsPage } from './ui.js';
@@ -44,7 +45,8 @@ export function DeviceDetailScreen({ navigation, route }) {
   const reconnect = async (next) => {
     if (!isCurrent) return;
     setBusy(true);
-    await tryConnectBases(candidateBases(next), next.token);
+    const ok = await tryConnectBases(candidateBases(next), next.token, { beforeCommit: () => haptics.success() });
+    if (!ok) haptics.error();
     setBusy(false);
   };
 
@@ -101,7 +103,8 @@ export function DeviceDetailScreen({ navigation, route }) {
     updateDevice(d.id, { token: tok });
     const synced = syncBases(d.id, bases);
     changed();
-    const ok = await tryConnectBases(synced ? candidateBases(synced) : bases, tok);
+    const ok = await tryConnectBases(synced ? candidateBases(synced) : bases, tok, { beforeCommit: () => haptics.success() });
+    if (!ok) haptics.error();
     setBusy(false);
     if (ok) toast('已重新配对', 'info');
   };

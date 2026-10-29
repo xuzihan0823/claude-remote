@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { Linking, Modal, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { parseDeepLink } from '../lib/deep-link.js';
-import { haptics } from '../lib/haptics.js';
 
 // App 内扫码配对：读 Mac 上 `cr` 配对页（按 p）的二维码，内容是 claude-remote://setup?... 深链。
 // expo-camera 是原生模块，旧 dev client 里没有时 require 失败，界面提示重新编译而不是崩溃。
@@ -48,7 +47,6 @@ export function QrScanner({ visible, onClose, onResult }) {
     }
     lockRef.current = true;
     setFound(true);
-    haptics.success();
     setTimeout(() => { onResult({ token: link.token, bases: link.bases }); onClose(); }, 380);
   };
 
