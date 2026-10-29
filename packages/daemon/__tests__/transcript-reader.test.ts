@@ -146,3 +146,18 @@ test("stripWrapperTags removes known CLI wrapper tags but keeps user text", () =
   assert.equal(stripWrapperTags(withText).trim(), "请帮我修这个 bug");
   assert.equal(stripWrapperTags("普通 <b>加粗</b> 文本").trim(), "普通 <b>加粗</b> 文本");
 });
+
+test("assistant upstream message id survives parsing with original block indexes", () => {
+  const messages = parseTranscriptLine(JSON.stringify({
+    type: "assistant", uuid: "row-id", parentUuid: "user-id",
+    message: { id: "msg_upstream", content: [
+      { type: "thinking", thinking: "thinking" },
+      { type: "text", text: "好的" },
+      { type: "text", text: "好的" },
+    ] },
+  }), 2);
+  assert.deepEqual(messages.map((m) => [m.apiMessageId, m.blockIndex]), [
+    ["msg_upstream", 0], ["msg_upstream", 1], ["msg_upstream", 2],
+  ]);
+  assert.equal(messages[0]?.uuid, "row-id");
+});

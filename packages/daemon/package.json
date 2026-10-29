@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./pair": "./src/pair.ts",
+    "./config": "./src/config.ts"
   },
   "scripts": {
     "test": "tsx --test __tests__/*.test.ts",
@@ -13,6 +15,7 @@
   "dependencies": {
     "@claude-remote/agent-bridge": "workspace:*",
     "@claude-remote/interactions": "workspace:*",
+    "@claude-remote/relay": "workspace:*",
     "qrcode": "^1.5.4",
     "ws": "^8.18.0"
   },

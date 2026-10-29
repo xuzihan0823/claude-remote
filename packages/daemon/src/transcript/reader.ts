@@ -186,7 +186,13 @@ export function parseTranscriptLine(line: string, seq: number): RenderMessage[] 
   if (base === null) return [];
 
   if (type === "user") return userMessages(base, message.content);
-  if (type === "assistant") return assistantMessages(base, message.content);
+  if (type === "assistant") {
+    const messages = assistantMessages(base, message.content);
+    if (typeof message.id === "string" && message.id !== "") {
+      for (const item of messages) item.apiMessageId = message.id;
+    }
+    return messages;
+  }
   if (KNOWN_META_TYPES.has(type) || type === "") return [];
 
   // 未知 type 兜底：折叠展示原始类型

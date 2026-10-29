@@ -1,7 +1,7 @@
-// HTTP + WebSocket 服务层：docs/api-contract.md 的落地。
+// HTTP + WebSocket 服务层。
 //
 // 职责：Bearer/token 鉴权、HTTP 端点映射（NotIdleError→409、already_resolved→409、
-// ENOENT→404）、WS subscribe 管理与广播、web/ 静态托管、watcher/activity/runner/
+// ENOENT→404）、WS subscribe 管理与广播、watcher/activity/runner/
 // approval 事件 → WS 帧、notifier 触发（审批创建、run 终态）。
 //
 // 广播语义：message/resync/run 只发给订阅了该会话的连接；status 另发给订阅 "*"
@@ -9,41 +9,36 @@
 // 匹配，见 05 报告对表第 4 条）。
 
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
-import { homedir } from "node:os";
-import { basename, extname, join, normalize, resolve, sep } from "node:path";
+import { homedir, hostname } from "node:os";
+import { basename, join } from "node:path";
 import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
+import { EFFORT_LEVELS, type EffortLevel } from "@claude-remote/agent-bridge";
+import { readEffortOptions, type EffortOptions } from "./effort-levels.js";
 import type { DaemonConfig } from "./config.js";
-import { enumeratePairBases, isLoopbackAddress, looksProxied, pairPayload, type PairInfo } from "./pair.js";
+import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
 import { readSessionCwd, resolveSessionFile } from "./session-files.js";
-import { NotIdleError, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
+import { StreamBuffer } from "./run/stream-buffer.js";
+import { approvalLink, NotIdleError, sessionLink, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
 import { listSessions } from "./transcript/indexer.js";
 import { buildProjectIndex } from "./transcript/projects.js";
 import { readBefore, readTail } from "./transcript/reader.js";
+import { searchSessions } from "./transcript/search.js";
 import type { ActivityTracker } from "./watch/activity.js";
 import type { SessionWatcher } from "./watch/watcher.js";
 
-const MIME: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json",
-  ".webmanifest": "application/manifest+json",
-  ".png": "image/png",
-  ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
-  ".map": "application/json",
-};
 
 const BODY_LIMIT_BYTES = 1024 * 1024;
 const UPLOAD_LIMIT_BYTES = 25 * 1024 * 1024;
+const IMAGE_TYPES: Record<string, string> = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
+  webp: "image/webp", heic: "image/heic", heif: "image/heif",
+};
 const MESSAGES_LIMIT_DEFAULT = 100;
 const MESSAGES_LIMIT_MAX = 500;
 const WS_HEARTBEAT_MS = 30_000;
@@ -53,8 +48,6 @@ type PermissionMode = "default" | "acceptEdits" | "plan" | "bypassPermissions";
 
 export interface DaemonServerOptions {
   config: DaemonConfig;
-  /** web/ 静态目录绝对路径。 */
-  webRoot: string;
   watcher: SessionWatcher;
   tracker: ActivityTracker;
   runner: TurnRunner;
@@ -65,6 +58,17 @@ export interface DaemonServerOptions {
   claudeCliVersion: () => string;
   /** 测试/嵌入方可注入；默认每次请求重新读取 Mac 设置，以反映即时切换。 */
   modelCatalog?: () => Promise<ModelCatalog>;
+  effortOptions?: (cwd: string, model?: string) => Promise<EffortOptions>;
+  /** relay connector 只读状态；缺省视为未启用。 */
+  relayStatus?: () => RelayStatus;
+}
+
+export interface RelayStatus {
+  state: "disabled" | "connecting" | "connected" | "error";
+  error?: string;
+  /** relay 启用时手机可用的 base（`${RELAY_URL}/d/<deviceId>`），追加在直连地址之后。 */
+  base?: string;
+  since?: number;
 }
 
 interface ClientState {
@@ -92,6 +96,7 @@ export class DaemonServer {
   readonly #newSessions = new Set<string>();
   readonly #watchActivations = new Set<string>();
   readonly #watchRetryTimers = new Map<string, NodeJS.Timeout>();
+  readonly #streams = new StreamBuffer({ emit: (frame) => this.#broadcastToSubscribers(frame.sessionId, frame) });
   #heartbeat: NodeJS.Timeout | undefined;
   #closed = false;
 
@@ -129,7 +134,7 @@ export class DaemonServer {
   /** 配对信息（候选地址每次现查——Tailscale 可能在 daemon 启动后才拉起）；listen() 后用实际端口。 */
   get pairInfo(): PairInfo {
     const { token } = this.#options.config;
-    return { bases: enumeratePairBases(this.#pairPort), token };
+    return { bases: pairBases(this.#pairPort, this.#options.relayStatus?.().base), token };
   }
 
   /** 实际监听地址（测试用 port 0）。 */
@@ -144,7 +149,12 @@ export class DaemonServer {
     this.#broadcastAll(event);
     if (event.type === "approval") {
       const card = event.interaction;
-      void this.#options.notifier("Claude 待审批", `${card.toolName}: ${card.prompt}`.slice(0, 120));
+      const what = card.kind === "approval" ? `${card.toolName}: ${card.prompt}` : `提问：${card.questions?.[0]?.question ?? ""}`;
+      void this.#options.notifier(card.kind === "approval" ? "Claude 待审批" : "Claude 有问题要问你", what.slice(0, 120), {
+        url: approvalLink(card.interactionId, card.sessionId),
+        group: "approval",
+        urgent: true,
+      });
     }
   }
 
@@ -183,8 +193,7 @@ export class DaemonServer {
     const path = url.pathname;
 
     if (path.startsWith("/api/")) {
-      // CORS：iOS 壳（capacitor://localhost）与非同源部署的前端需要跨域访问；
-      // 鉴权靠 Bearer token 且不依赖 Cookie，Allow-Origin 放开是安全的。
+      // 保留 API 跨域兼容；鉴权使用 Bearer token。
       res.setHeader("Access-Control-Allow-Origin", "*");
       if (req.method === "OPTIONS") {
         res.writeHead(204, {
@@ -207,10 +216,6 @@ export class DaemonServer {
       await this.#handleApi(req, res, url);
       return;
     }
-    if (req.method === "GET" || req.method === "HEAD") {
-      await this.#serveStatic(path, res);
-      return;
-    }
     this.#json(res, 404, { error: "not_found" });
   }
 
@@ -223,12 +228,29 @@ export class DaemonServer {
         ok: true,
         version: this.#options.version,
         claudeCliVersion: this.#options.claudeCliVersion(),
+        hostname: hostname(),
       });
+      return;
+    }
+
+    if (method === "GET" && path === "/api/connect-info") {
+      const relay = this.#options.relayStatus?.() ?? { state: "disabled" };
+      this.#json(res, 200, { bases: pairBases(this.#pairPort, relay.base), relay });
       return;
     }
 
     if (method === "GET" && path === "/api/sessions") {
       await this.#handleListSessions(res, url);
+      return;
+    }
+
+    if (method === "GET" && path === "/api/sessions/search") {
+      await this.#handleSearch(res, url);
+      return;
+    }
+
+    if (method === "GET" && path === "/api/interactions/pending") {
+      this.#json(res, 200, { interactions: this.#options.approvals.pending() });
       return;
     }
 
@@ -243,6 +265,11 @@ export class DaemonServer {
       return;
     }
 
+    if (method === "GET" && path === "/api/effort-levels") {
+      await this.#handleEffortLevels(res, url);
+      return;
+    }
+
     if (method === "POST" && path === "/api/sessions") {
       await this.#handleCreateSession(req, res);
       return;
@@ -250,7 +277,7 @@ export class DaemonServer {
 
     const abortMatch = /^\/api\/sessions\/([^/]+)\/abort$/.exec(path);
     if (abortMatch !== null && method === "POST") {
-      this.#handleAbort(res, decodeURIComponent(abortMatch[1] ?? ""));
+      await this.#handleAbort(req, res, decodeURIComponent(abortMatch[1] ?? ""));
       return;
     }
 
@@ -275,6 +302,12 @@ export class DaemonServer {
     const uploadMatch = /^\/api\/sessions\/([^/]+)\/upload$/.exec(path);
     if (uploadMatch !== null && method === "POST") {
       await this.#handleUpload(req, res, url, decodeURIComponent(uploadMatch[1] ?? ""));
+      return;
+    }
+
+    const uploadFileMatch = /^\/api\/uploads\/([^/]+)\/([^/]+)$/.exec(path);
+    if (uploadFileMatch !== null && method === "GET") {
+      await this.#serveUpload(res, decodeURIComponent(uploadFileMatch[1] ?? ""), decodeURIComponent(uploadFileMatch[2] ?? ""));
       return;
     }
 
@@ -326,6 +359,26 @@ export class DaemonServer {
     this.#json(res, 200, { sessions, total: filtered.length });
   }
 
+  async #handleSearch(res: ServerResponse, url: URL): Promise<void> {
+    const q = url.searchParams.get("q") ?? "";
+    if (q.trim() === "") {
+      this.#json(res, 400, { error: "invalid_query" });
+      return;
+    }
+    const full = url.searchParams.get("full") === "1" || url.searchParams.get("full") === "true";
+    const limit = clampInt(url.searchParams.get("limit"), 50, 1, 200);
+    const all = await listSessions(this.#options.config.projectsDir);
+    const { hits, truncated } = await searchSessions(this.#options.config.projectsDir, all, q, { full, limit });
+    this.#json(res, 200, {
+      results: hits.map((hit) => ({
+        ...hit.session,
+        status: this.#options.tracker.getStatus(hit.session.sessionId),
+        match: { field: hit.field, snippet: hit.snippet, ...(hit.seq === undefined ? {} : { seq: hit.seq }) },
+      })),
+      truncated,
+    });
+  }
+
   async #readModelCatalog(): Promise<ModelCatalog> {
     return this.#options.modelCatalog?.() ?? readModelCatalog();
   }
@@ -362,6 +415,33 @@ export class DaemonServer {
     return value as PermissionMode;
   }
 
+  async #handleEffortLevels(res: ServerResponse, url: URL): Promise<void> {
+    const sessionId = url.searchParams.get("sessionId");
+    let cwd: string;
+    if (sessionId !== null) {
+      if (!isUuid(sessionId)) { this.#json(res, 400, { error: "invalid_session_id" }); return; }
+      try { cwd = (await readSessionCwd(await resolveSessionFile(this.#options.config.projectsDir, sessionId))) || homedir(); }
+      catch (error) {
+        if (isEnoent(error)) { this.#json(res, 404, { error: "session_not_found" }); return; }
+        throw error;
+      }
+    } else {
+      cwd = url.searchParams.get("cwd")?.trim() || homedir();
+      if (!(await this.#knownCwds()).has(cwd)) { this.#json(res, 400, { error: "unknown_cwd" }); return; }
+    }
+    const model = await this.#validateModel(res, url.searchParams.get("model") ?? undefined);
+    if (model === false) return;
+    this.#json(res, 200, await (this.#options.effortOptions ?? readEffortOptions)(cwd, model));
+  }
+
+  #validateEffort(res: ServerResponse, value: unknown): EffortLevel | undefined | false {
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || !EFFORT_LEVELS.includes(value as EffortLevel)) {
+      this.#json(res, 400, { error: "invalid_effort" }); return false;
+    }
+    return value as EffortLevel;
+  }
+
   async #handleCreateSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await this.#readJsonBody(req, res);
     if (body === undefined) return;
@@ -384,6 +464,9 @@ export class DaemonServer {
     const permissionMode = this.#validatePermissionMode(res, permModeValue);
     if (permissionMode === false) return;
 
+    const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
+    if (effort === false) return;
+
     const sessionId = randomUUID();
     let handle: TurnHandle;
     try {
@@ -393,6 +476,7 @@ export class DaemonServer {
         text: textValue,
         newSession: true,
         ...(model === undefined ? {} : { model }),
+        ...(effort === undefined ? {} : { effort }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
       });
     } catch (error) {
@@ -412,18 +496,39 @@ export class DaemonServer {
     this.#json(res, 202, { sessionId, runId: handle.runId });
   }
 
-  #handleAbort(res: ServerResponse, sessionId: string): void {
+  async #handleAbort(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
     if (!isUuid(sessionId)) {
       this.#json(res, 400, { error: "invalid_session_id" });
       return;
     }
-    const runId = this.#options.runner.activeRunId(sessionId);
-    if (runId === undefined) {
-      this.#json(res, 200, { runId: null, status: "idle" });
+    const body = await this.#readJsonBody(req, res, true);
+    if (body === undefined) return;
+    const requestedRunId = (body as { runId?: unknown }).runId;
+    if (requestedRunId !== undefined && (typeof requestedRunId !== "string" || !isUuid(requestedRunId))) {
+      this.#json(res, 400, { error: "invalid_run_id" });
       return;
     }
-    this.#options.runner.abort(runId);
-    this.#json(res, 200, { runId, status: "aborted" });
+    const activeRunId = this.#options.runner.activeRunId(sessionId);
+    if (requestedRunId !== undefined && activeRunId === undefined) {
+      this.#json(res, 200, {
+        runId: null,
+        status: "idle",
+        sessionStatus: this.#options.tracker.getStatus(sessionId),
+      });
+      return;
+    }
+    if (requestedRunId !== undefined && requestedRunId !== activeRunId) {
+      this.#json(res, 409, { error: "run_mismatch", activeRunId, status: "daemon-driving" });
+      return;
+    }
+    if (activeRunId === undefined) {
+      // 未指定 runId 时保留旧客户端的手动解除占用入口；指定 runId 的幂等停止不得经过这里
+      const released = this.#options.tracker.release(sessionId);
+      this.#json(res, 200, { runId: null, status: released ? "released" : "idle" });
+      return;
+    }
+    this.#options.runner.abort(activeRunId);
+    this.#json(res, 200, { runId: activeRunId, status: "aborted" });
   }
 
   async #handleGetMessages(res: ServerResponse, url: URL, sessionId: string): Promise<void> {
@@ -479,6 +584,8 @@ export class DaemonServer {
       throw error;
     }
     const cwd = (await readSessionCwd(file)) || homedir();
+    const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
+    if (effort === false) return;
     let handle: TurnHandle;
     try {
       handle = this.#options.runner.startTurn({
@@ -486,6 +593,7 @@ export class DaemonServer {
         cwd,
         text,
         ...(model === undefined ? {} : { model }),
+        ...(effort === undefined ? {} : { effort }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
       });
     } catch (error) {
@@ -509,11 +617,19 @@ export class DaemonServer {
     try {
       for await (const event of handle.events) {
         if (event.type === "worker") {
-          if (this.#newSessions.has(sessionId) && event.event.type === "session") {
+          const worker = event.event;
+          if (this.#newSessions.has(sessionId) && worker.type === "session") {
             void this.#activateNewSessionWatch(sessionId);
+          } else if (worker.type === "assistant_stream_start") {
+            this.#streams.start(sessionId, worker.apiMessageId);
+          } else if (worker.type === "assistant_delta") {
+            this.#streams.delta(sessionId, worker.index ?? 0, worker.text);
+          } else if (worker.type === "assistant_block_stop") {
+            this.#streams.stop(sessionId, worker.index);
           }
           continue;
         }
+        if (event.state !== "started") this.#streams.end(sessionId);
         const frame: Record<string, unknown> = {
           type: "run",
           sessionId,
@@ -524,15 +640,19 @@ export class DaemonServer {
         if (event.permissionMode !== undefined) frame.permissionMode = event.permissionMode;
         this.#broadcastToSubscribers(sessionId, frame);
         if (event.state === "done") {
-          void this.#options.notifier("Claude 已完成", snippet(text));
+          void this.#options.notifier("Claude 已完成", snippet(text), { url: sessionLink(sessionId), group: "run" });
         } else if (event.state === "error") {
-          void this.#options.notifier("Claude 运行出错", `${event.error ?? "unknown"} · ${snippet(text)}`);
+          void this.#options.notifier("Claude 运行出错", `${event.error ?? "unknown"} · ${snippet(text)}`, {
+            url: sessionLink(sessionId),
+            group: "run",
+          });
         }
       }
     } catch (error) {
       console.error(`run event pump failed (session ${sessionId}):`, error);
     } finally {
       this.#activeRuns.delete(handle.runId);
+      this.#streams.end(sessionId);
       if (this.#newSessions.has(sessionId)) void this.#activateNewSessionWatch(sessionId);
     }
   }
@@ -577,6 +697,28 @@ export class DaemonServer {
     this.#json(res, 200, { path: file, name: safeName, sizeBytes: size });
   }
 
+  /** 回读已上传的图片，供手机在消息里显示。只认 uploadsDir/<subdir>/<name> 两级，且只给图片。 */
+  async #serveUpload(res: ServerResponse, subdir: string, name: string): Promise<void> {
+    const type = IMAGE_TYPES[name.split(".").pop()?.toLowerCase() ?? ""];
+    const unsafe = (s: string) => !s || s === "." || s === ".." || /[\/\\\0]/.test(s);
+    if (unsafe(subdir) || unsafe(name) || type === undefined) {
+      this.#json(res, 404, { error: "not_found" });
+      return;
+    }
+    let data: Buffer;
+    try {
+      data = await readFile(join(this.#options.config.uploadsDir, subdir, name));
+    } catch (error) {
+      if (isEnoent(error)) {
+        this.#json(res, 404, { error: "not_found" });
+        return;
+      }
+      throw error;
+    }
+    res.writeHead(200, { "Content-Type": type, "Content-Length": data.length, "Cache-Control": "private, max-age=31536000, immutable" });
+    res.end(data);
+  }
+
   async #handleDecision(req: IncomingMessage, res: ServerResponse, interactionId: string): Promise<void> {
     const body = await this.#readJsonBody(req, res);
     if (body === undefined) return;
@@ -599,7 +741,7 @@ export class DaemonServer {
     }
   }
 
-  async #readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<unknown | undefined> {
+  async #readJsonBody(req: IncomingMessage, res: ServerResponse, allowEmpty = false): Promise<unknown | undefined> {
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const chunk of req) {
@@ -611,6 +753,7 @@ export class DaemonServer {
       chunks.push(chunk as Buffer);
     }
     if (chunks.length === 0) {
+      if (allowEmpty) return {};
       this.#json(res, 400, { error: "invalid_json" });
       return undefined;
     }
@@ -632,29 +775,6 @@ export class DaemonServer {
     res.end(JSON.stringify(body));
   }
 
-  // -- 静态托管 ---------------------------------------------------------------
-
-  async #serveStatic(path: string, res: ServerResponse): Promise<void> {
-    const clean = normalize(decodeURIComponent(path)).replaceAll("\\", "/");
-    const relative = clean === "/" ? "index.html" : clean.replace(/^\/+/, "");
-    const file = resolve(this.#options.webRoot, relative);
-    if (file !== this.#options.webRoot && !file.startsWith(this.#options.webRoot + sep)) {
-      this.#json(res, 404, { error: "not_found" });
-      return;
-    }
-    try {
-      const stats = await stat(file);
-      if (!stats.isFile()) throw new Error("not a file");
-      res.writeHead(200, {
-        "Content-Type": MIME[extname(file)] ?? "application/octet-stream",
-        "Content-Length": stats.size,
-        "Cache-Control": "no-store",
-      });
-      createReadStream(file).pipe(res);
-    } catch {
-      this.#json(res, 404, { error: "not_found" });
-    }
-  }
 
   // -- WebSocket --------------------------------------------------------------
 
@@ -677,7 +797,7 @@ export class DaemonServer {
       state.alive = true;
     });
     ws.on("message", (data) => {
-      void this.#onClientFrame(state, data.toString());
+      void this.#onClientFrame(ws, state, data.toString());
     });
     ws.on("close", () => {
       this.#clients.delete(ws);
@@ -686,7 +806,7 @@ export class DaemonServer {
     ws.on("error", () => ws.terminate());
   }
 
-  async #onClientFrame(state: ClientState, raw: string): Promise<void> {
+  async #onClientFrame(ws: WebSocket, state: ClientState, raw: string): Promise<void> {
     let frame: unknown;
     try {
       frame = JSON.parse(raw);
@@ -695,6 +815,11 @@ export class DaemonServer {
     }
     if (typeof frame !== "object" || frame === null) return;
     const { type, sessionId } = frame as { type?: unknown; sessionId?: unknown };
+    // 应用层心跳：RN 的 WebSocket 看不到协议层 ping，客户端靠 pong 判断半开连接
+    if (type === "ping") {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "pong" }));
+      return;
+    }
     if (typeof sessionId !== "string" || sessionId === "") return;
 
     if (type === "subscribe") {
@@ -706,6 +831,7 @@ export class DaemonServer {
         } catch (error) {
           if (isEnoent(error) && this.#newSessions.has(sessionId)) {
             state.subs.add(sessionId);
+            this.#sendSessionState(ws, sessionId);
             void this.#activateNewSessionWatch(sessionId);
             return;
           }
@@ -715,12 +841,25 @@ export class DaemonServer {
         }
       }
       state.subs.add(sessionId);
+      if (sessionId !== "*") this.#sendSessionState(ws, sessionId);
+      // 中途打开 / 断线重连：补发正在流式输出的草稿
+      for (const f of this.#streams.snapshot(sessionId)) if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(f));
       return;
     }
     if (type === "unsubscribe") {
       if (!state.subs.delete(sessionId)) return;
       if (sessionId !== "*") this.#releaseWatch(sessionId);
     }
+  }
+
+  #sendSessionState(ws: WebSocket, sessionId: string): void {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({
+      type: "session-state",
+      sessionId,
+      status: this.#options.tracker.getStatus(sessionId),
+      activeRunId: this.#options.runner.activeRunId(sessionId) ?? null,
+    }));
   }
 
   async #acquireWatch(sessionId: string): Promise<void> {

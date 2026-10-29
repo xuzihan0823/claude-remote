@@ -10,6 +10,8 @@
   },
   "scripts": {
     "dev": "tsx packages/daemon/src/index.ts",
+    "cr": "node packages/cli/bin/cr.mjs",
+    "build:npm": "node scripts/build-npm.mjs",
     "test": "pnpm run test:web && pnpm run test:mobile && pnpm -r --if-present test",
     "test:web": "node --test web/core/*.test.js",
     "test:mobile": "node --test app/src/lib/__tests__/*.test.mjs",
@@ -18,12 +20,8 @@
     "typecheck": "pnpm run typecheck:packages && pnpm run typecheck:root"
   },
   "devDependencies": {
-    "@capacitor/app": "^8.1.1",
-    "@capacitor/cli": "^8.4.2",
-    "@capacitor/core": "^8.4.2",
-    "@capacitor/ios": "^8.4.2",
-    "@capacitor/keyboard": "^8.0.5",
     "@types/node": "^24.0.0",
+    "esbuild": "0.28.1",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   },

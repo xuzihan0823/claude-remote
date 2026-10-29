@@ -28,16 +28,32 @@ test('creation captures the exact original workspace and selected model before a
     if (url.includes('/upload')) return upload.promise;
     return Response.json({ sessionId: 'created', runId: 'run' });
   };
-  const input = { cwd: '/worktree/original', text: 'hello', model: 'provider/model', mode: 'plan', files: [{ uri: 'file:///fixture', name: 'doc.txt' }] };
+  const input = { cwd: '/worktree/original', text: 'hello', model: 'provider/model', effort: 'high', mode: 'plan', files: [{ uri: 'file:///fixture', name: 'doc.txt' }] };
   const request = createSession(input);
   input.cwd = '/another/workspace';
+  input.effort = 'low';
   upload.resolve(Response.json({ path: '/uploads/doc.txt' }));
   const { body } = await request;
   assert.equal(body.cwd, '/worktree/original');
   assert.equal(body.model, 'provider/model');
+  assert.equal(body.effort, 'high');
   assert.equal(body.permissionMode, 'plan');
   assert.ok(body.text.includes('/uploads/doc.txt'));
-  assert.equal(JSON.parse(calls.at(-1).opts.body).cwd, '/worktree/original');
+  const sentBody = JSON.parse(calls.at(-1).opts.body);
+  assert.equal(sentBody.cwd, '/worktree/original');
+  assert.equal(sentBody.effort, 'high');
+});
+
+test('creation omits effort when default empty string is used', async () => {
+  saveConn('http://first:8788', 'test');
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url, opts });
+    return Response.json({ sessionId: 'created', runId: 'run' });
+  };
+  const { body } = await createSession({ cwd: '/worktree/original', text: 'hello', effort: '', mode: 'default', files: [] });
+  assert.equal(Object.hasOwn(body, 'effort'), false);
+  assert.equal(Object.hasOwn(JSON.parse(calls.at(-1).opts.body), 'effort'), false);
 });
 
 test('switching connection during local attachment reads prevents upload and creation on the new daemon', async () => {

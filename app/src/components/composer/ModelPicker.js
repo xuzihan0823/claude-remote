@@ -1,38 +1,46 @@
-import { useRef } from 'react';
-import { Text, TouchableOpacity, View } from 'react-native';
-import { BottomSheetBackdrop, BottomSheetModal } from '@gorhom/bottom-sheet';
-import { findModel, modelMainName, resolveDefaultName } from '../../../../web/core/api.js';
-import { ModelSheetContent } from './ModelSheet.js';
-import { Icon } from '../Icon.js';
+import { useRef, useState } from 'react';
+import { Keyboard, Text, TouchableOpacity, View } from 'react-native';
+import { modelSelection, modelTriggerLabel } from '../../../../web/core/api.js';
+import { GlassMenu } from '../GlassMenu.js';
+import { buildModelMenuItems } from './ModelSheet.js';
 import { useTheme } from '../../theme.js';
+import { haptics } from '../../lib/haptics.js';
 
-// pill：选中显示 modelMainName，未选显示「默认 · defName」；点开 BottomSheetModal 选模型。
-// 对应 web/ui/components/model-picker.js 的 ModelPicker。
-const renderBackdrop = (props) => (
-  <BottomSheetBackdrop {...props} appearsOnIndex={0} disappearsOnIndex={-1} pressBehavior="close" />
-);
-
-export function ModelPicker({ value, onChange, catalog }) {
+// 模型胶囊：点击在按钮上方弹出液态玻璃菜单选模型，收起时以水滴形态缩回胶囊。
+export function ModelPicker({ value, onChange, catalog, onOpen }) {
   const { colors } = useTheme();
-  const ref = useRef(null);
-  const { models = [] } = catalog || {};
-  const sel = findModel(models, value);
-  const defName = resolveDefaultName(catalog);
-  const triggerMain = sel ? modelMainName(sel) : `默认${defName ? ` · ${defName}` : ''}`;
-  const pick = (v) => { onChange(v); ref.current?.dismiss(); };
+  const anchorRef = useRef(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuAnchor, setMenuAnchor] = useState(null);
+  const triggerMain = modelTriggerLabel(catalog, value);
+  const unavailable = modelSelection(catalog, value).status === 'unavailable';
 
-  const renderHandle = () => (
-    <View style={{ alignItems: 'center', paddingVertical: 8 }}>
-      <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: colors.ink3 }} />
-    </View>
-  );
+  const pick = (v) => {
+    if (v !== value) haptics.selection();
+    onChange(v);
+  };
+
+  const openMenu = () => {
+    onOpen?.();
+    const measure = () => anchorRef.current?.measureInWindow((x, y, width, height) => {
+      setMenuAnchor({ x, y, width, height });
+      setMenuOpen(true);
+    });
+    if (!Keyboard.isVisible()) { measure(); return; }
+    const sub = Keyboard.addListener('keyboardDidHide', () => { sub.remove(); measure(); });
+    Keyboard.dismiss();
+  };
+
+  const items = buildModelMenuItems({ value, catalog, onPick: pick });
 
   return (
-    <>
+    <View ref={anchorRef} collapsable={false} style={{ flexShrink: 1 }}>
       <TouchableOpacity
-        onPress={() => ref.current?.present()}
+        testID="model-picker-trigger"
+        onPress={openMenu}
         accessibilityRole="button"
         accessibilityLabel={`选择模型，当前${triggerMain}`}
+        accessibilityState={{ expanded: menuOpen }}
         style={{
           borderRadius: 22,
           borderCurve: 'continuous',
@@ -40,24 +48,25 @@ export function ModelPicker({ value, onChange, catalog }) {
           paddingVertical: 10,
           minHeight: 44,
           justifyContent: 'center',
-          backgroundColor: colors.controlFill,
+          backgroundColor: unavailable ? colors.glassTintAccent : colors.controlFill,
           borderWidth: 1,
-          borderColor: colors.controlBorder,
+          borderColor: unavailable ? colors.danger : colors.controlBorder,
           flexShrink: 1,
         }}
       >
-        <Text numberOfLines={1} style={{ color: colors.ink, fontSize: 13.5, fontWeight: '500' }}>{triggerMain}</Text>
+        <Text numberOfLines={1} style={{ color: unavailable ? colors.danger : colors.ink, fontSize: 13.5, fontWeight: '500' }}>
+          {triggerMain}
+        </Text>
       </TouchableOpacity>
-      <BottomSheetModal
-        ref={ref}
-        enableDynamicSizing
-        maxDynamicContentSize={600}
-        backdropComponent={renderBackdrop}
-        handleComponent={renderHandle}
-        backgroundStyle={{ backgroundColor: colors.card }}
-      >
-        <ModelSheetContent value={value} catalog={catalog} onPick={pick} />
-      </BottomSheetModal>
-    </>
+      <GlassMenu
+        visible={menuOpen}
+        anchor={menuAnchor}
+        title="选择模型"
+        items={items}
+        placement="above"
+        width={268}
+        onClose={() => setMenuOpen(false)}
+      />
+    </View>
   );
 }

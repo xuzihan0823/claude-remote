@@ -2,7 +2,7 @@
 // escapeHtml / STATUS_DOT 是浏览器 CSS 专用，RN 不需要；STATUS_DOT 的配色语义改由 statusColor 映射到 theme token。
 // 配色依据 web/style.css：.dot-idle -> var(--ok)、.dot-term -> var(--warn)、.dot-run -> var(--info)。
 
-export const STATUS_LABEL = { idle: '可接管', 'terminal-driving': '终端驾驶', 'daemon-driving': '运行中' };
+export const STATUS_LABEL = { idle: '可接管', 'terminal-driving': '终端使用中', 'daemon-driving': '运行中' };
 
 export function relTime(ts, nowMs = Date.now()) {
   const d = nowMs - ts;
