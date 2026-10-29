@@ -3,9 +3,10 @@ import { ActivityIndicator, Text, TextInput, TouchableOpacity, View } from 'reac
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { createSession } from '../../lib/create-session.js';
 import { tooLargeMessage } from '../../lib/attachments.js';
-import { getPref } from '../../lib/prefs.js';
+import { usePref } from '../../lib/prefs.js';
 import { toast } from '../../../../web/core/bus.js';
 import { setSessionMode } from '../../../../web/core/modes.js';
+import { fetchModels, modelSelection, setSessionModel } from '../../../../web/core/api.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useTheme } from '../../theme.js';
 import { Icon } from '../Icon.js';
@@ -24,7 +25,10 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
   const insets = useSafeAreaInsets();
   const catalog = useModelCatalog();
   const [draft, setDraft] = useState('');
-  const [model, setModel] = useState(() => getPref('defaultModel') || '');
+  const defaultModel = usePref('defaultModel') || '';
+  // null = 本次草稿没手动选过，跟随设置里的默认模型；'' = 手动选了「跟随项目默认」
+  const [modelChoice, setModelChoice] = useState(null);
+  const model = modelChoice ?? defaultModel;
   const [files, setFiles] = useState([]);
   const [busy, setBusy] = useState(false);
   const [inputH, setInputH] = useState(44);
@@ -39,22 +43,28 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
   const create = useCallback(async () => {
     const text = draft.trim() || (files.length ? '请查看我上传的附件。' : '');
     if (!text || !cwd || !cwdKnown || busy) return;
+    if (modelSelection(catalog, model).status === 'unavailable') {
+      toast('所选模型已不可用，请重新选择', 'error');
+      return;
+    }
     setBusy(true);
     try {
       const { result, body } = await createSession({ cwd, text, model, mode, files });
       setSessionMode(result.sessionId, mode);
+      setSessionModel(result.sessionId, model);
       onCreated?.(result, body);
       setDraft('');
       setFiles([]);
+      setModelChoice(null);
     } catch (e) {
       if (e.status === 409) toast('所选项目当前不可创建新会话', 'error');
       else if (e.status === 413) toast(tooLargeMessage(e), 'error');
-      else if (e.code === 'unknown_model') toast('该模型已不可用，请重新选择', 'error');
+      else if (e.code === 'unknown_model') { toast('该模型已不可用，请重新选择', 'error'); fetchModels().catch(() => {}); }
       else if (e.code === 'unknown_cwd') toast('该项目已不可用，请刷新后重试', 'error');
       else if (e.code === 'connection_changed') toast('连接已切换，请在当前连接重新发送', 'info');
       else if (e.code !== 'unauthorized') toast(`新建失败：${e.code}`, 'error');
     } finally { setBusy(false); }
-  }, [draft, cwd, cwdKnown, model, mode, busy, files, onCreated]);
+  }, [draft, cwd, cwdKnown, catalog, model, mode, busy, files, onCreated]);
 
   const onContentSizeChange = (e) => {
     const h = Math.min(Math.max(Math.ceil(e.nativeEvent.contentSize.height), 44), 150);
@@ -102,7 +112,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
         />
         <ComposerActions
           attachment={<AttachmentPicker disabled={busy} onPicked={(items) => setFiles((xs) => [...xs, ...items])} />}
-          model={<ModelPicker value={model} onChange={setModel} catalog={catalog} />}
+          model={<ModelPicker value={model} onChange={setModelChoice} catalog={catalog} />}
           mode={null}
           action={<TouchableOpacity
             onPress={onSendPress}

@@ -84,6 +84,9 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
           paddingHorizontal: 24,
         }}
         keyboardShouldPersistTaps="handled"
+        bounces={false}
+        overScrollMode="never"
+        showsVerticalScrollIndicator={false}
       >
         <View style={{ flex: view === 'manual' ? 0 : 1, minHeight: view === 'manual' ? 0 : 340, alignItems: 'center', justifyContent: 'center', paddingTop: view === 'manual' ? 36 : 0 }}>
           <View ref={sparkRef} collapsable={false}>
@@ -134,13 +137,6 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
               >
                 <Text style={{ color: colors.ink, fontSize: 15.5 }}>输入地址和令牌</Text>
               </TouchableOpacity>
-            </FadeIn>
-            <FadeIn play={intro} delay={960 + d0} dy={0}>
-              <Text style={{ color: colors.ink3, fontSize: 12, textAlign: 'center', marginTop: 18, lineHeight: 18 }}>
-                {'在 Mac 上运行 '}
-                <Text style={{ fontFamily: fonts.mono, color: colors.ink2 }}>cr</Text>
-                {'，按 p 显示配对二维码\n手机和 Mac 需在同一 Tailscale 或局域网'}
-              </Text>
             </FadeIn>
           </Animated.View>
         ) : null}

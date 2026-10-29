@@ -168,7 +168,8 @@ export function connErrMsg(e) {
 
 export const sessionCache = new Map();
 export const pendingSessionMessages = new Map();
-export let modelCache = { models: [], defaultModel: '' };
+const EMPTY_MODEL_CATALOG = { models: [], defaultModel: '', loaded: false };
+export let modelCache = EMPTY_MODEL_CATALOG;
 export function cacheSessions(list) { for (const s of list) sessionCache.set(s.sessionId, s); }
 export async function fetchSessions(limit = 100, { offset = 0, projectId, cwd } = {}) {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
@@ -199,9 +200,14 @@ export async function fetchModels() {
   modelCache = {
     models: Array.isArray(d.models) ? d.models : [],
     defaultModel: typeof d.defaultModel === 'string' ? d.defaultModel : '',
+    loaded: true,
   };
   bus.emit('models-cached', modelCache);
   return modelCache;
+}
+export function resetModelCache() {
+  modelCache = EMPTY_MODEL_CATALOG;
+  bus.emit('models-cached', modelCache);
 }
 export function modelValue(model) { return model.alias || model.id || ''; }
 export function modelLabel(model) { return model.displayName || model.alias || model.id || '未命名模型'; }
@@ -210,9 +216,50 @@ export function findModel(models, value) {
   if (!value) return null;
   return models.find((m) => m.alias === value || m.id === value) || null;
 }
+// daemon 无条件接受的内置别名（packages/daemon/src/model-config.ts MODEL_ALIASES）
+const BUILTIN_MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku'];
+/**
+ * 选择值的状态。只有 '' 表示跟随默认；找不到的非空值不能当成默认，否则显示与实际发送不一致。
+ * status: default | ok | unavailable（目录已加载但没有它）| unverified（目录还没成功加载）
+ */
+export function modelSelection(catalog, value) {
+  if (!value) return { status: 'default', model: null };
+  const model = findModel(catalog?.models || [], value);
+  if (model) return { status: 'ok', model };
+  if (BUILTIN_MODEL_ALIASES.includes(value)) return { status: 'ok', model: { id: value, alias: value } };
+  return { status: catalog?.loaded ? 'unavailable' : 'unverified', model: null };
+}
+/** 模型选择器按钮上的文字，与 modelSelection 的状态一一对应。 */
+export function modelTriggerLabel(catalog, value) {
+  const { status, model } = modelSelection(catalog, value);
+  if (status === 'ok') return modelMainName(model);
+  if (status === 'unavailable') return `${value}（不可用）`;
+  if (status === 'unverified') return value;
+  return '跟随项目默认';
+}
+
+// 每个会话记住手机上为它选的模型：续聊不带 model 时会回到项目默认模型，
+// 不记住的话，新建时选的模型在进入会话页后就被悄悄换掉
+const SESSION_MODEL_KEY = 'session_model';
+export function getSessionModel(sessionId) {
+  try { return localStorage.getItem(`${SESSION_MODEL_KEY}:${sessionId}`) || ''; }
+  catch { return ''; }
+}
+export function setSessionModel(sessionId, model) {
+  try {
+    if (model) localStorage.setItem(`${SESSION_MODEL_KEY}:${sessionId}`, model);
+    else localStorage.removeItem(`${SESSION_MODEL_KEY}:${sessionId}`);
+  } catch { /* localStorage 不可用时仅放弃持久化 */ }
+}
+
 export function resolveDefaultName(catalog) {
   const { models = [], defaultModel = '' } = catalog || {};
   if (!defaultModel) return '';
   const m = findModel(models, defaultModel);
   return m ? modelMainName(m) : defaultModel;
+}
+
+export function defaultModelDescription(catalog) {
+  const name = resolveDefaultName(catalog);
+  return `${name ? `用户配置默认：${name}；` : ''}实际运行遵循当前项目配置`;
 }

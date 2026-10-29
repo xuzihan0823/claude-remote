@@ -1,16 +1,15 @@
 import { Text, TouchableOpacity, View } from 'react-native';
 import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
-import { findModel, modelMainName, modelValue, resolveDefaultName } from '../../../../web/core/api.js';
+import { defaultModelDescription, findModel, modelMainName, modelValue } from '../../../../web/core/api.js';
 import { useTheme } from '../../theme.js';
 
-// 模型列表 sheet 内容：首项「跟随 Mac 默认（当前 x）」+ models 列表
+// 模型列表 sheet 内容：首项跟随项目默认 + models 列表
 // （主行 modelMainName、副行 别名 alias、选中 ✓）。渲染于 ModelPicker 的 BottomSheetModal 内。
 // 对应 web/ui/components/model-picker.js 的 sheet-panel.model-menu。
 export function ModelSheetContent({ value, catalog, onPick }) {
   const { colors } = useTheme();
   const { models = [] } = catalog || {};
   const sel = findModel(models, value);
-  const defName = resolveDefaultName(catalog);
 
   const row = { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 16 };
   const main = { color: colors.inkStrong, fontSize: 15 };
@@ -24,8 +23,8 @@ export function ModelSheetContent({ value, catalog, onPick }) {
       </View>
       <TouchableOpacity onPress={() => onPick('')} style={row}>
         <View style={{ flex: 1 }}>
-          <Text numberOfLines={1} style={main}>跟随 Mac 默认</Text>
-          <Text style={sub}>{defName ? `当前 ${defName}` : '使用 Mac settings.json 的默认模型'}</Text>
+          <Text numberOfLines={1} style={main}>跟随项目默认</Text>
+          <Text style={sub}>{defaultModelDescription(catalog)}</Text>
         </View>
         {!value ? <Text style={check}>✓</Text> : null}
       </TouchableOpacity>

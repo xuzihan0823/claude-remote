@@ -1,13 +1,13 @@
-import { useCallback, useRef, useState } from 'react';
-import { Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { api } from '../../../../web/core/api.js';
+import { api, fetchModels, getSessionModel, modelSelection, setSessionModel } from '../../../../web/core/api.js';
 import { toast } from '../../../../web/core/bus.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useTheme } from '../../theme.js';
 import { Icon } from '../Icon.js';
 import { ComposerActions } from './ComposerActions.js';
-import { KeyboardLift } from './KeyboardLift.js';
+import { KeyboardStickyView } from 'react-native-keyboard-controller';
 import { ComposerCard } from './ComposerCard.js';
 import { AttachmentChips } from './AttachmentChips.js';
 import { AttachmentPicker } from './AttachmentPicker.js';
@@ -18,9 +18,14 @@ import { tooLargeMessage, uploadAttachments, withAttachmentNote } from '../../li
 // 聊天 composer（发送/停止/附件/模型 pill/模式 pill/bypass 确认）。
 // 契约（不得更改）：props { sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped }
 // 可选 prop：onStatusConflict(status) -- 409 占用时回传最新 status 给父层（ChatScreen 未接时可空）。
+// 可选 prop：onRunMismatch(activeRunId, status) -- 停止请求过期时同步服务端当前运行。
+// 可选 prop：onSending(text) -- 点发送即触发（早于上传/POST），父层先显示待发送气泡；
+//           onSendFailed() -- 发送失败，父层撤掉该气泡（输入框文字会自动回填）。
+// onSent(text, runId, context) 在 POST 成功后触发，context 来自 onSending。
 // 行为照抄 web/ui/screens/chat.js 的 composer 部分；视觉对齐 ios-ui-redesign 浮岛 24px 圆角。
 export function ChatComposer({
   sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped, onStatusConflict,
+  onRunMismatch, onSending, onSendFailed,
 }) {
   const { colors, dark } = useTheme();
   const insets = useSafeAreaInsets();
@@ -29,60 +34,105 @@ export function ChatComposer({
   const [files, setFiles] = useState([]);
   const [sendBusy, setSendBusy] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null); // { done, total }
-  const [modelOverride, setModelOverride] = useState('');
+  const [modelOverride, setModelOverride] = useState(() => getSessionModel(sessionId));
+  const pickModel = useCallback((m) => { setModelOverride(m); setSessionModel(sessionId, m); }, [sessionId]);
   const [inputH, setInputH] = useState(36);
   const lastH = useRef(36);
+  const [stopping, setStopping] = useState(false);
+  const activeRunIdRef = useRef(activeRunId);
+  activeRunIdRef.current = activeRunId;
+  const stopContext = useRef(0);
+  useEffect(() => {
+    setStopping(false);
+    return () => { stopContext.current += 1; };
+  }, [sessionId, isRunning, activeRunId]);
 
-  const canSend = status === 'idle' && !sendBusy;
+  const canSend = status === 'idle' && !isRunning && !stopping && !sendBusy;
   const hasContent = draft.trim() !== '' || files.length > 0;
   const disabledReason = sendBusy ? (uploadProgress && uploadProgress.done < uploadProgress.total
       ? `上传附件 ${uploadProgress.done + 1}/${uploadProgress.total}…` : '发送中…')
-    : status === 'terminal-driving' ? '终端驾驶中，暂不可发送'
+    : status === 'terminal-driving' ? '正在终端上使用，暂不可发送'
     : status === 'daemon-driving' ? 'Claude 正在运行…'
     : status == null ? '状态获取中…' : '';
 
   const stopRun = useCallback(async () => {
-    if (!isRunning) return;
+    if (!isRunning || stopping) return;
+    const requestedRunId = activeRunId || null;
+    const context = stopContext.current;
+    setStopping(true);
     try {
-      await api(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
+      const r = await api(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
         method: 'POST',
-        body: JSON.stringify({ runId: activeRunId || undefined }),
+        body: JSON.stringify({ runId: requestedRunId || undefined }),
       });
-      onStopped?.();
+      // 上一轮的迟到响应不得改变新一轮；无 runId 的旧客户端保留原兼容语义
+      if (context !== stopContext.current || activeRunIdRef.current !== requestedRunId) return;
       haptics.reject();
-      toast('已停止当前运行', 'info');
+      if (r?.status === 'aborted') {
+        // 200 只表示停止已受理，真正空闲以对应 run 的终态/status 帧为准
+        toast('正在停止当前运行…', 'info');
+        return;
+      }
+      setStopping(false);
+      onStopped?.();
+      if (r?.sessionStatus) onStatusConflict?.(r.sessionStatus);
+      toast('运行已结束', 'info');
     } catch (e) {
-      if (e.status === 404 || e.status === 409 || e.code === 'no_active_run' || e.code === 'already_finished') {
+      if (context !== stopContext.current || activeRunIdRef.current !== requestedRunId) return;
+      if (e.code === 'run_mismatch') {
+        setStopping(false);
+        onRunMismatch?.(e.data?.activeRunId ?? null, e.data?.status || 'daemon-driving');
+        toast('当前已是新一轮运行', 'info');
+        return;
+      }
+      setStopping(false);
+      if (e.code === 'no_active_run' || e.code === 'already_finished') {
         onStopped?.();
         toast('运行已结束', 'info');
       } else if (e.code !== 'unauthorized') {
         toast(`停止失败：${e.code}`, 'error');
       }
     }
-  }, [sessionId, activeRunId, isRunning, onStopped]);
+  }, [sessionId, activeRunId, isRunning, stopping, onStopped, onStatusConflict, onRunMismatch]);
 
-  // 终端驾驶误判（如上一轮报错后 CLI 收尾写入）时的手动出口：daemon 无 run 时 abort = 解除占用
+  // 终端占用误判（如上一轮报错后 CLI 收尾写入）时的手动出口：daemon 无 run 时 abort = 解除占用
   const releaseSession = useCallback(async () => {
     try {
+      const context = stopContext.current;
       const r = await api(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, { method: 'POST', body: '{}' });
-      onStopped?.();
+      if (context !== stopContext.current) return;
       haptics.reject();
-      toast(r?.status === 'aborted' ? '已停止当前运行' : '已解除占用', 'info');
+      if (r?.status === 'aborted') {
+        onRunMismatch?.(r.runId, 'daemon-driving');
+        setStopping(true);
+        toast('正在停止当前运行…', 'info');
+      } else {
+        onStopped?.();
+        toast('已解除占用', 'info');
+      }
     } catch (e) {
       if (e.code !== 'unauthorized') toast(`解除失败：${e.code}`, 'error');
     }
-  }, [sessionId, onStopped]);
+  }, [sessionId, onStopped, onRunMismatch]);
 
   const doSend = useCallback(async () => {
     if (!hasContent || !canSend) return;
+    if (modelSelection(catalog, modelOverride).status === 'unavailable') {
+      toast('所选模型已不可用，请重新选择', 'error');
+      return;
+    }
     setSendBusy(true);
+    const typed = draft;
+    const shown = draft.trim();
+    const context = onSending?.(shown);
+    if (shown) setDraft('');
     try {
       // 先传附件（存到 Mac 本地），再把路径写进消息文本让 Claude 直接读；失败重试不会重复上传
       const uploaded = await uploadAttachments(files, `/api/sessions/${encodeURIComponent(sessionId)}/upload`, {
         onProgress: (done, total) => setUploadProgress({ done, total }),
       });
       const text = withAttachmentNote(draft.trim(), uploaded);
-      await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      const result = await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
         method: 'POST',
         body: JSON.stringify({
           text,
@@ -90,26 +140,29 @@ export function ChatComposer({
           ...(mode !== 'default' ? { permissionMode: mode } : {}),
         }),
       });
-      onSent?.(text);
+      onSent?.(text, result.runId, context);
       haptics.success();
-      setDraft('');
       setFiles([]);
     } catch (e) {
       haptics.error();
+      if (shown) { setDraft((d) => d || typed); onSendFailed?.(); }
       if (e.status === 409) {
         onStatusConflict?.(e.data?.status || null);
-        const why = e.data?.status === 'terminal-driving' ? '会话正被终端驾驶'
+        const why = e.data?.status === 'terminal-driving' ? '会话正在终端上使用'
           : e.data?.status === 'daemon-driving' ? 'Claude 正在运行' : '会话被占用';
         toast(`${why}，发送被拒`, 'error');
       } else if (e.status === 413) {
         toast(tooLargeMessage(e), 'error');
+      } else if (e.code === 'unknown_model') {
+        toast('该模型已不可用，请重新选择', 'error');
+        fetchModels().catch(() => {});
       } else if (e.code === 'connection_changed') {
         toast('连接已切换，请重新发送', 'info');
       } else if (e.code !== 'unauthorized') {
         toast(`发送失败：${e.code}`, 'error');
       }
     } finally { setSendBusy(false); setUploadProgress(null); }
-  }, [draft, files, hasContent, canSend, sessionId, modelOverride, mode, onSent, onStatusConflict]);
+  }, [draft, files, hasContent, canSend, sessionId, catalog, modelOverride, mode, onSent, onStatusConflict, onSending, onSendFailed]);
 
   const onContentSizeChange = (e) => {
     const h = Math.min(Math.max(Math.ceil(e.nativeEvent.contentSize.height), 36), 132);
@@ -118,26 +171,18 @@ export function ChatComposer({
 
   const removeFile = (i) => setFiles((xs) => xs.filter((_, idx) => idx !== i));
 
-  // 底部安全区间距必须放在 KeyboardLift 的子层：它的动画 paddingBottom 排在 style 之后会整体覆盖，
-  // 写在外层时键盘收起（padding=0）输入框就贴住 home indicator。innerPad 在键盘打开时扣掉这段间距。
+  // 跟键盘走用平移而非改 padding：键盘动画期间不触发整页重排（ChatScreen 列表同步用 contentInset 让位）。
+  // 键盘打开时少移一个底部安全区间距，卡片正好贴住键盘；底色挡住列表滚到输入框四周缝隙里的内容
   const padBottom = Math.max(insets.bottom, 8);
 
   return (
-    <KeyboardLift
-      innerPad={padBottom}
-      style={{ paddingLeft: Math.max(insets.left, 16), paddingRight: Math.max(insets.right, 16), paddingTop: 8 }}
+    <KeyboardStickyView
+      offset={{ opened: padBottom }}
+      style={{ paddingLeft: Math.max(insets.left, 16), paddingRight: Math.max(insets.right, 16), paddingTop: 8, backgroundColor: colors.bg }}
     >
       <View style={{ paddingBottom: padBottom }}>
-      {isRunning ? (
-        <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 4, paddingVertical: 6, gap: 8 }}>
-          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: colors.info }} />
-          <Text style={{ color: colors.ink2, fontSize: 13, flex: 1 }}>Claude 正在运行…</Text>
-          <TouchableOpacity onPress={stopRun} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }} accessibilityLabel="停止运行">
-            <Text style={{ color: colors.danger, fontSize: 13, fontWeight: '500' }}>停止</Text>
-          </TouchableOpacity>
-        </View>
-      ) : null}
-      {!canSend && !isRunning && disabledReason ? (
+      {/* 发送中不出这一行：它只存在几百毫秒，一进一出会让输入框高度跳两次 */}
+      {!canSend && !isRunning && !sendBusy && disabledReason ? (
         <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 4, paddingVertical: 6, gap: 8 }}>
           <Text style={{ color: colors.ink3, fontSize: 13, flex: 1 }}>{disabledReason}</Text>
           {status === 'terminal-driving' && !sendBusy ? (
@@ -153,7 +198,8 @@ export function ChatComposer({
           value={draft}
           onChangeText={setDraft}
           multiline
-          editable={canSend}
+          // 始终可编辑：不可编辑会让 iOS 收起键盘，发送那一刻整页重排（跳动）。能否发送由发送按钮控制
+          editable
           placeholder={canSend ? '回复 Claude…' : disabledReason}
           placeholderTextColor={colors.ink2}
           accessibilityLabel="消息"
@@ -172,20 +218,23 @@ export function ChatComposer({
         />
         <ComposerActions
           attachment={<AttachmentPicker disabled={!canSend} onPicked={(items) => setFiles((xs) => [...xs, ...items])} />}
-          model={<ModelPicker value={modelOverride} onChange={setModelOverride} catalog={catalog} />}
+          model={<ModelPicker value={modelOverride} onChange={pickModel} catalog={catalog} />}
           mode={null}
           action={isRunning ? (
             <TouchableOpacity
               onPress={stopRun}
+              disabled={stopping}
               accessibilityRole="button"
-              accessibilityLabel="停止生成"
+              accessibilityState={{ disabled: stopping, busy: stopping }}
+              accessibilityLabel={stopping ? '正在停止' : '停止生成'}
               style={{
                 width: 44, height: 44, borderRadius: 22,
                 backgroundColor: colors.inkStrong,
                 alignItems: 'center', justifyContent: 'center',
+                opacity: stopping ? 0.5 : 1,
               }}
             >
-              <Icon name="stop" color={colors.bg} />
+              {stopping ? <ActivityIndicator size="small" color={colors.bg} /> : <Icon name="stop" color={colors.bg} />}
             </TouchableOpacity>
           ) : (
             <TouchableOpacity
@@ -207,6 +256,6 @@ export function ChatComposer({
         />
       </ComposerCard>
       </View>
-    </KeyboardLift>
+    </KeyboardStickyView>
   );
 }

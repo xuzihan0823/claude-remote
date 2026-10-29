@@ -1,13 +1,12 @@
 import { useRef } from 'react';
 import { Text, TouchableOpacity, View } from 'react-native';
 import { BottomSheetBackdrop, BottomSheetModal } from '@gorhom/bottom-sheet';
-import { findModel, modelMainName, resolveDefaultName } from '../../../../web/core/api.js';
+import { modelTriggerLabel } from '../../../../web/core/api.js';
 import { ModelSheetContent } from './ModelSheet.js';
 import { Icon } from '../Icon.js';
 import { useTheme } from '../../theme.js';
 
-// pill：选中显示 modelMainName，未选显示「默认 · defName」；点开 BottomSheetModal 选模型。
-// 对应 web/ui/components/model-picker.js 的 ModelPicker。
+// pill：文字见 modelTriggerLabel（选中 / 跟随项目默认 / 不可用）；点开 BottomSheetModal 选模型。
 const renderBackdrop = (props) => (
   <BottomSheetBackdrop {...props} appearsOnIndex={0} disappearsOnIndex={-1} pressBehavior="close" />
 );
@@ -15,10 +14,7 @@ const renderBackdrop = (props) => (
 export function ModelPicker({ value, onChange, catalog }) {
   const { colors } = useTheme();
   const ref = useRef(null);
-  const { models = [] } = catalog || {};
-  const sel = findModel(models, value);
-  const defName = resolveDefaultName(catalog);
-  const triggerMain = sel ? modelMainName(sel) : `默认${defName ? ` · ${defName}` : ''}`;
+  const triggerMain = modelTriggerLabel(catalog, value);
   const pick = (v) => { onChange(v); ref.current?.dismiss(); };
 
   const renderHandle = () => (

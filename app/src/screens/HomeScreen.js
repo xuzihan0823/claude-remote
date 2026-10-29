@@ -75,7 +75,7 @@ export function HomeScreen() {
     ws.subscribe(result.sessionId);
     setDraftActive(false);
     noteCreated(summary);
-    navigation.navigate('Chat', { sessionId: result.sessionId });
+    navigation.navigate('Chat', { sessionId: result.sessionId, fromNew: true });
   }, [navigation, noteCreated, setDraftActive]);
 
   return (
