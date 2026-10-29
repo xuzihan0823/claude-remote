@@ -2,6 +2,9 @@ import { query, type CanUseTool, type Query, type SDKMessage, type SDKUserMessag
 
 export type QueryFactory = typeof query;
 
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type EffortLevel = typeof EFFORT_LEVELS[number];
+
 export interface StartQueryOptions {
   cwd: string;
   prompt: string;
@@ -9,6 +12,7 @@ export interface StartQueryOptions {
   resume?: string;
   /** Explicit model override for this turn. Omit to use the CLI/settings default. */
   model?: string;
+  effort?: EffortLevel;
   /** Explicit session id for a new session. Mutually exclusive with resume. */
   sessionId?: string;
   /** 权限模式覆盖；省略时由 SDK 走 "default"。 */
@@ -68,12 +72,13 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
     // process.env ourselves. Overriding CLAUDE_CODE_ENTRYPOINT to "claude-remote"
     // keeps the session visible in the Mac terminal's /resume list (CLI hides
     // sessions whose entrypoint ∈ {sdk-cli, sdk-ts, sdk-py}).
-    env: { ...withoutHostAuth(process.env), CLAUDE_CODE_ENTRYPOINT: "claude-remote" } as Record<string, string>,
+    env: claudeEnvironment(),
     // CLAUDE_BIN：GUI 壳 app 的子进程没有 shell PATH，由壳注入显式 claude 路径（docs/mac-app-plan.md §2.2）
-    ...(process.env.CLAUDE_BIN ? { pathToClaudeCodeExecutable: process.env.CLAUDE_BIN } : {}),
+    ...claudeExecutable(),
     ...(options.resume === undefined ? {} : { resume: options.resume }),
     ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
     ...(options.model === undefined ? {} : { model: options.model }),
+    ...(options.effort === undefined ? {} : { effort: options.effort }),
   };
   const sdkQuery: Query = queryFactory({ prompt: input, options: sdkOptions });
   const abort = (): void => { void sdkQuery.interrupt().catch(() => undefined); };
@@ -89,6 +94,38 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
       sdkQuery.close();
     },
   };
+}
+
+function claudeEnvironment(): Record<string, string> {
+  return { ...withoutHostAuth(process.env), CLAUDE_CODE_ENTRYPOINT: "claude-remote" } as Record<string, string>;
+}
+
+function claudeExecutable(): { pathToClaudeCodeExecutable?: string } {
+  return process.env.CLAUDE_BIN ? { pathToClaudeCodeExecutable: process.env.CLAUDE_BIN } : {};
+}
+
+export async function queryModelCapabilities(cwd: string, queryFactory: QueryFactory = query, timeoutMs = 15_000) {
+  const input = new InputStream();
+  const sdk = queryFactory({
+    prompt: input,
+    options: {
+      cwd, env: claudeEnvironment(), ...claudeExecutable(),
+      persistSession: false, tools: [], strictMcpConfig: true,
+    },
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      sdk.supportedModels(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("model capabilities timed out")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    input.close();
+    sdk.close();
+  }
 }
 
 // daemon 若从 Claude 桌面端会话里启动，会继承这些"凭据由宿主托管"的标记；

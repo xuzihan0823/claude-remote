@@ -78,6 +78,7 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 
 - `model` 省略时不向 SDK 注入模型，遵循当前项目配置；不能用空字符串或 null 表示默认。非字符串/空白返回 400 `invalid_model`，不在目录中的具体 ID 返回 400 `unknown_model`。接受目录中的完整 ID 或 alias，以及内置 `fable`、`opus`、`sonnet`、`haiku`；字符串会去除两端空白。
 - `permissionMode` 只接受 `default`、`acceptEdits`、`plan`、`bypassPermissions`，省略时 SDK 使用 `default`，非法值返回 400 `invalid_permission_mode`。覆盖不写回 Mac 设置，也不修改已经开始的轮次。
+- `effort` 为本轮思考程度覆盖，仅接受 `low`、`medium`、`high`、`xhigh`、`max`；省略时不注入 SDK，跟随本机配置，不回写设置文件。非法值返回 400 `invalid_effort`；已知不支持该档位、思考已关闭或环境变量锁定时返回 400 `unsupported_effort` 并附 `capabilities`。能力未知时允许用户明确手动指定；不承诺第三方供应商实际支持。
 
 成功返回 `202 { "sessionId": "<uuid>", "runId": "<uuid>" }`，表示已受理，不保证推理成功或 JSONL 已落盘。新会话可立即订阅取得运行状态；消息接口在落盘前可能返回 404 `session_not_found`，客户端应重试。后台发现文件后发送 `resync` 以触发正文重拉。运行互斥冲突返回 `409 { "error": "not_idle", "status": "daemon-driving" }`（status 为当时真实状态）。
 
@@ -107,6 +108,8 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 ### 模型目录与消息读取
 
 `GET /api/models` 返回 `{ "models": [{ "id": "provider/model", "alias": "sonnet", "displayName": "Sonnet" }], "defaultModel": "sonnet" }`，defaultModel 可缺省。目录读取用户 settings，不解析指定 cwd 的 project/local 设置，不包含凭据或 picker description；不能据此宣称项目一定使用某模型。
+
+`GET /api/model-capabilities?cwd=<cwd>&model=<override>` 返回 `{status, effortLevels, source, revision, thinkingEnabled?, reason?}`。续聊以 `sessionId` 替代 cwd，服务端从 JSONL 解析真实工作目录；新建 cwd 仅接受已知会话目录或主目录，缺省为主目录。model 省略表示项目默认，指定时沿用目录校验；`refresh=1` 强制重新初始化查询。查询与执行使用相同 SDK 环境和 CLI 路径，空输入流、不创建持久会话、不发送用户消息；禁用探针工具与 MCP 自动连接，15 秒超时关闭。模型能力来自 SDK `supportedModels()`，状态为 `known` / `unsupported` / `unknown`；字段缺失不等于不支持。配置内容或 cwd 变化使缓存失效，缓存最长 30 秒，revision 是服务端加盐指纹，不含配置或凭据。仅对本地 HTTP 地址通过 `/api/hello` 确认 Magpie 后读取 `/v1/models`，用网关原生档位约束 Claude 档位；网关不可达回退 Claude 结果。查询失败返回 unknown，不阻塞跟随默认的聊天。手机记录设备、会话、模型、revision 关联的选择，变更配置后要求重新确认，不静默降档。
 
 `GET /api/sessions/:id/messages?limit=100&beforeSeq=42` 返回 `{ "messages": [], "firstSeq": null, "hasMore": false }`。limit 默认 100、范围 1–500；beforeSeq 为大于等于 1 的安全整数且不包含该行，非法值返回 400 `invalid_before_seq`。消息按 seq、blockIndex 升序；以 `(seq, blockIndex)` 去重，seq 是 JSONL 物理行号而非数组下标。字段包括 uuid、parentUuid、role、kind，以及按 kind 出现的 text、toolName、toolInput、toolUseId、isError、timestamp、rawType；assistant 消息可含 `apiMessageId`，用于将草稿对账限定到同一 API 消息，不能假设转录 blockIndex 等于 SDK 流下标。
 

@@ -2,8 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, fetchModels, getSessionModel, modelSelection, setSessionModel } from '../../../../web/core/api.js';
-import { toast } from '../../../../web/core/bus.js';
+import { toast, useBus } from '../../../../web/core/bus.js';
+import {
+  effortSelection,
+  getSessionEffort,
+  resolveDeviceKey,
+  setSessionEffort,
+  syncSessionEffortRevision,
+} from '../../../../web/core/effort.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
+import { useModelCapabilities } from '../../lib/useModelCapabilities.js';
 import { useTheme } from '../../theme.js';
 import { Icon } from '../Icon.js';
 import { ComposerActions } from './ComposerActions.js';
@@ -15,7 +23,7 @@ import { ModelPicker } from './ModelPicker.js';
 import { haptics } from '../../lib/haptics.js';
 import { tooLargeMessage, uploadAttachments, withAttachmentNote } from '../../lib/attachments.js';
 
-// 聊天 composer（发送/停止/附件/模型 pill/模式 pill/bypass 确认）。
+// 聊天 composer（发送/停止/附件/模型与思考程度 pill/模式 pill/bypass 确认）。
 // 契约（不得更改）：props { sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped }
 // 可选 prop：onStatusConflict(status) -- 409 占用时回传最新 status 给父层（ChatScreen 未接时可空）。
 // 可选 prop：onRunMismatch(activeRunId, status) -- 停止请求过期时同步服务端当前运行。
@@ -35,7 +43,42 @@ export function ChatComposer({
   const [sendBusy, setSendBusy] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null); // { done, total }
   const [modelOverride, setModelOverride] = useState(() => getSessionModel(sessionId));
-  const pickModel = useCallback((m) => { setModelOverride(m); setSessionModel(sessionId, m); }, [sessionId]);
+  const [effortRecord, setEffortRecord] = useState(() => getSessionEffort(sessionId));
+  const { capabilities, reload: reloadCapabilities, applyServerCapabilities } = useModelCapabilities({
+    sessionId,
+    model: modelOverride,
+  });
+  const pickModel = useCallback((m) => {
+    setModelOverride(m);
+    setSessionModel(sessionId, m);
+  }, [sessionId]);
+  const pickEffort = useCallback((nextEffort) => {
+    const next = setSessionEffort(sessionId, {
+      effort: nextEffort,
+      model: modelOverride,
+      revision: capabilities?.revision || '',
+    });
+    setEffortRecord(next);
+  }, [sessionId, modelOverride, capabilities?.revision]);
+
+  useEffect(() => {
+    const m = getSessionModel(sessionId);
+    setModelOverride(m);
+    setEffortRecord(getSessionEffort(sessionId, { model: m }));
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!capabilities?.loaded || !capabilities.revision) return;
+    setEffortRecord((prev) => {
+      if (!prev?.effort || prev.stale || prev.revision) return prev;
+      return syncSessionEffortRevision(sessionId, capabilities, { model: modelOverride });
+    });
+  }, [sessionId, capabilities, modelOverride]);
+
+  useBus('devices', () => {
+    setEffortRecord(getSessionEffort(sessionId, { model: modelOverride }));
+  }, [sessionId, modelOverride]);
+
   const [inputH, setInputH] = useState(36);
   const lastH = useRef(36);
   const [stopping, setStopping] = useState(false);
@@ -121,12 +164,24 @@ export function ChatComposer({
       toast('所选模型已不可用，请重新选择', 'error');
       return;
     }
+    let effortCheck = effortSelection(capabilities, effortRecord, { model: modelOverride, deviceId: resolveDeviceKey() });
+    if (!effortCheck.canSend) {
+      toast(effortCheck.message || '所选思考程度当前不可用，请重新选择', 'error');
+      return;
+    }
     setSendBusy(true);
     const typed = draft;
     const shown = draft.trim();
-    const context = onSending?.(shown);
-    if (shown) setDraft('');
+    let context;
     try {
+      if (effortRecord.effort) {
+        const latest = await reloadCapabilities();
+        if (!latest || latest.error) { toast('无法确认思考配置，请重试或恢复默认', 'error'); return; }
+        effortCheck = effortSelection(latest, effortRecord, { model: modelOverride, deviceId: resolveDeviceKey() });
+        if (!effortCheck.canSend) { toast(effortCheck.message, 'error'); return; }
+      }
+      context = onSending?.(shown);
+      if (shown) setDraft('');
       // 先传附件（存到 Mac 本地），再把路径写进消息文本让 Claude 直接读；失败重试不会重复上传
       const uploaded = await uploadAttachments(files, `/api/sessions/${encodeURIComponent(sessionId)}/upload`, {
         onProgress: (done, total) => setUploadProgress({ done, total }),
@@ -137,6 +192,7 @@ export function ChatComposer({
         body: JSON.stringify({
           text,
           ...(modelOverride ? { model: modelOverride } : {}),
+          ...(effortCheck.sendEffort ? { effort: effortCheck.sendEffort } : {}),
           ...(mode !== 'default' ? { permissionMode: mode } : {}),
         }),
       });
@@ -156,13 +212,23 @@ export function ChatComposer({
       } else if (e.code === 'unknown_model') {
         toast('该模型已不可用，请重新选择', 'error');
         fetchModels().catch(() => {});
+      } else if (e.code === 'unsupported_effort') {
+        toast(
+          e.data?.capabilities?.thinkingEnabled === false
+            ? '本机已关闭思考，请将思考程度恢复为默认'
+            : '当前模型不支持所选思考程度，请重新选择',
+          'error',
+        );
+        applyServerCapabilities(e.data?.capabilities);
+      } else if (e.code === 'invalid_effort') {
+        toast('思考程度参数无效，请重新选择', 'error');
       } else if (e.code === 'connection_changed') {
         toast('连接已切换，请重新发送', 'info');
       } else if (e.code !== 'unauthorized') {
         toast(`发送失败：${e.code}`, 'error');
       }
     } finally { setSendBusy(false); setUploadProgress(null); }
-  }, [draft, files, hasContent, canSend, sessionId, catalog, modelOverride, mode, onSent, onStatusConflict, onSending, onSendFailed]);
+  }, [draft, files, hasContent, canSend, sessionId, catalog, modelOverride, capabilities, effortRecord, mode, onSent, onStatusConflict, onSending, onSendFailed, applyServerCapabilities, reloadCapabilities]);
 
   const onContentSizeChange = (e) => {
     const h = Math.min(Math.max(Math.ceil(e.nativeEvent.contentSize.height), 36), 132);
@@ -218,7 +284,18 @@ export function ChatComposer({
         />
         <ComposerActions
           attachment={<AttachmentPicker disabled={!canSend} onPicked={(items) => setFiles((xs) => [...xs, ...items])} />}
-          model={<ModelPicker value={modelOverride} onChange={pickModel} catalog={catalog} />}
+          model={(
+            <ModelPicker
+              value={modelOverride}
+              onChange={pickModel}
+              catalog={catalog}
+              effortRecord={effortRecord}
+              onEffortChange={pickEffort}
+              capabilities={capabilities}
+              onOpen={() => { reloadCapabilities(); fetchModels().catch(() => {}); }}
+              onRefreshCapabilities={() => { reloadCapabilities({ refresh: true }); fetchModels().catch(() => {}); }}
+            />
+          )}
           mode={null}
           action={isRunning ? (
             <TouchableOpacity

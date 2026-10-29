@@ -17,6 +17,8 @@ import { basename, join } from "node:path";
 import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
+import { EFFORT_LEVELS, type EffortLevel } from "@claude-remote/agent-bridge";
+import { ModelCapabilityService, type ModelCapabilities } from "./model-capabilities.js";
 import type { DaemonConfig } from "./config.js";
 import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
@@ -52,6 +54,7 @@ export interface DaemonServerOptions {
   claudeCliVersion: () => string;
   /** 测试/嵌入方可注入；默认每次请求重新读取 Mac 设置，以反映即时切换。 */
   modelCatalog?: () => Promise<ModelCatalog>;
+  modelCapabilities?: (cwd: string, model?: string, refresh?: boolean) => Promise<ModelCapabilities>;
   /** relay connector 只读状态；缺省视为未启用。 */
   relayStatus?: () => RelayStatus;
 }
@@ -91,6 +94,7 @@ export class DaemonServer {
   readonly #watchRetryTimers = new Map<string, NodeJS.Timeout>();
   readonly #streams = new StreamBuffer({ emit: (frame) => this.#broadcastToSubscribers(frame.sessionId, frame) });
   #heartbeat: NodeJS.Timeout | undefined;
+  readonly #capabilities = new ModelCapabilityService();
   #closed = false;
 
   constructor(options: DaemonServerOptions) {
@@ -258,6 +262,11 @@ export class DaemonServer {
       return;
     }
 
+    if (method === "GET" && path === "/api/model-capabilities") {
+      await this.#handleCapabilities(res, url);
+      return;
+    }
+
     if (method === "POST" && path === "/api/sessions") {
       await this.#handleCreateSession(req, res);
       return;
@@ -397,6 +406,41 @@ export class DaemonServer {
     return value as PermissionMode;
   }
 
+  #readCapabilities(cwd: string, model?: string, refresh = false): Promise<ModelCapabilities> {
+    return this.#options.modelCapabilities?.(cwd, model, refresh) ?? this.#capabilities.get(cwd, model, refresh);
+  }
+
+  async #handleCapabilities(res: ServerResponse, url: URL): Promise<void> {
+    const sessionId = url.searchParams.get("sessionId");
+    let cwd: string;
+    if (sessionId !== null) {
+      if (!isUuid(sessionId)) { this.#json(res, 400, { error: "invalid_session_id" }); return; }
+      try { cwd = (await readSessionCwd(await resolveSessionFile(this.#options.config.projectsDir, sessionId))) || homedir(); }
+      catch (error) {
+        if (isEnoent(error)) { this.#json(res, 404, { error: "session_not_found" }); return; }
+        throw error;
+      }
+    } else {
+      cwd = url.searchParams.get("cwd")?.trim() || homedir();
+      if (!(await this.#knownCwds()).has(cwd)) { this.#json(res, 400, { error: "unknown_cwd" }); return; }
+    }
+    const model = await this.#validateModel(res, url.searchParams.get("model") ?? undefined);
+    if (model === false) return;
+    this.#json(res, 200, await this.#readCapabilities(cwd, model, url.searchParams.get("refresh") === "1"));
+  }
+
+  async #validateEffort(res: ServerResponse, value: unknown, cwd: string, model?: string): Promise<EffortLevel | undefined | false> {
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || !EFFORT_LEVELS.includes(value as EffortLevel)) {
+      this.#json(res, 400, { error: "invalid_effort" }); return false;
+    }
+    const caps = await this.#readCapabilities(cwd, model);
+    if (caps.thinkingEnabled === false || caps.status === "unsupported" || caps.status === "known" && !caps.effortLevels.includes(value as EffortLevel)) {
+      this.#json(res, 400, { error: "unsupported_effort", capabilities: caps }); return false;
+    }
+    return value as EffortLevel;
+  }
+
   async #handleCreateSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await this.#readJsonBody(req, res);
     if (body === undefined) return;
@@ -419,6 +463,9 @@ export class DaemonServer {
     const permissionMode = this.#validatePermissionMode(res, permModeValue);
     if (permissionMode === false) return;
 
+    const effort = await this.#validateEffort(res, (body as Record<string, unknown>).effort, cwd, model);
+    if (effort === false) return;
+
     const sessionId = randomUUID();
     let handle: TurnHandle;
     try {
@@ -428,6 +475,7 @@ export class DaemonServer {
         text: textValue,
         newSession: true,
         ...(model === undefined ? {} : { model }),
+        ...(effort === undefined ? {} : { effort }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
       });
     } catch (error) {
@@ -535,6 +583,8 @@ export class DaemonServer {
       throw error;
     }
     const cwd = (await readSessionCwd(file)) || homedir();
+    const effort = await this.#validateEffort(res, (body as Record<string, unknown>).effort, cwd, model);
+    if (effort === false) return;
     let handle: TurnHandle;
     try {
       handle = this.#options.runner.startTurn({
@@ -542,6 +592,7 @@ export class DaemonServer {
         cwd,
         text,
         ...(model === undefined ? {} : { model }),
+        ...(effort === undefined ? {} : { effort }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
       });
     } catch (error) {
