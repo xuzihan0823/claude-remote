@@ -8,8 +8,6 @@ import { join, resolve } from "node:path";
 import { ApiError, type SessionSummary } from "./api.js";
 import {
   autostartEnabled,
-  copyToClipboard,
-  openUrl,
   pairInfo,
   restartForRelay,
   resumeInTerminal,
@@ -51,7 +49,6 @@ export const HELP = `cr — Claude Remote 控制台
   cr config             查看配置；cr config set <项> <值> / unset <项> / reset-token
                         项：host port bark ntfy timeout cooldown claude uploads autostart（改完自动重启 daemon）
   cr relay              自建 relay：add <地址> <密钥> | status | on | off | remove
-  cr web                浏览器打开 Web 界面（token 复制到剪贴板）
   cr ls [-n 20]         最近会话
   cr search <词> [--full]  搜标题/项目路径；--full 连对话全文一起搜
   cr show <id>          最近消息（id 可写前缀）
@@ -256,12 +253,6 @@ export async function cmdPair(ctx: Context): Promise<void> {
   console.log("\n二维码就是凭据，别截图外传。");
 }
 
-export async function cmdWeb(ctx: Context): Promise<void> {
-  const url = `${ctx.env.baseUrl}/`;
-  openUrl(url);
-  const copied = ctx.env.token !== undefined && copyToClipboard(ctx.env.token);
-  console.log(`已打开 ${url}${copied ? "，token 已复制到剪贴板（首次登录粘贴即可）" : ""}`);
-}
 
 export async function cmdLs(ctx: Context, args: string[]): Promise<void> {
   const nIdx = args.indexOf("-n");

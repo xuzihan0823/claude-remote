@@ -485,8 +485,7 @@ export function App({
     } else if (input === "p") {
       setView("pair");
       void deps.pair().then(setPairData);
-    } else if (input === "w") flash(deps.openWeb());
-    else if (input === "l") setView("logs");
+    } else if (input === "l") setView("logs");
     else if (input === "?") setView("help");
     else if (input === "c") {
       setConfig(deps.config.read());
@@ -554,7 +553,7 @@ export function App({
           <Text>  o          在本终端 claude --resume 接管（仅空闲会话）</Text>
           <Text>  /          搜索          Tab    切换 标题/路径 ⇄ 全文</Text>
           <Text bold>{"\n"}daemon</Text>
-          <Text>  s 启动/停止   r 重启   l 日志   p 配对二维码   w 打开 Web   c 设置   g 刷新</Text>
+          <Text>  s 启动/停止   r 重启   l 日志   p 配对二维码   c 设置   g 刷新</Text>
           <Text bold>{"\n"}审批</Text>
           <Text>  a 打开待审批   y 允许   n 拒绝   1-9 选择问题选项</Text>
           <Text bold>{"\n"}会话视图</Text>
@@ -634,7 +633,7 @@ export function App({
         <Box borderStyle="single" borderColor="gray" paddingX={1} marginTop={1} width={width}>
           <Text color={confirmToken ? "yellow" : "gray"}>
             {confirmToken
-              ? "旧 token 立即失效，已配对的手机和浏览器都要重新扫码。按 y 确认，其他键取消"
+              ? "旧 token 立即失效，已配对的手机都要重新扫码。按 y 确认，其他键取消"
               : tokenRow
                 ? "生成新的访问凭据。二维码泄露或换手机时用"
                 : fit(entry?.field.hint ?? "", inner - 2, false)}
@@ -804,7 +803,7 @@ export function App({
         ))}
       </Box>
       {toastLine}
-      <Text color="gray"> ↑↓ 选择 ⏎ 查看/回复 o 本地接管 a 审批 p 配对 w Web l 日志 r 重启 s 启停 c 设置 ? 帮助 q 退出</Text>
+      <Text color="gray"> ↑↓ 选择 ⏎ 查看/回复 o 本地接管 a 审批 p 配对 l 日志 r 重启 s 启停 c 设置 ? 帮助 q 退出</Text>
     </Box>
   );
 }

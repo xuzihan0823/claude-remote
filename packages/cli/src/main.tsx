@@ -17,7 +17,6 @@ import {
   cmdStatus,
   cmdUninstall,
   cmdUp,
-  cmdWeb,
   describeError,
   HELP,
 } from "./commands.js";
@@ -119,8 +118,6 @@ export async function main(argv: string[], binPath: string): Promise<void> {
         return await cmdConfig(ctx, args);
       case "relay":
         return await cmdRelay(ctx, args);
-      case "web":
-        return await cmdWeb(ctx);
       case "ls":
         return await cmdLs(ctx, args);
       case "search":

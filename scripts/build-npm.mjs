@@ -2,7 +2,6 @@
 // 构建 npm 发布包到 dist/npm/：
 //   dist/cli.js     cr 命令（Ink TUI + 子命令）
 //   dist/daemon.js  daemon（launchd 直接 node 运行）
-//   web/            手机 / 浏览器端静态资源
 //
 // workspace 包（@claude-remote/*）打进 bundle；第三方依赖保持 external，作为 dependencies 由 npm 安装
 // （Ink/yoga 的 wasm、Agent SDK 自带的 claude CLI 都不适合打包）。
@@ -10,7 +9,7 @@
 // 用法：node scripts/build-npm.mjs [--name <npm 包名>]
 //   发布：cd dist/npm && npm publish --access public
 
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -72,11 +71,6 @@ await build({
   legalComments: "none",
 });
 
-// Web 静态资源（去掉测试与 mock 数据之外的开发文件）
-cpSync(join(root, "web"), join(out, "web"), {
-  recursive: true,
-  filter: (src) => !src.endsWith(".test.js"),
-});
 
 const version = rootPkg.version;
 writeFileSync(
@@ -88,7 +82,7 @@ writeFileSync(
       description: "在 iPhone 上接管 Mac 里的 Claude Code 会话：终端控制台 cr + 常驻 daemon",
       type: "module",
       bin: { cr: "dist/cli.js" },
-      files: ["dist", "web", "README.md"],
+      files: ["dist", "README.md"],
       engines: { node: rootPkg.engines.node },
       os: ["darwin", "linux"],
       dependencies,
@@ -101,8 +95,7 @@ writeFileSync(
   )}\n`,
 );
 
-const readme = join(root, "docs", "npm-readme.md");
-cpSync(existsSync(readme) ? readme : join(root, "README.md"), join(out, "README.md"));
+cpSync(join(root, "README.md"), join(out, "README.md"));
 
 console.log(`✓ ${name}@${version} → ${out}`);
 console.log(`  依赖：${Object.entries(dependencies).map(([k, v]) => `${k}@${v}`).join(" ")}`);
