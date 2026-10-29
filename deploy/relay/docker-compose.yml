@@ -20,6 +20,7 @@ services:
       - relay
     environment:
       RELAY_DOMAIN: ${RELAY_DOMAIN:?RELAY_DOMAIN is required}
+      RELAY_TLS_MODE: ${RELAY_TLS_MODE:-acme}
     ports:
       - "${RELAY_HTTPS_PORT:-443}:443"
     volumes:
