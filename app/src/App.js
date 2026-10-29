@@ -56,7 +56,10 @@ function MainStack() {
         name="Chat"
         component={ChatScreen}
         getId={({ params }) => params?.sessionId}
-        options={({ route }) => (route.params?.fromNew ? { animation: 'fade', animationDuration: 200 } : {})}
+        options={({ route }) => ({
+          gestureEnabled: false,
+          ...(route.params?.fromNew ? { animation: 'fade', animationDuration: 200 } : {}),
+        })}
       />
       <Stack.Screen name="Settings" component={SettingsNavigator} options={{ presentation: 'modal' }} />
     </Stack.Navigator>
