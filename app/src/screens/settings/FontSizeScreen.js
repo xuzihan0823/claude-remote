@@ -11,7 +11,7 @@ export function FontSizeScreen() {
   const { colors } = useTheme();
   const scale = usePref('fontScale');
   const idx = Math.max(0, FONT_SCALES.indexOf(scale));
-  const pick = (i) => { if (i !== idx) { setPref('fontScale', FONT_SCALES[i]); haptics.tap(); } };
+  const pick = (i) => { if (i !== idx) { setPref('fontScale', FONT_SCALES[i]); haptics.selection(); } };
 
   return (
     <SettingsPage title="字体大小">

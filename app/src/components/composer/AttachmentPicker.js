@@ -8,11 +8,11 @@ import { Icon } from '../Icon.js';
 import { MAX_UPLOAD_BYTES, normalizeAsset } from '../../lib/attachments.js';
 import { useTheme } from '../../theme.js';
 
-// + 按钮：在按钮上方弹玻璃菜单选 拍照/相册/文件，归一为 {uri,name,size,isImage} 列表回调 onPicked。
+// + 按钮：在按钮上方弹玻璃菜单选 拍照/相册/文件（extraItems 追加在后，如思考程度），归一为 {uri,name,size,isImage} 列表回调 onPicked。
 // 相机先申请权限，被拒时引导去设置；超过 25MB 的在选择时就跳过，不等上传失败。
 // picker 返回值均 guard canceled 与空 assets（image-picker: {assets, canceled}；
 // document-picker: {assets, canceled}）。
-export function AttachmentPicker({ disabled, onPicked }) {
+export function AttachmentPicker({ disabled, onPicked, extraItems = [] }) {
   const { colors } = useTheme();
   const anchorRef = useRef(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -76,6 +76,7 @@ export function AttachmentPicker({ disabled, onPicked }) {
     { key: 'camera', icon: 'camera', label: '拍照', onPress: pickCamera },
     { key: 'photos', icon: 'image', label: '照片', onPress: pickLibrary },
     { key: 'files', icon: 'paperclip', label: '文件', onPress: pickFiles },
+    ...extraItems,
   ];
 
   // 键盘收起后输入栏会下移，等键盘完全收起再量按钮位置，菜单才贴得准

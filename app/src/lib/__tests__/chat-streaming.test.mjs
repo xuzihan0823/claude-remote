@@ -11,18 +11,11 @@ if (!globalThis.localStorage) {
     removeItem: (key) => storageValues.delete(key),
   };
 }
-const {
-  EMPTY_CAPABILITIES,
-  effortSelection,
-  getSessionEffort,
-  normalizeCapabilities,
-  resolveDeviceKey,
-  setSessionEffort,
-  syncSessionEffortRevision,
-} = await import('../../../../web/core/effort.js');
+const { effortLabel, effortUsable, getSessionEffort, setSessionEffort } = await import('../../../../web/core/effort.js');
 const screenSource = readFileSync(new URL('../../screens/ChatScreen.js', import.meta.url), 'utf8');
 const composerSource = readFileSync(new URL('../../components/composer/ChatComposer.js', import.meta.url), 'utf8');
 const newComposerSource = readFileSync(new URL('../../components/composer/NewChatComposer.js', import.meta.url), 'utf8');
+const approvalSource = readFileSync(new URL('../../components/ApprovalLayer.js', import.meta.url), 'utf8');
 // Execute the component's actual state/event code, excluding native rendering and imports.
 function mount(source, start, end, exposed, initialProps, dependencies) {
   const slots = [];
@@ -153,19 +146,15 @@ test('actual ChatScreen: resync invalidates an older HTTP response', async () =>
 function composer(api, callbacks = {}, deps = {}) {
   const initial = { sessionId: 'session', activeRunId: 'A', isRunning: true, status: 'daemon-driving', ...callbacks };
   const instance = mount(composerSource, 'export function ChatComposer({', '  const onContentSizeChange =',
-    'stopRun, releaseSession, stopping, canSend, doSend, draft, setDraft, setFiles, pickModel, pickEffort, effortRecord, modelOverride', initial, {
+    'stopRun, releaseSession, stopping, canSend, doSend, draft, setDraft, setFiles, pickModel, pickEffort, effort, modelOverride', initial, {
       useTheme: () => ({ colors: {} }), useSafeAreaInsets: () => ({}), useModelCatalog: () => ({}),
-      useModelCapabilities: () => ({ capabilities: EMPTY_CAPABILITIES, reload: () => {}, applyServerCapabilities: () => {} }),
+      useEffortLevels: () => ({ options: null, reload: () => {} }),
       getSessionModel: () => '', setSessionModel: () => {}, modelSelection: () => ({ status: 'default' }),
       fetchModels: async () => {},
-      getSessionEffort: () => ({ effort: '', model: '', revision: '', deviceId: 'default', stale: false }),
-      setSessionEffort: (_sid, rec) => ({ effort: rec.effort || '', model: rec.model || '', revision: rec.revision || '', deviceId: 'default', stale: false }),
-      syncSessionEffortRevision: (_sid, _caps) => ({ effort: '', model: '', revision: '', deviceId: 'default', stale: false }),
-      effortSelection,
-      resolveDeviceKey,
+      getSessionEffort, setSessionEffort, effortLabel, effortUsable,
       api,
       uploadAttachments: async (files) => files, withAttachmentNote: (text) => text || '附件',
-      haptics: { reject() {}, success() {}, error() {} }, toast() {},
+      haptics: { stop() {}, tap() {}, selection() {}, success() {}, error() {} }, toast() {},
       ...deps,
     });
   // Preserve the actual destructuring header when executing this component body.
@@ -351,92 +340,57 @@ test('actual ChatScreen: status before send response still permits binding its r
   assert.equal(page.render().runActive, true);
 });
 
-test('actual ChatComposer: forwards selected effort, blocks unsupported/stale effort without silent downgrade, and refreshes on 400 unsupported_effort', async () => {
+test('actual ChatComposer: forwards chosen effort, blocks it once the gateway says the model lacks it, and omits it when cleared', async () => {
   const sentBodies = [];
   const toasts = [];
-  const appliedCaps = [];
-  let currentCaps = normalizeCapabilities({
-    status: 'known',
-    effortLevels: ['low', 'medium', 'high', 'xhigh'],
-    revision: 'rev-1',
-    thinkingEnabled: true,
-  });
+  let options = { levels: ['low', 'medium', 'high', 'xhigh', 'max'], verified: true };
   const { instance, initial } = composer(
-    async (_path, opts) => {
-      const parsed = JSON.parse(opts.body);
-      if (parsed.effort === 'xhigh' && currentCaps.status === 'known' && !currentCaps.effortLevels.includes('xhigh')) {
-        throw { status: 400, code: 'unsupported_effort', data: { capabilities: currentCaps } };
-      }
-      sentBodies.push(parsed);
-      return { runId: 'run-effort' };
-    },
-    { status: 'idle', isRunning: false, activeRunId: null },
+    async (_path, opts) => { sentBodies.push(JSON.parse(opts.body)); return { runId: 'run-effort' }; },
+    { sessionId: 'sess-effort', status: 'idle', isRunning: false, activeRunId: null },
     {
-      useModelCapabilities: () => ({
-        capabilities: currentCaps,
-        reload: async () => currentCaps,
-        applyServerCapabilities: (c) => appliedCaps.push(c),
-      }),
+      useEffortLevels: () => ({ options, reload: () => {} }),
       toast: (msg, type) => toasts.push({ msg, type }),
     },
   );
-
   instance.render(initial);
   instance.effects();
 
-  // 1. Pick 'xhigh' under rev-1 and send -> effort is forwarded in body
   instance.render().pickEffort('xhigh');
   instance.render().setDraft('深度分析');
   await instance.render().doSend();
   assert.equal(sentBodies.length, 1);
   assert.equal(sentBodies[0].effort, 'xhigh');
+  assert.equal(getSessionEffort('sess-effort'), 'xhigh');
 
-  // 2. Switch model to one where 'xhigh' is NOT in effortLevels -> selection is kept ('xhigh'), NOT downgraded, and send is blocked
-  instance.render().pickModel('haiku');
-  currentCaps = normalizeCapabilities({
-    status: 'known',
-    effortLevels: ['low', 'medium'],
-    revision: 'rev-1',
-    thinkingEnabled: true,
-  });
+  options = { levels: ['low', 'high', 'max'], verified: true };
   instance.render().setDraft('继续提问');
   await instance.render().doSend();
-  assert.equal(sentBodies.length, 1, 'send must be blocked when chosen effort is unsupported by new model');
-  assert.equal(instance.render().effortRecord.effort, 'xhigh', 'old effort must not be silently downgraded');
-  assert.match(toasts.at(-1).msg, /不支持「超高」/);
+  assert.equal(sentBodies.length, 1, 'unsupported effort must block send');
+  assert.equal(instance.render().effort, 'xhigh', 'effort must not be silently downgraded');
+  assert.equal(instance.render().draft, '继续提问');
+  assert.match(toasts.at(-1).msg, /不支持思考程度「超高」/);
 
-  // 3. Revision drift marks selection stale and blocks send until user re-selects or clears
-  currentCaps = normalizeCapabilities({
-    status: 'known',
-    effortLevels: ['low', 'medium', 'high', 'xhigh'],
-    revision: 'rev-2-changed',
-    thinkingEnabled: true,
-  });
+  options = { levels: ['low', 'medium', 'high', 'xhigh', 'max'], verified: false };
   await instance.render().doSend();
-  assert.equal(sentBodies.length, 1, 'send must be blocked when revision changed');
-  assert.match(toasts.at(-1).msg, /配置已变化/);
+  assert.equal(sentBodies.length, 2, 'unverified levels must not block send');
+  assert.equal(sentBodies[1].effort, 'xhigh');
 
-  // 4. Clearing effort ('') restores default and omits effort field from request body
   instance.render().pickEffort('');
+  instance.render().setDraft('恢复默认');
   await instance.render().doSend();
-  assert.equal(sentBodies.length, 2);
-  assert.equal(Object.hasOwn(sentBodies[1], 'effort'), false);
+  assert.equal(sentBodies.length, 3);
+  assert.equal(Object.hasOwn(sentBodies[2], 'effort'), false);
+  assert.equal(getSessionEffort('sess-effort'), '');
 });
 
-test('actual NewChatComposer: persists effort with model and revision on creation and ChatComposer restores it across session switches', async () => {
+test('actual NewChatComposer: sends effort on creation and stores it for the new session', async () => {
   const createdPayloads = [];
-  const currentCaps = normalizeCapabilities({
-    status: 'known',
-    effortLevels: ['low', 'medium', 'high', 'max'],
-    revision: 'rev-new-chat',
-    thinkingEnabled: true,
-  });
-
+  const feedback = [];
   const newChat = mount(
     newComposerSource,
     'export function NewChatComposer({',
     '  const onContentSizeChange =',
-    'create, setDraft, setModelChoice, pickEffort, effortRecord',
+    'create, setDraft, setModelChoice, setEffort, effort',
     {
       cwd: '/work/project',
       cwdLabel: 'project',
@@ -445,25 +399,25 @@ test('actual NewChatComposer: persists effort with model and revision on creatio
       onCreated: (res, body) => createdPayloads.push({ res, body }),
     },
     {
+      haptics: { tap: () => feedback.push('tap'), error: () => feedback.push('error') },
       useTheme: () => ({ colors: {}, dark: false }),
       useSafeAreaInsets: () => ({ bottom: 0, left: 0, right: 0 }),
       useModelCatalog: () => ({ models: [{ id: 'opus', alias: 'opus' }], loaded: true }),
       usePref: () => '',
-      useModelCapabilities: () => ({
-        capabilities: currentCaps,
-        reload: async () => currentCaps,
-        applyServerCapabilities: () => {},
-      }),
+      useEffortLevels: () => ({ options: { levels: ['low', 'high', 'max'], verified: true }, reload: () => {} }),
       modelSelection: () => ({ status: 'ok' }),
-      effortSelection,
-      resolveDeviceKey,
+      effortLabel,
+      effortUsable,
       setSessionMode: () => {},
       setSessionModel: () => {},
       setSessionEffort,
-      createSession: async (args) => ({
-        result: { sessionId: 'sess-created-1', runId: 'r1' },
-        body: { cwd: args.cwd, text: args.text, ...(args.model ? { model: args.model } : {}), ...(args.effort ? { effort: args.effort } : {}) },
-      }),
+      createSession: async (args) => {
+        assert.deepEqual(feedback, ['tap'], 'first-message feedback must precede the creation response');
+        return {
+          result: { sessionId: 'sess-created-1', runId: 'r1' },
+          body: { cwd: args.cwd, text: args.text, ...(args.model ? { model: args.model } : {}), ...(args.effort ? { effort: args.effort } : {}) },
+        };
+      },
       fetchModels: async () => {},
       tooLargeMessage: () => '',
       toast: () => {},
@@ -473,41 +427,69 @@ test('actual NewChatComposer: persists effort with model and revision on creatio
   newChat.render();
   newChat.effects();
   newChat.render().setModelChoice('opus');
-  newChat.render().pickEffort('max');
+  newChat.render().setEffort('max');
   newChat.render().setDraft('开始新任务');
   await newChat.render().create();
 
   assert.equal(createdPayloads.length, 1);
   assert.equal(createdPayloads[0].body.effort, 'max');
   assert.equal(createdPayloads[0].body.model, 'opus');
+  assert.equal(getSessionEffort('sess-created-1'), 'max');
+  assert.equal(newChat.render().effort, '', 'draft effort resets after creation');
+  assert.deepEqual(feedback, ['tap'], 'creation success must not play a second effect');
 
-  // Stored session effort includes model and revision, and survives switching sessions
-  const stored = getSessionEffort('sess-created-1');
-  assert.equal(stored.effort, 'max');
-  assert.equal(stored.model, 'opus');
-  assert.equal(stored.revision, 'rev-new-chat');
-
-  setSessionEffort('sess-other', { effort: 'low', model: 'sonnet', revision: 'rev-other' });
-  assert.equal(getSessionEffort('sess-other').effort, 'low');
-  assert.equal(getSessionEffort('sess-created-1').effort, 'max');
+  newChat.render().setEffort('medium');
+  newChat.render().setDraft('第二个任务');
+  await newChat.render().create();
+  assert.equal(createdPayloads.length, 1, 'effort the gateway does not list must block creation');
+  assert.deepEqual(feedback, ['tap'], 'blocked creation must not play send feedback');
 });
 
-test('ChatComposer refreshes explicit effort before sending and preserves draft when config changes', async () => {
-  let sent = 0;
-  const before = normalizeCapabilities({ status: 'known', effortLevels: ['high'], revision: 'old' });
-  const after = normalizeCapabilities({ status: 'known', effortLevels: ['high'], revision: 'new' });
-  const notices = [];
-  const { instance, initial } = composer(async () => { sent++; return {}; }, { status: 'idle', isRunning: false, activeRunId: null }, {
-    useModelCapabilities: () => ({ capabilities: before, reload: async () => after, applyServerCapabilities: () => {} }),
-    toast: (message) => notices.push(message),
-  });
-  instance.render(initial);
-  instance.effects();
-  instance.render().pickEffort('high');
-  instance.render().setDraft('keep this draft');
-  await instance.render().doSend();
-  assert.equal(sent, 0);
-  assert.match(notices.at(-1), /配置已变化/);
-  assert.equal(instance.render().effortRecord.effort, 'high');
-  assert.equal(instance.render().draft, 'keep this draft');
+test('actual ChatComposer: send feedback is immediate, success is quiet, and only actionable failures vibrate', async () => {
+  for (const code of [null, 'network_error', 'connection_changed', 'unauthorized']) {
+    const feedback = [];
+    let finishUpload;
+    const { instance, initial } = composer(async () => {
+      if (code) throw { code };
+      return { runId: 'A' };
+    }, {}, {
+      haptics: {
+        tap: () => feedback.push('tap'), success: () => feedback.push('success'), error: () => feedback.push('error'),
+      },
+      uploadAttachments: () => new Promise((resolve) => { finishUpload = resolve; }),
+    });
+    instance.render({ ...initial, status: 'idle', isRunning: false, activeRunId: null });
+    instance.render().setDraft('问题');
+    const sending = instance.render().doSend();
+    assert.deepEqual(feedback, ['tap'], 'feedback must precede attachment upload and HTTP response');
+    finishUpload([]);
+    await sending;
+    assert.deepEqual(feedback, code === 'network_error' ? ['tap', 'error'] : ['tap']);
+  }
+});
+
+test('actual ApprovalLayer: duplicate live events and pending sync notify once before rendering', async () => {
+  const interaction = { interactionId: 'approval-A', expiresAt: Date.now() + 60000 };
+  let reminders = 0;
+  const layer = mount(approvalSource, 'export function ApprovalLayer() {', '  if (items.length === 0)',
+    'items, syncPending', {}, {
+      useTheme: () => ({ fonts: {} }), useSafeAreaInsets: () => ({}),
+      api: async () => ({ interactions: [interaction] }),
+      haptics: { attention: () => reminders++ }, toast() {},
+    });
+  layer.render();
+  layer.emit('ws:approval', { interaction });
+  layer.emit('ws:approval', { interaction });
+  await layer.render().syncPending();
+  assert.equal(reminders, 1);
+  assert.equal(layer.render().items.length, 1);
+  layer.emit('ws:approval.resolved', { interactionId: interaction.interactionId, status: 'allowed' });
+  layer.flushTimers();
+  layer.render();
+  layer.emit('ws:approval', { interaction });
+  assert.equal(reminders, 1, 'late replay after card removal must stay quiet');
+  layer.emit('ws:approval', { interaction: { interactionId: 'expired', expiresAt: Date.now() - 1 } });
+  assert.equal(reminders, 1, 'expired approvals must stay quiet');
+  layer.emit('ws:approval', { interaction: { ...interaction, interactionId: 'approval-B' } });
+  assert.equal(reminders, 2, 'a distinct approval must still be eligible for feedback');
 });

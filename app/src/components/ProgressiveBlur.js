@@ -22,6 +22,7 @@ try {
 }
 
 export const hasNativeBlur = !!(BlurView && MaskedView);
+export const NativeBlurView = BlurView;
 
 function Fade({ id, color, stops }) {
   return (

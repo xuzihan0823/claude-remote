@@ -18,7 +18,7 @@ import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
 import { EFFORT_LEVELS, type EffortLevel } from "@claude-remote/agent-bridge";
-import { ModelCapabilityService, type ModelCapabilities } from "./model-capabilities.js";
+import { readEffortOptions, type EffortOptions } from "./effort-levels.js";
 import type { DaemonConfig } from "./config.js";
 import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
@@ -54,7 +54,7 @@ export interface DaemonServerOptions {
   claudeCliVersion: () => string;
   /** 测试/嵌入方可注入；默认每次请求重新读取 Mac 设置，以反映即时切换。 */
   modelCatalog?: () => Promise<ModelCatalog>;
-  modelCapabilities?: (cwd: string, model?: string, refresh?: boolean) => Promise<ModelCapabilities>;
+  effortOptions?: (cwd: string, model?: string) => Promise<EffortOptions>;
   /** relay connector 只读状态；缺省视为未启用。 */
   relayStatus?: () => RelayStatus;
 }
@@ -94,7 +94,6 @@ export class DaemonServer {
   readonly #watchRetryTimers = new Map<string, NodeJS.Timeout>();
   readonly #streams = new StreamBuffer({ emit: (frame) => this.#broadcastToSubscribers(frame.sessionId, frame) });
   #heartbeat: NodeJS.Timeout | undefined;
-  readonly #capabilities = new ModelCapabilityService();
   #closed = false;
 
   constructor(options: DaemonServerOptions) {
@@ -262,8 +261,8 @@ export class DaemonServer {
       return;
     }
 
-    if (method === "GET" && path === "/api/model-capabilities") {
-      await this.#handleCapabilities(res, url);
+    if (method === "GET" && path === "/api/effort-levels") {
+      await this.#handleEffortLevels(res, url);
       return;
     }
 
@@ -406,11 +405,7 @@ export class DaemonServer {
     return value as PermissionMode;
   }
 
-  #readCapabilities(cwd: string, model?: string, refresh = false): Promise<ModelCapabilities> {
-    return this.#options.modelCapabilities?.(cwd, model, refresh) ?? this.#capabilities.get(cwd, model, refresh);
-  }
-
-  async #handleCapabilities(res: ServerResponse, url: URL): Promise<void> {
+  async #handleEffortLevels(res: ServerResponse, url: URL): Promise<void> {
     const sessionId = url.searchParams.get("sessionId");
     let cwd: string;
     if (sessionId !== null) {
@@ -426,17 +421,13 @@ export class DaemonServer {
     }
     const model = await this.#validateModel(res, url.searchParams.get("model") ?? undefined);
     if (model === false) return;
-    this.#json(res, 200, await this.#readCapabilities(cwd, model, url.searchParams.get("refresh") === "1"));
+    this.#json(res, 200, await (this.#options.effortOptions ?? readEffortOptions)(cwd, model));
   }
 
-  async #validateEffort(res: ServerResponse, value: unknown, cwd: string, model?: string): Promise<EffortLevel | undefined | false> {
+  #validateEffort(res: ServerResponse, value: unknown): EffortLevel | undefined | false {
     if (value === undefined) return undefined;
     if (typeof value !== "string" || !EFFORT_LEVELS.includes(value as EffortLevel)) {
       this.#json(res, 400, { error: "invalid_effort" }); return false;
-    }
-    const caps = await this.#readCapabilities(cwd, model);
-    if (caps.thinkingEnabled === false || caps.status === "unsupported" || caps.status === "known" && !caps.effortLevels.includes(value as EffortLevel)) {
-      this.#json(res, 400, { error: "unsupported_effort", capabilities: caps }); return false;
     }
     return value as EffortLevel;
   }
@@ -463,7 +454,7 @@ export class DaemonServer {
     const permissionMode = this.#validatePermissionMode(res, permModeValue);
     if (permissionMode === false) return;
 
-    const effort = await this.#validateEffort(res, (body as Record<string, unknown>).effort, cwd, model);
+    const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
     if (effort === false) return;
 
     const sessionId = randomUUID();
@@ -583,7 +574,7 @@ export class DaemonServer {
       throw error;
     }
     const cwd = (await readSessionCwd(file)) || homedir();
-    const effort = await this.#validateEffort(res, (body as Record<string, unknown>).effort, cwd, model);
+    const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
     if (effort === false) return;
     let handle: TurnHandle;
     try {

@@ -2,44 +2,24 @@ import { useRef } from 'react';
 import { Text, TouchableOpacity, View } from 'react-native';
 import { BottomSheetBackdrop, BottomSheetModal } from '@gorhom/bottom-sheet';
 import { modelSelection, modelTriggerLabel } from '../../../../web/core/api.js';
-import { effortSelection, modelEffortTriggerLabel } from '../../../../web/core/effort.js';
 import { ModelSheetContent } from './ModelSheet.js';
 import { useTheme } from '../../theme.js';
+import { haptics } from '../../lib/haptics.js';
 
-// pill：展示当前模型及思考程度（选中 / 跟随默认 / 不可用 / 需重选）；
-// 点开 BottomSheetModal 选择模型与思考程度，选模型后弹层保留以便继续选择思考档位。
+// pill：文字见 modelTriggerLabel（选中 / 跟随项目默认 / 不可用）；点开 BottomSheetModal 选模型。
 const renderBackdrop = (props) => (
   <BottomSheetBackdrop {...props} appearsOnIndex={0} disappearsOnIndex={-1} pressBehavior="close" />
 );
 
-export function ModelPicker({
-  value,
-  onChange,
-  catalog,
-  effortRecord,
-  onEffortChange,
-  capabilities,
-  onOpen,
-  onRefreshCapabilities,
-}) {
+export function ModelPicker({ value, onChange, catalog, onOpen }) {
   const { colors } = useTheme();
   const ref = useRef(null);
   const triggerMain = modelTriggerLabel(catalog, value);
-  const modelUnavailable = modelSelection(catalog, value).status === 'unavailable';
-  const effortState = effortSelection(capabilities, effortRecord, { model: value });
-  const effortHasIssue = !effortState.canSend;
-  const fullLabel = modelEffortTriggerLabel(catalog, value, capabilities, effortRecord, { model: value });
-
-  const openSheet = () => {
-    onOpen?.();
-    ref.current?.present();
-  };
-
-  const pickModel = (v) => {
+  const unavailable = modelSelection(catalog, value).status === 'unavailable';
+  const pick = (v) => {
+    if (v !== value) haptics.selection();
     onChange(v);
-    if (!onEffortChange) {
-      ref.current?.dismiss();
-    }
+    ref.current?.dismiss();
   };
 
   const renderHandle = () => (
@@ -52,9 +32,9 @@ export function ModelPicker({
     <>
       <TouchableOpacity
         testID="model-picker-trigger"
-        onPress={openSheet}
+        onPress={() => { onOpen?.(); ref.current?.present(); }}
         accessibilityRole="button"
-        accessibilityLabel={`选择模型与思考程度，当前${fullLabel}`}
+        accessibilityLabel={`选择模型，当前${triggerMain}`}
         style={{
           borderRadius: 22,
           borderCurve: 'continuous',
@@ -62,51 +42,23 @@ export function ModelPicker({
           paddingVertical: 10,
           minHeight: 44,
           justifyContent: 'center',
-          backgroundColor: modelUnavailable || effortHasIssue ? colors.glassTintAccent : colors.controlFill,
+          backgroundColor: unavailable ? colors.glassTintAccent : colors.controlFill,
           borderWidth: 1,
-          borderColor: modelUnavailable || effortHasIssue ? colors.danger : colors.controlBorder,
+          borderColor: unavailable ? colors.danger : colors.controlBorder,
           flexShrink: 1,
         }}
       >
-        <Text
-          numberOfLines={1}
-          style={{
-            color: modelUnavailable ? colors.danger : colors.ink,
-            fontSize: 13.5,
-            fontWeight: '500',
-          }}
-        >
-          {triggerMain}
-          {effortState.badge ? (
-            <Text
-              style={{
-                color: effortHasIssue ? colors.danger : colors.accent,
-                fontWeight: '600',
-              }}
-            >
-              {` · ${effortState.badge}`}
-            </Text>
-          ) : null}
-        </Text>
+        <Text numberOfLines={1} style={{ color: unavailable ? colors.danger : colors.ink, fontSize: 13.5, fontWeight: '500' }}>{triggerMain}</Text>
       </TouchableOpacity>
       <BottomSheetModal
         ref={ref}
         enableDynamicSizing
-        maxDynamicContentSize={640}
+        maxDynamicContentSize={600}
         backdropComponent={renderBackdrop}
         handleComponent={renderHandle}
         backgroundStyle={{ backgroundColor: colors.card }}
       >
-        <ModelSheetContent
-          value={value}
-          catalog={catalog}
-          onPick={pickModel}
-          effortRecord={effortRecord}
-          capabilities={capabilities}
-          onPickEffort={onEffortChange}
-          onRefreshCapabilities={onRefreshCapabilities}
-          onClose={() => ref.current?.dismiss()}
-        />
+        <ModelSheetContent value={value} catalog={catalog} onPick={pick} />
       </BottomSheetModal>
     </>
   );

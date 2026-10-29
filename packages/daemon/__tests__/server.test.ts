@@ -15,7 +15,7 @@ import type { QueryFactory } from "@claude-remote/agent-bridge";
 import { ConfigError, loadConfig, type DaemonConfig } from "../src/config.js";
 import { readModelCatalog } from "../src/model-config.js";
 import { ApprovalBridge, TurnRunner, type ActivityGate, type Notifier } from "../src/run/index.js";
-import { DaemonServer, type DaemonServerOptions } from "../src/server.js";
+import { DaemonServer } from "../src/server.js";
 import { ActivityTracker } from "../src/watch/activity.js";
 import { SessionWatcher } from "../src/watch/watcher.js";
 import type { ProjectCatalog } from "../src/transcript/projects.js";
@@ -110,7 +110,7 @@ interface Harness {
   dispose: () => Promise<void>;
 }
 
-async function startHarness(modelCapabilities?: DaemonServerOptions["modelCapabilities"]): Promise<Harness> {
+async function startHarness(): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "claude-remote-it-"));
   const settingsPath = join(root, "settings.json");
   await writeFile(settingsPath, JSON.stringify({
@@ -158,7 +158,7 @@ async function startHarness(modelCapabilities?: DaemonServerOptions["modelCapabi
     config, watcher, tracker, runner, approvals: bridge, notifier,
     version: "0.1.0-test", claudeCliVersion: () => "9.9.9-test",
     modelCatalog: () => readModelCatalog(settingsPath),
-    modelCapabilities: modelCapabilities ?? (async () => ({ status: "known", effortLevels: ["low", "high", "max"], source: "claude", revision: "test-config", thinkingEnabled: true })),
+    effortOptions: async () => ({ levels: ["low", "high", "max"], verified: true }),
   });
   await server.listen();
   const { port } = server.address();
@@ -942,14 +942,14 @@ test("WS 重连：运行中先发身份再发草稿，断线期间完成/中止�
   }
 });
 
-test("model capabilities enforce known cwd and session context without starting a turn", async () => {
+test("effort levels enforce known cwd and session context without starting a turn", async () => {
   const h = await startHarness();
   try {
-    assert.equal((await fetch(`${h.base}/api/model-capabilities`)).status, 401);
-    assert.equal((await fetch(`${h.base}/api/model-capabilities?cwd=/unknown`, authed())).status, 400);
-    const res = await fetch(`${h.base}/api/model-capabilities?sessionId=${SESSION_ID}`, authed());
+    assert.equal((await fetch(`${h.base}/api/effort-levels`)).status, 401);
+    assert.equal((await fetch(`${h.base}/api/effort-levels?cwd=/unknown`, authed())).status, 400);
+    const res = await fetch(`${h.base}/api/effort-levels?sessionId=${SESSION_ID}`, authed());
     assert.equal(res.status, 200);
-    assert.deepEqual((await res.json() as { effortLevels: string[] }).effortLevels, ["low", "high", "max"]);
+    assert.deepEqual(await res.json(), { levels: ["low", "high", "max"], verified: true });
     assert.equal(h.sdk.params, undefined);
   } finally { await h.dispose(); }
 });
@@ -964,9 +964,6 @@ test("new and resumed turns validate effort and forward the selected value to SD
         assert.equal(res.status, 400);
         assert.equal((await res.json() as { error: string }).error, "invalid_effort");
       }
-      const unsupported = await send("medium");
-      assert.equal(unsupported.status, 400);
-      assert.equal((await unsupported.json() as { error: string }).error, "unsupported_effort");
       assert.equal(h.sdk.params, undefined);
       const accepted = await send("max");
       assert.equal(accepted.status, 202);
@@ -974,21 +971,4 @@ test("new and resumed turns validate effort and forward the selected value to SD
       h.sdk.finish();
     } finally { await h.dispose(); }
   }
-});
-
-test("unknown capability permits explicit manual effort and default bypasses probing", async () => {
-  let probes = 0;
-  const h = await startHarness(async () => { probes++; return { status: "unknown", effortLevels: [], source: "unknown", revision: "unknown" }; });
-  try {
-    const res = await fetch(`${h.base}/api/sessions`, authed({ method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, text: "manual", effort: "medium" }) }));
-    assert.equal(res.status, 202);
-    assert.equal(h.sdk.params?.options?.effort, "medium");
-    assert.equal(probes, 1);
-    h.sdk.finish();
-    const next = await fetch(`${h.base}/api/sessions/${SESSION_ID}/messages`, authed({ method: "POST", body: JSON.stringify({ text: "default" }) }));
-    assert.equal(next.status, 202);
-    assert.equal(h.sdk.params?.options?.effort, undefined);
-    assert.equal(probes, 1);
-    h.sdk.finish();
-  } finally { await h.dispose(); }
 });
