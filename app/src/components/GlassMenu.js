@@ -212,32 +212,41 @@ export function GlassMenu({
     };
   });
 
-  // 菜单外壳：收起时宽高快速球化，沿 45° 对角线与按钮锚点球拉出水滴轮廓后缩进按钮圆心
-  const shellStyle = useAnimatedStyle(() => {
-    const rawP = progress.value;
+  const shellFrame = (rawP, closing, menuH) => {
+    'worklet';
     const p = Math.max(0, Math.min(1, rawP));
-    const closing = isClosing.value === 1;
-    const menuH = targetH.value;
-
     const pW = closing ? Math.pow(p, 1.48) : rawP;
     const pH = closing ? Math.pow(p, 1.72) : rawP;
     const pPosY = closing ? Math.pow(p, 0.85) : rawP;
     const pPosX = closing ? Math.pow(p, 0.9) : rawP;
 
-    const curW = Math.max(ballSize * 0.85, ballSize + (menuW - ballSize) * pW);
-    const curH = Math.max(ballSize * 0.85, ballSize + (menuH - ballSize) * pH);
+    const width = Math.max(ballSize * 0.85, ballSize + (menuW - ballSize) * pW);
+    const height = Math.max(ballSize * 0.85, ballSize + (menuH - ballSize) * pH);
 
     const diagShiftX = closing ? Math.sin(p * Math.PI) * (alignRight ? -9 : 9) : 0;
     const left = (alignRight
-      ? (ballLeft + ballSize) + ((menuLeft + menuW) - (ballLeft + ballSize)) * pPosX - curW
+      ? (ballLeft + ballSize) + ((menuLeft + menuW) - (ballLeft + ballSize)) * pPosX - width
       : ballLeft + (menuLeft - ballLeft) * pPosX) + diagShiftX;
 
     const fullTop = above ? anchorBottomEdge - menuH : anchorTopEdge;
     const top = above
-      ? (ballTop + ballSize) + (anchorBottomEdge - (ballTop + ballSize)) * pPosY - curH
+      ? (ballTop + ballSize) + (anchorBottomEdge - (ballTop + ballSize)) * pPosY - height
       : ballTop + (fullTop - ballTop) * pPosY;
 
-    const dynRadius = Math.min(curW / 2, curH / 2, targetRadius);
+    return {
+      p,
+      left,
+      top,
+      width,
+      height,
+      borderRadius: Math.min(width / 2, height / 2, targetRadius),
+    };
+  };
+
+  // 菜单外壳：收起时宽高快速球化，沿 45° 对角线与按钮锚点球拉出水滴轮廓后缩进按钮圆心
+  const shellStyle = useAnimatedStyle(() => {
+    const closing = isClosing.value === 1;
+    const { p, left, top, width, height, borderRadius } = shellFrame(progress.value, closing, targetH.value);
     const shellOpacity = closing
       ? interpolate(p, [0, 0.14], [0, 1], Extrapolation.CLAMP)
       : 1;
@@ -246,9 +255,9 @@ export function GlassMenu({
       position: 'absolute',
       left,
       top,
-      width: curW,
-      height: curH,
-      borderRadius: dynRadius,
+      width,
+      height,
+      borderRadius,
       borderCurve: 'continuous',
       backgroundColor: glass ? 'transparent' : colors.card,
       shadowColor: dark ? '#000000' : '#241E17',
@@ -259,18 +268,18 @@ export function GlassMenu({
     };
   });
 
-  const clipStyle = useAnimatedStyle(() => {
-    const rawP = progress.value;
-    const p = Math.max(0, Math.min(1, rawP));
-    const closing = isClosing.value === 1;
-    const menuH = targetH.value;
-    const pW = closing ? Math.pow(p, 1.48) : rawP;
-    const pH = closing ? Math.pow(p, 1.72) : rawP;
-    const curW = Math.max(ballSize * 0.85, ballSize + (menuW - ballSize) * pW);
-    const curH = Math.max(ballSize * 0.85, ballSize + (menuH - ballSize) * pH);
+  // 与外壳同步的交互层，叠在玻璃层之上承载描边与内容
+  const frameStyle = useAnimatedStyle(() => {
+    const { left, top, width, height, borderRadius } = shellFrame(progress.value, isClosing.value === 1, targetH.value);
     return {
-      borderRadius: Math.min(curW / 2, curH / 2, targetRadius),
+      position: 'absolute',
+      left,
+      top,
+      width,
+      height,
+      borderRadius,
       borderCurve: 'continuous',
+      overflow: 'hidden',
     };
   });
 
@@ -447,10 +456,12 @@ export function GlassMenu({
     </View>
   );
 
+  // GlassContainer 内部的 UIVisualEffectView 会吞掉所有触摸（box-none 拦不住原生子视图），
+  // 所以玻璃层整体 pointerEvents="none"，可点的内容放在其上方独立的一层。
   const Wrapper = glass ? GlassContainer : View;
   const wrapperProps = glass
-    ? { spacing: MERGE_SPACING, style: StyleSheet.absoluteFill, pointerEvents: 'box-none' }
-    : { style: StyleSheet.absoluteFill, pointerEvents: 'box-none' };
+    ? { spacing: MERGE_SPACING, style: StyleSheet.absoluteFill, pointerEvents: 'none' }
+    : { style: StyleSheet.absoluteFill, pointerEvents: 'none' };
 
   return (
     <Modal
@@ -469,10 +480,9 @@ export function GlassMenu({
         accessibilityLabel="关闭菜单"
       />
       <Wrapper {...wrapperProps}>
-        <Animated.View pointerEvents="none" style={orbStyle}>
+        <Animated.View style={orbStyle}>
           {glass ? (
             <GlassView
-              pointerEvents="none"
               glassEffectStyle="regular"
               tintColor={colors.glassTint}
               colorScheme={dark ? 'dark' : 'light'}
@@ -481,40 +491,40 @@ export function GlassMenu({
           ) : null}
         </Animated.View>
 
-        <Animated.View accessibilityViewIsModal style={shellStyle}>
+        <Animated.View style={shellStyle}>
           {glass ? (
             <GlassView
-              pointerEvents="none"
               glassEffectStyle="regular"
               tintColor={colors.glassTint}
               colorScheme={dark ? 'dark' : 'light'}
               style={[StyleSheet.absoluteFill, { borderRadius: targetRadius, borderCurve: 'continuous' }]}
             />
           ) : null}
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              StyleSheet.absoluteFill,
-              {
-                borderRadius: targetRadius,
-                borderCurve: 'continuous',
-                borderWidth: 1,
-                borderColor: colors.glassBorder,
-              },
-              borderStyle,
-            ]}
-          />
-          <Animated.View style={[StyleSheet.absoluteFill, { overflow: 'hidden' }, clipStyle]}>
-            <Animated.View style={[contentAnchorStyle, contentAnimStyle]} accessibilityRole="menu">
-              <ContentContainer {...containerProps}>
-                <View onLayout={onContentLayout}>
-                  {renderRows()}
-                </View>
-              </ContentContainer>
-            </Animated.View>
-          </Animated.View>
         </Animated.View>
       </Wrapper>
+
+      <Animated.View accessibilityViewIsModal style={frameStyle}>
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            StyleSheet.absoluteFill,
+            {
+              borderRadius: targetRadius,
+              borderCurve: 'continuous',
+              borderWidth: 1,
+              borderColor: colors.glassBorder,
+            },
+            borderStyle,
+          ]}
+        />
+        <Animated.View style={[contentAnchorStyle, contentAnimStyle]} accessibilityRole="menu">
+          <ContentContainer {...containerProps}>
+            <View onLayout={onContentLayout}>
+              {renderRows()}
+            </View>
+          </ContentContainer>
+        </Animated.View>
+      </Animated.View>
     </Modal>
   );
 }
