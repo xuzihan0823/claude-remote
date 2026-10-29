@@ -1,7 +1,7 @@
-// HTTP + WebSocket 服务层：docs/api-contract.md 的落地。
+// HTTP + WebSocket 服务层。
 //
 // 职责：Bearer/token 鉴权、HTTP 端点映射（NotIdleError→409、already_resolved→409、
-// ENOENT→404）、WS subscribe 管理与广播、web/ 静态托管、watcher/activity/runner/
+// ENOENT→404）、WS subscribe 管理与广播、watcher/activity/runner/
 // approval 事件 → WS 帧、notifier 触发（审批创建、run 终态）。
 //
 // 广播语义：message/resync/run 只发给订阅了该会话的连接；status 另发给订阅 "*"
@@ -9,12 +9,11 @@
 // 匹配，见 05 报告对表第 4 条）。
 
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { homedir, hostname } from "node:os";
-import { basename, extname, join, normalize, resolve, sep } from "node:path";
+import { basename, join } from "node:path";
 import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -31,18 +30,6 @@ import { searchSessions } from "./transcript/search.js";
 import type { ActivityTracker } from "./watch/activity.js";
 import type { SessionWatcher } from "./watch/watcher.js";
 
-const MIME: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json",
-  ".webmanifest": "application/manifest+json",
-  ".png": "image/png",
-  ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
-  ".map": "application/json",
-};
 
 const BODY_LIMIT_BYTES = 1024 * 1024;
 const UPLOAD_LIMIT_BYTES = 25 * 1024 * 1024;
@@ -55,8 +42,6 @@ type PermissionMode = "default" | "acceptEdits" | "plan" | "bypassPermissions";
 
 export interface DaemonServerOptions {
   config: DaemonConfig;
-  /** web/ 静态目录绝对路径。 */
-  webRoot: string;
   watcher: SessionWatcher;
   tracker: ActivityTracker;
   runner: TurnRunner;
@@ -201,8 +186,7 @@ export class DaemonServer {
     const path = url.pathname;
 
     if (path.startsWith("/api/")) {
-      // CORS：iOS 壳（capacitor://localhost）与非同源部署的前端需要跨域访问；
-      // 鉴权靠 Bearer token 且不依赖 Cookie，Allow-Origin 放开是安全的。
+      // 保留 API 跨域兼容；鉴权使用 Bearer token。
       res.setHeader("Access-Control-Allow-Origin", "*");
       if (req.method === "OPTIONS") {
         res.writeHead(204, {
@@ -223,10 +207,6 @@ export class DaemonServer {
         return;
       }
       await this.#handleApi(req, res, url);
-      return;
-    }
-    if (req.method === "GET" || req.method === "HEAD") {
-      await this.#serveStatic(path, res);
       return;
     }
     this.#json(res, 404, { error: "not_found" });
@@ -285,7 +265,7 @@ export class DaemonServer {
 
     const abortMatch = /^\/api\/sessions\/([^/]+)\/abort$/.exec(path);
     if (abortMatch !== null && method === "POST") {
-      this.#handleAbort(res, decodeURIComponent(abortMatch[1] ?? ""));
+      await this.#handleAbort(req, res, decodeURIComponent(abortMatch[1] ?? ""));
       return;
     }
 
@@ -467,20 +447,39 @@ export class DaemonServer {
     this.#json(res, 202, { sessionId, runId: handle.runId });
   }
 
-  #handleAbort(res: ServerResponse, sessionId: string): void {
+  async #handleAbort(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
     if (!isUuid(sessionId)) {
       this.#json(res, 400, { error: "invalid_session_id" });
       return;
     }
-    const runId = this.#options.runner.activeRunId(sessionId);
-    if (runId === undefined) {
-      // 无 daemon run：若被判为 terminal-driving（如上一轮报错后 CLI 收尾写入误判），手动解除占用
+    const body = await this.#readJsonBody(req, res, true);
+    if (body === undefined) return;
+    const requestedRunId = (body as { runId?: unknown }).runId;
+    if (requestedRunId !== undefined && (typeof requestedRunId !== "string" || !isUuid(requestedRunId))) {
+      this.#json(res, 400, { error: "invalid_run_id" });
+      return;
+    }
+    const activeRunId = this.#options.runner.activeRunId(sessionId);
+    if (requestedRunId !== undefined && activeRunId === undefined) {
+      this.#json(res, 200, {
+        runId: null,
+        status: "idle",
+        sessionStatus: this.#options.tracker.getStatus(sessionId),
+      });
+      return;
+    }
+    if (requestedRunId !== undefined && requestedRunId !== activeRunId) {
+      this.#json(res, 409, { error: "run_mismatch", activeRunId, status: "daemon-driving" });
+      return;
+    }
+    if (activeRunId === undefined) {
+      // 未指定 runId 时保留旧客户端的手动解除占用入口；指定 runId 的幂等停止不得经过这里
       const released = this.#options.tracker.release(sessionId);
       this.#json(res, 200, { runId: null, status: released ? "released" : "idle" });
       return;
     }
-    this.#options.runner.abort(runId);
-    this.#json(res, 200, { runId, status: "aborted" });
+    this.#options.runner.abort(activeRunId);
+    this.#json(res, 200, { runId: activeRunId, status: "aborted" });
   }
 
   async #handleGetMessages(res: ServerResponse, url: URL, sessionId: string): Promise<void> {
@@ -668,7 +667,7 @@ export class DaemonServer {
     }
   }
 
-  async #readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<unknown | undefined> {
+  async #readJsonBody(req: IncomingMessage, res: ServerResponse, allowEmpty = false): Promise<unknown | undefined> {
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const chunk of req) {
@@ -680,6 +679,7 @@ export class DaemonServer {
       chunks.push(chunk as Buffer);
     }
     if (chunks.length === 0) {
+      if (allowEmpty) return {};
       this.#json(res, 400, { error: "invalid_json" });
       return undefined;
     }
@@ -701,29 +701,6 @@ export class DaemonServer {
     res.end(JSON.stringify(body));
   }
 
-  // -- 静态托管 ---------------------------------------------------------------
-
-  async #serveStatic(path: string, res: ServerResponse): Promise<void> {
-    const clean = normalize(decodeURIComponent(path)).replaceAll("\\", "/");
-    const relative = clean === "/" ? "index.html" : clean.replace(/^\/+/, "");
-    const file = resolve(this.#options.webRoot, relative);
-    if (file !== this.#options.webRoot && !file.startsWith(this.#options.webRoot + sep)) {
-      this.#json(res, 404, { error: "not_found" });
-      return;
-    }
-    try {
-      const stats = await stat(file);
-      if (!stats.isFile()) throw new Error("not a file");
-      res.writeHead(200, {
-        "Content-Type": MIME[extname(file)] ?? "application/octet-stream",
-        "Content-Length": stats.size,
-        "Cache-Control": "no-store",
-      });
-      createReadStream(file).pipe(res);
-    } catch {
-      this.#json(res, 404, { error: "not_found" });
-    }
-  }
 
   // -- WebSocket --------------------------------------------------------------
 
@@ -780,6 +757,7 @@ export class DaemonServer {
         } catch (error) {
           if (isEnoent(error) && this.#newSessions.has(sessionId)) {
             state.subs.add(sessionId);
+            this.#sendSessionState(ws, sessionId);
             void this.#activateNewSessionWatch(sessionId);
             return;
           }
@@ -789,6 +767,7 @@ export class DaemonServer {
         }
       }
       state.subs.add(sessionId);
+      if (sessionId !== "*") this.#sendSessionState(ws, sessionId);
       // 中途打开 / 断线重连：补发正在流式输出的草稿
       for (const f of this.#streams.snapshot(sessionId)) if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(f));
       return;
@@ -797,6 +776,16 @@ export class DaemonServer {
       if (!state.subs.delete(sessionId)) return;
       if (sessionId !== "*") this.#releaseWatch(sessionId);
     }
+  }
+
+  #sendSessionState(ws: WebSocket, sessionId: string): void {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({
+      type: "session-state",
+      sessionId,
+      status: this.#options.tracker.getStatus(sessionId),
+      activeRunId: this.#options.runner.activeRunId(sessionId) ?? null,
+    }));
   }
 
   async #acquireWatch(sessionId: string): Promise<void> {

@@ -4,15 +4,13 @@
 //   SessionWatcher --write--> ActivityTracker --change--> WS status 帧
 //   TurnRunner --gate--> ActivityTracker（一行适配，见 reports/04-run.md）
 //   TurnRunner --permissions--> ApprovalBridge --onEvent--> WS approval 帧 + 通知
-//   DaemonServer 持有全部只读/驱动入口（HTTP + WS + 静态托管）
+//   DaemonServer 持有全部只读/驱动入口（HTTP + WS）
 
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
 
 import { InteractionManager, InteractionStore } from "@claude-remote/interactions";
 import QRCode from "qrcode";
@@ -23,6 +21,7 @@ import { RelayConnector } from "./relay/connector.js";
 import { ApprovalBridge, TurnRunner, createNotifier, type ActivityGate, type ApprovalEvent } from "./run/index.js";
 import { DaemonServer } from "./server.js";
 import { ActivityTracker } from "./watch/activity.js";
+import { CliExitReleaser, readLiveCliSessions } from "./watch/cli-presence.js";
 import { SessionWatcher } from "./watch/watcher.js";
 
 const require = createRequire(import.meta.url);
@@ -37,14 +36,6 @@ function probeClaudeCliVersion(onResult: (version: string) => void): void {
   });
 }
 
-/** Web 静态资源目录：源码运行在仓库 web/（src → ../../../web），npm 包里在包根 web/（dist → ../web）。 */
-function findWebRoot(): string {
-  const fromEnv = process.env.CLAUDE_REMOTE_WEB_ROOT?.trim();
-  if (fromEnv) return resolve(fromEnv);
-  const here = dirname(fileURLToPath(import.meta.url));
-  const candidates = [resolve(here, "../web"), resolve(here, "../../../web")];
-  return candidates.find((dir) => existsSync(resolve(dir, "index.html"))) ?? (candidates[1] as string);
-}
 
 async function main(): Promise<void> {
   // 配置文件：npm 安装形态由 launchd 传 CLAUDE_REMOTE_ENV_FILE（~/.claude-remote/config.env）；源码运行读 cwd 的 .env。
@@ -72,6 +63,9 @@ async function main(): Promise<void> {
     beginRun: (id) => tracker.beginRun(id),
     endRun: (id) => tracker.endRun(id),
   };
+  const cliSessionsDir = join(dirname(config.projectsDir), "sessions");
+  const cliExitReleaser = new CliExitReleaser({ tracker, readLive: () => readLiveCliSessions(cliSessionsDir) });
+  cliExitReleaser.start();
 
   // server 在 bridge 之后创建；审批事件只会在 HTTP/WS 流量之后产生，届时 server 已就位。
   let server: DaemonServer;
@@ -99,7 +93,6 @@ async function main(): Promise<void> {
 
   server = new DaemonServer({
     config,
-    webRoot: findWebRoot(),
     watcher,
     tracker,
     runner,
@@ -130,7 +123,6 @@ async function main(): Promise<void> {
   } catch (error) {
     console.warn("terminal QR render failed:", error);
   }
-  console.log(`或浏览器打开 http://127.0.0.1:${port}/#/pair\n`);
 
   let shuttingDown = false;
   const shutdown = (signal: string): void => {
@@ -152,6 +144,7 @@ async function main(): Promise<void> {
         console.error("server close failed:", error);
       }
       watcher.close();
+      cliExitReleaser.stop();
       tracker.dispose();
       manager.close();
       try {

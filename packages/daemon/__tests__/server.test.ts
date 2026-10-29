@@ -57,10 +57,12 @@ interface FakeSdk {
   params: QueryParams | undefined;
   /** resolve 后 SDK 消息流结束（run → done）。 */
   finish: () => void;
+  interrupts: number;
+  delayAbort: boolean;
 }
 
 function fakeSdk(): FakeSdk {
-  const holder: FakeSdk = { factory: undefined as never, params: undefined, finish: () => {} };
+  const holder: FakeSdk = { factory: undefined as never, params: undefined, finish: () => {}, interrupts: 0, delayAbort: false };
   holder.factory = ((params: QueryParams): SdkQuery => {
     holder.params = params;
     let release: () => void = () => {};
@@ -81,7 +83,10 @@ function fakeSdk(): FakeSdk {
       await gatePromise;
     })();
     const augmented = generator as unknown as Record<string, unknown>;
-    augmented.interrupt = async (): Promise<void> => release();
+    augmented.interrupt = async (): Promise<void> => {
+      holder.interrupts += 1;
+      if (!holder.delayAbort) release();
+    };
     augmented.close = (): void => {};
     return generator as unknown as SdkQuery;
   }) as unknown as QueryFactory;
@@ -102,7 +107,6 @@ interface Harness {
   sessionFile: string;
   projectsDir: string;
   uploadsDir: string;
-  webRoot: string;
   dispose: () => Promise<void>;
 }
 
@@ -120,9 +124,6 @@ async function startHarness(): Promise<Harness> {
   const sessionFile = join(projectDir, `${SESSION_ID}.jsonl`);
   await writeFile(sessionFile, userLine("u1", null, "hello daemon") + assistantLine("a1", "u1", "hi human"));
 
-  const webRoot = join(root, "web");
-  await mkdir(webRoot);
-  await writeFile(join(webRoot, "index.html"), "<!doctype html><title>it</title>");
 
   const config: DaemonConfig = {
     token: TOKEN,
@@ -154,7 +155,7 @@ async function startHarness(): Promise<Harness> {
   };
 
   server = new DaemonServer({
-    config, webRoot, watcher, tracker, runner, approvals: bridge, notifier,
+    config, watcher, tracker, runner, approvals: bridge, notifier,
     version: "0.1.0-test", claudeCliVersion: () => "9.9.9-test",
     modelCatalog: () => readModelCatalog(settingsPath),
   });
@@ -165,7 +166,7 @@ async function startHarness(): Promise<Harness> {
   return {
     server, base,
     wsUrl: (token = TOKEN) => `ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}`,
-    watcher, tracker, bridge, sdk, notifications, sessionFile, projectsDir, uploadsDir: config.uploadsDir, webRoot,
+    watcher, tracker, bridge, sdk, notifications, sessionFile, projectsDir, uploadsDir: config.uploadsDir,
     dispose: async () => {
       await server.close();
       watcher.close();
@@ -251,13 +252,12 @@ test("鉴权：/api 无 token 401；错 token 401；对 token 放行", async () 
   assert.equal(typeof health.hostname, "string");
 });
 
-test("静态托管：/ 返回 index.html；路径穿越 404", async () => {
-  const index = await fetch(`${harness.base}/`);
-  assert.equal(index.status, 200);
-  assert.match(index.headers.get("content-type") ?? "", /text\/html/);
-  assert.match(await index.text(), /<title>it<\/title>/);
-  const traversal = await fetch(`${harness.base}/..%2f..%2fetc%2fpasswd`);
-  assert.equal(traversal.status, 404);
+test("浏览器界面已移除：页面与静态资源均返回 404", async () => {
+  for (const path of ["/", "/index.html", "/app.js", "/style.css", "/manifest.webmanifest", "/..%2f..%2fetc%2fpasswd"]) {
+    const res = await fetch(`${harness.base}${path}`);
+    assert.equal(res.status, 404, path);
+    assert.deepEqual(await res.json(), { error: "not_found" });
+  }
 });
 
 test("CORS：/api 预检 204 无需鉴权；普通响应带 Allow-Origin", async () => {
@@ -630,6 +630,91 @@ test("POST messages：picker 末项和内置别名均传入 fake SDK", async (t)
   }
 });
 
+test("abort：旧 runId 不停新 run，重复停止幂等，坏请求无副作用", async (t) => {
+  const sink = new FrameSink(harness.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  sink.send({ type: "subscribe", sessionId: SESSION_ID });
+  await delay(30);
+
+  const startRun = async (text: string): Promise<string> => {
+    const res = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed({
+      method: "POST", body: JSON.stringify({ text }),
+    }));
+    assert.equal(res.status, 202);
+    return ((await res.json()) as { runId: string }).runId;
+  };
+  const abort = (body?: string) => fetch(`${harness.base}/api/sessions/${SESSION_ID}/abort`, authed({
+    method: "POST", ...(body === undefined ? {} : { body }),
+  }));
+
+  const runA = await startRun("run A");
+  harness.sdk.finish();
+  await sink.waitFor((frame) => frame.type === "run" && frame.state === "done" && frame.runId === runA);
+  const runB = await startRun("run B");
+  const interruptsBeforeStaleAbort = harness.sdk.interrupts;
+
+  const stale = await abort(JSON.stringify({ runId: runA }));
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), { error: "run_mismatch", activeRunId: runB, status: "daemon-driving" });
+  assert.equal(harness.sdk.interrupts, interruptsBeforeStaleAbort);
+
+  for (const runId of [null, "", 123, "not-a-uuid"]) {
+    const invalid = await abort(JSON.stringify({ runId }));
+    assert.equal(invalid.status, 400);
+    assert.deepEqual(await invalid.json(), { error: "invalid_run_id" });
+  }
+  const malformed = await abort("{");
+  assert.equal(malformed.status, 400);
+  assert.deepEqual(await malformed.json(), { error: "invalid_json" });
+  assert.equal(harness.sdk.interrupts, interruptsBeforeStaleAbort);
+
+  const late = new FrameSink(harness.wsUrl());
+  t.after(() => late.close());
+  await late.open();
+  late.send({ type: "subscribe", sessionId: SESSION_ID });
+  const snapshot = await late.waitFor((frame) => frame.type === "session-state");
+  assert.equal(snapshot.activeRunId, runB);
+  assert.equal(snapshot.status, "daemon-driving");
+
+  harness.sdk.delayAbort = true;
+  t.after(() => { harness.sdk.delayAbort = false; harness.sdk.finish(); });
+  const stopped = await abort(JSON.stringify({ runId: runB }));
+  assert.equal(stopped.status, 200);
+  assert.deepEqual(await stopped.json(), { runId: runB, status: "aborted" });
+  assert.equal(harness.sdk.interrupts, interruptsBeforeStaleAbort + 1);
+  const stoppingAgain = await abort(JSON.stringify({ runId: runB }));
+  assert.deepEqual(await stoppingAgain.json(), { runId: runB, status: "aborted" });
+  assert.equal(harness.sdk.interrupts, interruptsBeforeStaleAbort + 1);
+  const busy = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/messages`, authed({
+    method: "POST", body: JSON.stringify({ text: "must wait for termination" }),
+  }));
+  assert.equal(busy.status, 409);
+  assert.equal(harness.tracker.getStatus(SESSION_ID), "daemon-driving");
+  harness.sdk.delayAbort = false;
+  harness.sdk.finish();
+  await sink.waitFor((frame) => frame.type === "run" && frame.state === "error" && frame.runId === runB);
+  const duplicate = await abort(JSON.stringify({ runId: runB }));
+  assert.equal(duplicate.status, 200);
+  assert.deepEqual(await duplicate.json(), { runId: null, status: "idle", sessionStatus: "idle" });
+  assert.equal(harness.sdk.interrupts, interruptsBeforeStaleAbort + 1);
+
+  // 指定 runId 的幂等停止只报告该轮已结束，不能顺带解除终端占用
+  harness.tracker.noteWrite(SESSION_ID, Date.now() + 5000);
+  assert.equal(harness.tracker.getStatus(SESSION_ID), "terminal-driving");
+  const ended = await abort(JSON.stringify({ runId: runB }));
+  assert.equal(ended.status, 200);
+  assert.deepEqual(await ended.json(), { runId: null, status: "idle", sessionStatus: "terminal-driving" });
+  assert.equal(harness.tracker.getStatus(SESSION_ID), "terminal-driving");
+
+  const released = await abort();
+  assert.equal(released.status, 200);
+  assert.deepEqual(await released.json(), { runId: null, status: "released" });
+  const emptyObject = await abort("{}");
+  assert.equal(emptyObject.status, 200);
+  assert.deepEqual(await emptyObject.json(), { runId: null, status: "idle" });
+});
+
 test("POST sessions：显式 UUID、模型覆盖、JSONL 延迟出现后 resync、abort 幂等", async (t) => {
   const res = await fetch(`${harness.base}/api/sessions`, authed({
     method: "POST",
@@ -650,6 +735,9 @@ test("POST sessions：显式 UUID、模型覆盖、JSONL 延迟出现后 resync�
   t.after(() => sink.close());
   await sink.open();
   sink.send({ type: "subscribe", sessionId: created.sessionId });
+  const initialState = await sink.waitFor((frame) => frame.type === "session-state");
+  assert.equal(initialState.activeRunId, created.runId);
+  assert.equal(initialState.status, "daemon-driving");
   await delay(30);
   await writeFile(join(harness.projectsDir, "-tmp-claude-remote-it", `${created.sessionId}.jsonl`), jsonlLine({
     type: "user",
@@ -810,4 +898,45 @@ test("GET /api/interactions/pending：后连上的客户端能补到待决审批
     interactions: unknown[];
   };
   assert.equal(after.interactions.length, 0);
+});
+
+test("WS 重连：运行中先发身份再发草稿，断线期间完成/中止后快照为空闲", async (t) => {
+  const local = await startHarness();
+  t.after(() => local.dispose());
+  const observer = new FrameSink(local.wsUrl());
+  t.after(() => observer.close());
+  await observer.open();
+  observer.send({ type: "subscribe", sessionId: SESSION_ID });
+  await observer.waitFor((f) => f.type === "session-state");
+
+  for (const abort of [false, true]) {
+    const res = await fetch(`${local.base}/api/sessions/${SESSION_ID}/messages`, authed({
+      method: "POST", body: JSON.stringify({ text: "reconnect", permissionMode: "plan" }),
+    }));
+    assert.equal(res.status, 202);
+    const { runId } = await res.json() as { runId: string };
+    const started = await observer.waitFor((f) => f.type === "run" && f.runId === runId && f.state === "started");
+    assert.equal(started.permissionMode, "plan");
+    await observer.waitFor((f) => f.type === "stream" && f.done === true);
+    const active = new FrameSink(local.wsUrl());
+    t.after(() => active.close());
+    await active.open();
+    active.send({ type: "subscribe", sessionId: SESSION_ID });
+    await active.waitFor((f) => f.type === "stream");
+    assert.deepEqual(active.frames[0], { type: "session-state", sessionId: SESSION_ID, status: "daemon-driving", activeRunId: runId });
+    assert.equal(active.frames.some((f) => f.type === "run" && f.state === "started"), false);
+    active.close();
+    if (abort) await fetch(`${local.base}/api/sessions/${SESSION_ID}/abort`, authed({ method: "POST", body: JSON.stringify({ runId }) }));
+    else local.sdk.finish();
+    await observer.waitFor((f) => f.type === "run" && f.runId === runId && f.state === (abort ? "error" : "done"));
+    const reconnected = new FrameSink(local.wsUrl());
+    t.after(() => reconnected.close());
+    await reconnected.open();
+    reconnected.send({ type: "subscribe", sessionId: SESSION_ID });
+    assert.deepEqual(await reconnected.waitFor((f) => f.type === "session-state"), {
+      type: "session-state", sessionId: SESSION_ID, status: "idle", activeRunId: null,
+    });
+    assert.equal(reconnected.frames.some((f) => f.type === "stream"), false);
+    reconnected.close();
+  }
 });

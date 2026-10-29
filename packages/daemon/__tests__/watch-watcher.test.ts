@@ -154,6 +154,23 @@ test("write 事件：文件字节变化即发出，带注入时钟的时间戳",
   }
 });
 
+test("write 事件：只追加元数据行（CLI 收尾的 last-prompt / cost-state）不算写入", async () => {
+  const { projectsDir, file, sessionId } = await makeProject(baseLines);
+  const watcher = makeWatcher(projectsDir);
+  try {
+    const events = collect(watcher);
+    await watcher.watch(sessionId);
+    await appendFile(file, `${JSON.stringify({ type: "last-prompt", lastPrompt: "hi", sessionId })}\n${JSON.stringify({ type: "cost-state", sessionId })}\n`);
+    await watcher.pollNow();
+    assert.equal(events.write.length, 0);
+    await appendFile(file, `${userLine("u2", "a1", "again")}\n`);
+    await watcher.pollNow();
+    assert.equal(events.write.length, 1);
+  } finally {
+    watcher.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 半行
 // ---------------------------------------------------------------------------
@@ -171,11 +188,12 @@ test("半行写入：残行缓存凑齐换行才解析，多字节字符切在�
     await appendFile(file, full.subarray(0, cut));
     await watcher.pollNow();
     assert.equal(events.message.length, 0); // 半行不产出
-    assert.equal(events.write.length, 1); // 但算一次写入
+    assert.equal(events.write.length, 0); // 凑齐成行才算写入
 
     await appendFile(file, full.subarray(cut));
     await watcher.pollNow();
     assert.equal(events.message.length, 1);
+    assert.equal(events.write.length, 1);
     assert.deepEqual(
       [events.message[0]?.message.seq, events.message[0]?.message.text],
       [3, "你好世界"],

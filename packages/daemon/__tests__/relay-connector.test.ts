@@ -35,7 +35,7 @@ const FAST: Partial<ConnectorTimings> = { backoffMinMs: 40, backoffMaxMs: 200, a
 interface Daemon {
   server: DaemonServer;
   port: number;
-  webRoot: string;
+  projectsDir: string;
   uploadsDir: string;
   dispose(): Promise<void>;
 }
@@ -43,10 +43,7 @@ interface Daemon {
 async function startDaemon(relayStatus?: () => ReturnType<RelayConnector["status"]>): Promise<Daemon> {
   const root = await mkdtemp(join(tmpdir(), "claude-remote-relay-it-"));
   const projectsDir = join(root, "projects");
-  const webRoot = join(root, "web");
   await mkdir(projectsDir, { recursive: true });
-  await mkdir(webRoot);
-  await writeFile(join(webRoot, "index.html"), "<!doctype html><title>it</title>");
   const config: DaemonConfig = {
     token: TOKEN,
     host: "127.0.0.1",
@@ -70,7 +67,7 @@ async function startDaemon(relayStatus?: () => ReturnType<RelayConnector["status
   const approvals = new ApprovalBridge({ manager, onEvent: (event) => server.handleApprovalEvent(event) });
   const runner = new TurnRunner({ gate, permissions: approvals });
   server = new DaemonServer({
-    config, webRoot, watcher, tracker, runner, approvals,
+    config, watcher, tracker, runner, approvals,
     notifier: async () => {},
     version: "0.1.0-test",
     claudeCliVersion: () => "test",
@@ -81,7 +78,7 @@ async function startDaemon(relayStatus?: () => ReturnType<RelayConnector["status
   return {
     server,
     port: server.address().port,
-    webRoot,
+    projectsDir,
     uploadsDir: config.uploadsDir,
     dispose: async () => {
       await server.close();
@@ -269,13 +266,24 @@ test("POST JSON：请求体决定 daemon 的响应（400 vs 404）", async () =>
   assert.equal(good.status, 404);
 });
 
-test("大响应（1.5 MiB 静态文件，流式读出）经流控完整到达", async () => {
-  const big = randomBytes(1536 * 1024);
-  await writeFile(join(daemon.webRoot, "big.bin"), big);
-  const res = await request(`${phoneBase}/big.bin`);
-  assert.equal(res.status, 200);
-  assert.equal(res.body.length, big.length);
-  assert.equal(sha(res.body), sha(big));
+test("大响应（1.5 MiB 会话正文）经流控完整到达", async () => {
+  const sessionId = "11111111-2222-4333-8444-555555555555";
+  const project = join(daemon.projectsDir, "large-response");
+  const text = randomBytes(768 * 1024).toString("hex");
+  await mkdir(project);
+  await writeFile(join(project, `${sessionId}.jsonl`), `${JSON.stringify({
+    type: "user", uuid: "large-u1", parentUuid: null, sessionId, cwd: "/tmp/large-response",
+    message: { role: "user", content: text },
+  })}\n`);
+  try {
+    const res = await request(`${phoneBase}/api/sessions/${sessionId}/messages`, { headers: bearer });
+    assert.equal(res.status, 200);
+    const body = JSON.parse(res.body.toString()) as { messages: Array<{ text: string }> };
+    assert.equal(body.messages.length, 1);
+    assert.equal(sha(Buffer.from(body.messages[0]!.text)), sha(Buffer.from(text)));
+  } finally {
+    await rm(project, { recursive: true, force: true });
+  }
 });
 
 test("WS：经 relay 收发 ping/pong；token 错误时 daemon 的 401 原样返回", async () => {
