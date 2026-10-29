@@ -7,9 +7,13 @@ const values = new Map();
 globalThis.localStorage = {
   getItem: (key) => values.get(key) ?? null,
   setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
 };
 const connection = await import('./api.js');
-const { api, fetchProjects, fetchSessions, probeBase, saveConn, sessionCache } = connection;
+const {
+  api, defaultModelDescription, fetchModels, fetchProjects, fetchSessions, getSessionModel, modelSelection, modelTriggerLabel, probeBase,
+  resetModelCache, saveConn, sessionCache, setSessionModel,
+} = connection;
 const { bus } = await import('./bus.js');
 after(() => {
   globalThis.localStorage = originalStorage;
@@ -93,4 +97,51 @@ test('probing a candidate leaves the active connection and project requests scop
   await assert.rejects(probe, { code: 'unauthorized' });
   assert.equal(connection.baseUrl, 'http://current:8788');
   assert.equal(connection.token, 'current');
+});
+
+test('a model removed from a loaded catalog is shown as unavailable, never as the default', () => {
+  const catalog = { models: [{ id: 'codex/gpt-6.1-terra', alias: 'codex/gpt-6.1-terra' }], defaultModel: 'deepseek', loaded: true };
+  assert.deepEqual(modelSelection(catalog, ''), { status: 'default', model: null });
+  assert.equal(modelSelection(catalog, 'codex/gpt-6.1-terra').status, 'ok');
+  assert.equal(modelSelection(catalog, 'zcode/glm-5.3').status, 'unavailable');
+  assert.equal(modelTriggerLabel(catalog, 'zcode/glm-5.3'), 'zcode/glm-5.3（不可用）');
+  assert.equal(modelTriggerLabel(catalog, ''), '跟随项目默认');
+  // 内置别名不在目录里也被 daemon 接受
+  assert.equal(modelSelection(catalog, 'opus').status, 'ok');
+});
+
+test('before the catalog loads, a chosen model is kept as-is instead of looking like the default', () => {
+  const notLoaded = { models: [], defaultModel: '', loaded: false };
+  assert.equal(modelSelection(notLoaded, 'codex/gpt-6.1-terra').status, 'unverified');
+  assert.equal(modelTriggerLabel(notLoaded, 'codex/gpt-6.1-terra'), 'codex/gpt-6.1-terra');
+});
+
+test('model catalog from a previous connection is discarded and reset empties it', async () => {
+  saveConn('http://old.local:8788', 'old');
+  let release;
+  globalThis.fetch = () => new Promise((resolve) => { release = () => resolve(Response.json({ models: [{ id: 'old-model' }] })); });
+  const pending = fetchModels();
+  saveConn('http://new.local:8788', 'new');
+  resetModelCache();
+  release();
+  await assert.rejects(pending, { code: 'connection_changed' });
+  assert.equal(connection.modelCache.loaded, false);
+  assert.equal(connection.modelCache.models.length, 0);
+});
+
+test('each session remembers its own model choice; empty means follow the default', () => {
+  setSessionModel('s1', 'codex/gpt-6.1-terra');
+  setSessionModel('s2', 'opus');
+  assert.equal(getSessionModel('s1'), 'codex/gpt-6.1-terra');
+  assert.equal(getSessionModel('s2'), 'opus');
+  setSessionModel('s1', '');
+  assert.equal(getSessionModel('s1'), '');
+  assert.equal(getSessionModel('never-set'), '');
+});
+
+test('default copy identifies user settings without promising the effective project model', () => {
+  const catalog = { models: [{ id: 'provider/user-A', alias: 'sonnet' }], defaultModel: 'sonnet', loaded: true };
+  assert.equal(modelTriggerLabel(catalog, ''), '跟随项目默认');
+  assert.equal(defaultModelDescription(catalog), '用户配置默认：provider/user-A；实际运行遵循当前项目配置');
+  assert.equal(defaultModelDescription(null), '实际运行遵循当前项目配置');
 });

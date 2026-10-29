@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ScrollView, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { KeyboardStickyView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, sessionCache } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
 import { truncate } from '../lib/format.js';
+import { haptics } from '../lib/haptics.js';
+import { ToolInputView } from './ToolInputView.js';
 import { useTheme } from '../theme.js';
 
 // 移植 web/ui/components/approval.js：
@@ -13,6 +15,9 @@ import { useTheme } from '../theme.js';
 // - 只渲染 items[0]，多余显示「还有 N 个待处理」
 // - decide 乐观更新（点击立即打戳；HTTP 后台 POST /decision）；409/404 仅 toast 不回滚；其它失败回滚 + toast
 // - 键盘弹出时 KeyboardStickyView 把整层托起，骑在键盘上方
+// - 补拉：挂载时与每次 WS 连上（含回前台重连）GET /api/interactions/pending，
+//   手机在后台 / 断线期间产生的审批不会丢；服务端已不存在的未决卡片（别处处理或超时）静默移除
+// - 'approval-focus'（推送深链）把指定审批顶到最前；本地没有就先补拉，仍没有则提示已处理
 // 渲染顺序（App 根保证）：Approval -> PairConfirm -> Toast，本层 zIndex 50（低于 PairConfirm 100、高于 sheet）。
 
 const RESOLVED_LABEL = { allowed: '已允许', denied: '已拒绝', answered: '已作答', expired: '已超时' };
@@ -45,11 +50,9 @@ function Countdown({ expiresAt, stop }) {
   );
 }
 
-// 输入 JSON 折叠块：折叠 = 摘要（截 80 等宽）；展开 = pretty JSON 等宽横向滚动。
-function InputBlock({ value }) {
-  const { colors, fonts, radius } = useTheme();
-  const [open, setOpen] = useState(false);
-  const summary = truncate(JSON.stringify(value ?? {}), 80);
+// 工具参数：Edit/Write 直接展开红绿 diff，Bash 显示命令；很长时卡片内滚动，「原始参数」可看 JSON。
+function InputBlock({ toolName, value }) {
+  const { colors, radius } = useTheme();
   return (
     <View
       style={{
@@ -57,35 +60,11 @@ function InputBlock({ value }) {
         borderWidth: 1,
         borderColor: colors.line,
         borderRadius: radius.xs,
-        overflow: 'hidden',
+        padding: 9,
         backgroundColor: colors.bg,
       }}
     >
-      <TouchableOpacity
-        onPress={() => setOpen((o) => !o)}
-        style={{ flexDirection: 'row', alignItems: 'center', padding: 9, gap: 6 }}
-      >
-        <Text style={{ fontSize: 12, color: colors.ink2 }}>⚒</Text>
-        <Text
-          numberOfLines={1}
-          style={{ flex: 1, fontFamily: fonts.mono, fontSize: 12, color: colors.ink2 }}
-        >
-          {summary}
-        </Text>
-        <Text style={{ color: colors.ink3, fontSize: 12 }}>{open ? '⌃' : '⌄'}</Text>
-      </TouchableOpacity>
-      {open ? (
-        <View style={{ borderTopWidth: 1, borderTopColor: colors.line, padding: 9 }}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            <Text
-              selectable
-              style={{ fontFamily: fonts.mono, fontSize: 12, color: colors.ink, lineHeight: 18 }}
-            >
-              {JSON.stringify(value ?? {}, null, 2)}
-            </Text>
-          </ScrollView>
-        </View>
-      ) : null}
+      <ToolInputView name={toolName} input={value} maxHeight={260} />
     </View>
   );
 }
@@ -104,6 +83,7 @@ function ApprovalCard({ item, onDecide }) {
   const decide = async (body) => {
     const status = body.type === 'deny' ? 'denied' : (body.type === 'answer' ? 'answered' : 'allowed');
     setBusy(true);
+    haptics.confirm();
     onDecide(it.interactionId, 'resolve', status);
     try {
       const data = await api(
@@ -116,6 +96,7 @@ function ApprovalCard({ item, onDecide }) {
       else if (e.status === 404) toast('审批已不存在', 'info');
       else {
         onDecide(it.interactionId, 'rollback');
+        if (e.code !== 'unauthorized') haptics.error();
         if (e.code !== 'unauthorized') toast(`提交失败：${e.code}`, 'error');
       }
     } finally {
@@ -169,7 +150,6 @@ function ApprovalCard({ item, onDecide }) {
         shadowRadius: 17,
         shadowOffset: { width: 0, height: 10 },
         elevation: 6,
-        opacity: item.resolved ? 0.8 : 1,
         position: 'relative',
         overflow: 'hidden',
       }}
@@ -230,7 +210,7 @@ function ApprovalCard({ item, onDecide }) {
 
       {it.kind === 'approval' ? (
         <>
-          <InputBlock value={it.input} />
+          <InputBlock toolName={it.toolName} value={it.input} />
           <TextInput
             value={denyMsg}
             onChangeText={setDenyMsg}
@@ -402,6 +382,20 @@ export function ApprovalLayer() {
   const insets = useSafeAreaInsets();
   const [items, setItems] = useState([]);
   const removalTimers = useRef(new Map());
+  const attentionIds = useRef(new Map());
+  const notifyApprovals = useCallback((interactions) => {
+    const now = Date.now();
+    for (const [id, expiresAt] of attentionIds.current) {
+      if (expiresAt <= now) attentionIds.current.delete(id);
+    }
+    let fresh = false;
+    for (const interaction of interactions) {
+      if (interaction.expiresAt <= now || attentionIds.current.has(interaction.interactionId)) continue;
+      attentionIds.current.set(interaction.interactionId, (interaction.expiresAt || now + 600000) + 60000);
+      fresh = true;
+    }
+    if (fresh) haptics.attention();
+  }, []);
 
   const scheduleRemoval = useCallback((id) => {
     if (removalTimers.current.has(id)) return; // 幂等：本地与 WS 双触发不重置计时
@@ -417,13 +411,52 @@ export function ApprovalLayer() {
     if (t) { clearTimeout(t); removalTimers.current.delete(id); }
   }, []);
 
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const has = (id) => itemsRef.current.some((x) => x.interaction.interactionId === id);
+
   useBus('ws:approval', ({ interaction }) => {
+    notifyApprovals([interaction]);
     setItems((xs) => (
       xs.some((x) => x.interaction.interactionId === interaction.interactionId)
         ? xs
         : [...xs, { interaction }]
     ));
   }, []);
+
+  // 与服务端对账：补上漏掉的，去掉已不存在的未决项。返回服务端待审批 id 集合（失败返回 null）。
+  const syncPending = useCallback(async () => {
+    let data;
+    try {
+      data = await api('/api/interactions/pending');
+    } catch {
+      return null; // 断线 / 旧 daemon 无此端点：保持现状，等下次 ws-open
+    }
+    const list = (data?.interactions || []).slice().sort((a, b) => a.expiresAt - b.expiresAt);
+    const ids = new Set(list.map((c) => c.interactionId));
+    notifyApprovals(list);
+    setItems((xs) => {
+      const kept = xs.filter((x) => x.resolved || ids.has(x.interaction.interactionId));
+      const known = new Set(kept.map((x) => x.interaction.interactionId));
+      const fresh = list.filter((c) => !known.has(c.interactionId)).map((interaction) => ({ interaction }));
+      return fresh.length === 0 && kept.length === xs.length ? xs : [...kept, ...fresh];
+    });
+    return ids;
+  }, [notifyApprovals]);
+  useEffect(() => { syncPending(); }, [syncPending]);
+  useBus('ws-open', () => { syncPending(); }, [syncPending]);
+
+  const moveToFront = (id) => setItems((xs) => {
+    const i = xs.findIndex((x) => x.interaction.interactionId === id);
+    return i <= 0 ? xs : [xs[i], ...xs.slice(0, i), ...xs.slice(i + 1)];
+  });
+  useBus('approval-focus', ({ interactionId }) => {
+    if (has(interactionId)) { moveToFront(interactionId); return; }
+    syncPending().then((ids) => {
+      if (ids?.has(interactionId)) moveToFront(interactionId);
+      else if (ids) toast('这条审批已处理或已超时', 'info');
+    });
+  }, [syncPending]);
   useBus('ws:approval.resolved', ({ interactionId, status }) => {
     setItems((xs) => xs.map((x) => (
       x.interaction.interactionId === interactionId ? { ...x, resolved: status } : x

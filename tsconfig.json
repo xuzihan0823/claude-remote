@@ -16,5 +16,7 @@
     "tests/**/*.ts",
     "packages/*/src/**/*.ts",
     "packages/*/__tests__/**/*.ts"
-  ]
+  ],
+  "//": "cli 的 npm 入口会引入 .tsx，由 packages/cli/tsconfig.json（jsx）检查",
+  "exclude": ["packages/cli/src/bin.ts"]
 }

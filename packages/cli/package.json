@@ -1,0 +1,35 @@
+{
+  "name": "@claude-remote/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "cr：终端里的 Claude Remote 控制台（替代 macOS 菜单栏 App）",
+  "bin": {
+    "cr": "./bin/cr.mjs"
+  },
+  "scripts": {
+    "test": "tsx --test __tests__/*.test.ts __tests__/*.test.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@claude-remote/daemon": "workspace:*",
+    "@claude-remote/relay": "workspace:*",
+    "ink": "^8.0.0",
+    "ink-text-input": "^6.0.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.3.1",
+    "tsx": "^4.20.6",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.2.0",
+    "@types/ws": "^8.18.0",
+    "ink-testing-library": "^4.0.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}

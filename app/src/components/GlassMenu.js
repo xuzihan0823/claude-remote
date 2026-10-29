@@ -1,23 +1,116 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Modal, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import { GlassSurface } from './GlassSurface.js';
+import {
+  AccessibilityInfo,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
+} from 'react-native';
+import Animated, {
+  Easing,
+  Extrapolation,
+   interpolate,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
+import {
+  GlassContainer,
+  GlassView,
+  isGlassEffectAPIAvailable,
+  isLiquidGlassAvailable,
+} from 'expo-glass-effect';
 import { Icon } from './Icon.js';
-import { spring, useTheme } from '../theme.js';
+import { useTheme } from '../theme.js';
 
-const MENU_WIDTH = 248;
+const MENU_WIDTH = 252;
 const GAP = 8;
 const EDGE = 12;
+const OPEN_SPRING = { damping: 24, stiffness: 310, mass: 0.85 };
+const SIZE_SPRING = { damping: 24, stiffness: 340, mass: 0.8 };
+const CLOSE_MS = 270;
+const CLOSE_EASING = Easing.bezier(0.3, 0, 0.15, 1);
+const MERGE_SPACING = 30;
 
-// 液态玻璃下拉菜单：锚定在触发按钮下方，从按钮所在角「弹出」。
-// anchor 为触发元素的 measureInWindow 结果 { x, y, width, height }。
-// 只对玻璃容器做 scale 变换，透明度动画仅作用于玻璃内部的内容层（见 GlassSurface 约束）。
-// 选项的 onPress 在菜单 Modal 完全卸载后再执行，避免与后续 Alert / BottomSheet 抢占呈现层。
-export function GlassMenu({ visible, anchor, items, onClose }) {
-  const { colors } = useTheme();
+function estimateMenuHeight({ items, title, header, large, maxH }) {
+  const padV = (large ? 8 : 6) * 2;
+  const headerH = header ? 44 : title ? 34 : 0;
+  const rowsH = (items || []).reduce((sum, item) => {
+    if (item.type === 'section') return sum + 32;
+    if (large) return sum + 60;
+    return sum + (item.detail || item.sub ? 54 : 48);
+  }, 0);
+  return Math.min(Math.max(padV + headerH + rowsH, 56), maxH);
+}
+
+// 液态玻璃下拉/上拉菜单：
+// - 展开时从触发按钮处的圆球（ballSize × ballSize）向目标方向弹簧伸展，内容随外壳拉开并渐入；
+// - 收起时文字与内描边在前 35% 行程内快速消散，剩余纯液态玻璃迅速收拢为圆球，
+//   并在 GlassContainer（UIGlassContainerEffect）中与触发按钮处的锚点圆球产生水滴拉丝融合，最终缩进按钮圆心。
+export function GlassMenu({
+  visible,
+  anchor,
+  items = [],
+  title,
+  header,
+  children,
+  onClose,
+  placement = 'below',
+  size = 'regular',
+  width: customWidth,
+  testID,
+}) {
+  const { colors, dark } = useTheme();
   const { width: screenW, height: screenH } = useWindowDimensions();
   const [mounted, setMounted] = useState(false);
-  const progress = useRef(new Animated.Value(0)).current;
+  const [reduceTransparency, setReduceTransparency] = useState(false);
+  const [contentRawH, setContentRawH] = useState(0);
+  const progress = useSharedValue(0);
+  const isClosing = useSharedValue(0);
+  const measuredOnce = useRef(false);
   const pending = useRef(null);
+
+  useEffect(() => {
+    let active = true;
+    let changed = false;
+    const sub = AccessibilityInfo.addEventListener('reduceTransparencyChanged', (v) => {
+      changed = true;
+      setReduceTransparency(v);
+    });
+    AccessibilityInfo.isReduceTransparencyEnabled().then((v) => {
+      if (active && !changed) setReduceTransparency(v);
+    }).catch(() => {});
+    return () => { active = false; sub.remove(); };
+  }, []);
+  const glass = Platform.OS === 'ios' && !reduceTransparency
+    && isGlassEffectAPIAvailable() && isLiquidGlassAvailable();
+
+  const resolvedAnchor = anchor || { x: screenW - 64, y: 54, width: 48, height: 48 };
+  const above = placement === 'above';
+  const large = size === 'large';
+  const targetRadius = large ? 32 : 28;
+  const menuW = Math.min(customWidth || MENU_WIDTH, screenW - EDGE * 2);
+
+  const maxH = above
+    ? Math.max(160, resolvedAnchor.y - GAP - EDGE * 4)
+    : Math.max(160, screenH - (resolvedAnchor.y + resolvedAnchor.height + GAP) - EDGE * 3);
+
+  const estH = estimateMenuHeight({ items, title, header, large, maxH });
+  const targetH = useSharedValue(estH);
+
+  useEffect(() => {
+    if (!mounted) {
+      measuredOnce.current = false;
+      setContentRawH(0);
+      targetH.value = estH;
+    }
+  }, [mounted, estH]);
 
   const flush = () => {
     const run = pending.current;
@@ -25,101 +118,412 @@ export function GlassMenu({ visible, anchor, items, onClose }) {
     run?.();
   };
 
+  const finishClose = () => {
+    setMounted(false);
+    setTimeout(flush, Platform.OS === 'ios' ? 320 : 0);
+  };
+
+  const startOpen = () => {
+    isClosing.value = 0;
+    progress.value = withSpring(1, OPEN_SPRING);
+  };
+
   useEffect(() => {
     if (visible) {
-      setMounted(true);
-      progress.stopAnimation();
-      Animated.spring(progress, { toValue: 1, damping: 20, stiffness: 320, mass: 0.9, useNativeDriver: true }).start();
+      if (mounted) startOpen();
+      else {
+        progress.value = 0;
+        isClosing.value = 0;
+        setMounted(true);
+      }
     } else if (mounted) {
-      progress.stopAnimation();
-      Animated.timing(progress, { toValue: 0, duration: 150, easing: Easing.bezier(...spring), useNativeDriver: true })
-        .start(() => {
-          setMounted(false);
-          // iOS 优先由 Modal.onDismiss 触发；其它平台无该回调，兜底定时执行（flush 幂等）
-          setTimeout(flush, Platform.OS === 'ios' ? 400 : 0);
-        });
+      isClosing.value = 1;
+      progress.value = withTiming(0, { duration: CLOSE_MS, easing: CLOSE_EASING }, (finished) => {
+        if (finished) runOnJS(finishClose)();
+      });
     }
   }, [visible]);
 
-  if (!anchor) return null;
-
   const select = (item) => {
+    if (item.disabled) return;
+    if (item.keepOpen) {
+      item.onPress?.();
+      return;
+    }
     pending.current = item.onPress;
     onClose?.();
   };
 
-  const right = Math.max(EDGE, screenW - (anchor.x + anchor.width));
-  const top = anchor.y + anchor.height + GAP;
-  const width = Math.min(MENU_WIDTH, screenW - EDGE * 2);
+  const alignRight = resolvedAnchor.x + resolvedAnchor.width / 2 >= screenW / 2;
+  const menuLeft = alignRight
+    ? Math.max(EDGE, Math.min(screenW - EDGE - menuW, resolvedAnchor.x + resolvedAnchor.width - menuW))
+    : Math.max(EDGE, Math.min(screenW - EDGE - menuW, resolvedAnchor.x));
 
-  const scale = progress.interpolate({ inputRange: [0, 1], outputRange: [0.35, 1] });
-  const translateY = progress.interpolate({ inputRange: [0, 1], outputRange: [-6, 0] });
-  const contentOpacity = progress.interpolate({ inputRange: [0, 0.55, 1], outputRange: [0, 0.6, 1], extrapolate: 'clamp' });
+  const ballSize = Math.min(Math.max(Math.min(resolvedAnchor.width, resolvedAnchor.height), 40), 48);
+  const ballCx = alignRight
+    ? resolvedAnchor.x + resolvedAnchor.width - ballSize / 2
+    : resolvedAnchor.x + ballSize / 2;
+  const ballCy = resolvedAnchor.y + resolvedAnchor.height / 2;
+  const ballLeft = ballCx - ballSize / 2;
+  const ballTop = ballCy - ballSize / 2;
+
+  const anchorTopEdge = resolvedAnchor.y + resolvedAnchor.height + GAP;
+  const anchorBottomEdge = resolvedAnchor.y - GAP;
+
+  const onContentLayout = (e) => {
+    const raw = Math.ceil(e.nativeEvent.layout.height);
+    if (raw <= 0) return;
+    setContentRawH(raw);
+    const clamped = Math.min(raw, maxH);
+    if (!measuredOnce.current) {
+      measuredOnce.current = true;
+      targetH.value = clamped;
+    } else if (Math.abs(targetH.value - clamped) > 1) {
+      targetH.value = withSpring(clamped, SIZE_SPRING);
+    }
+  };
+
+  // 锚点水滴球：在展开前段与收起中后段固定在触发按钮圆心，与菜单玻璃球在 GlassContainer 中融合成 45° 水滴尖嘴
+  const orbStyle = useAnimatedStyle(() => {
+    const p = Math.max(0, Math.min(1, progress.value));
+    const closing = isClosing.value === 1;
+    const menuH = targetH.value;
+    const fullTop = above ? anchorBottomEdge - menuH : anchorTopEdge;
+    const cornerLeft = alignRight ? menuLeft + menuW - ballSize : menuLeft;
+    const cornerTop = above ? fullTop + menuH - ballSize : fullTop;
+
+    const tuck = closing
+      ? interpolate(p, [0.76, 1], [0, 1], Extrapolation.CLAMP)
+      : interpolate(p, [0.42, 0.88], [0, 1], Extrapolation.CLAMP);
+
+    const left = ballLeft + (cornerLeft - ballLeft) * tuck;
+    const top = ballTop + (cornerTop - ballTop) * tuck;
+    const fadeOut = closing ? interpolate(p, [0, 0.14], [0, 1], Extrapolation.CLAMP) : 1;
+    const hideWhenOpen = interpolate(p, [0.92, 1], [1, 0], Extrapolation.CLAMP);
+
+    return {
+      position: 'absolute',
+      left,
+      top,
+      width: ballSize,
+      height: ballSize,
+      borderRadius: ballSize / 2,
+      opacity: fadeOut * hideWhenOpen,
+    };
+  });
+
+  const shellFrame = (rawP, closing, menuH) => {
+    'worklet';
+    const p = Math.max(0, Math.min(1, rawP));
+    const pW = closing ? Math.pow(p, 1.48) : rawP;
+    const pH = closing ? Math.pow(p, 1.72) : rawP;
+    const pPosY = closing ? Math.pow(p, 0.85) : rawP;
+    const pPosX = closing ? Math.pow(p, 0.9) : rawP;
+
+    const width = Math.max(ballSize * 0.85, ballSize + (menuW - ballSize) * pW);
+    const height = Math.max(ballSize * 0.85, ballSize + (menuH - ballSize) * pH);
+
+    const diagShiftX = closing ? Math.sin(p * Math.PI) * (alignRight ? -9 : 9) : 0;
+    const left = (alignRight
+      ? (ballLeft + ballSize) + ((menuLeft + menuW) - (ballLeft + ballSize)) * pPosX - width
+      : ballLeft + (menuLeft - ballLeft) * pPosX) + diagShiftX;
+
+    const fullTop = above ? anchorBottomEdge - menuH : anchorTopEdge;
+    const top = above
+      ? (ballTop + ballSize) + (anchorBottomEdge - (ballTop + ballSize)) * pPosY - height
+      : ballTop + (fullTop - ballTop) * pPosY;
+
+    return {
+      p,
+      left,
+      top,
+      width,
+      height,
+      borderRadius: Math.min(width / 2, height / 2, targetRadius),
+    };
+  };
+
+  // 菜单外壳：收起时宽高快速球化，沿 45° 对角线与按钮锚点球拉出水滴轮廓后缩进按钮圆心
+  const shellStyle = useAnimatedStyle(() => {
+    const closing = isClosing.value === 1;
+    const { p, left, top, width, height, borderRadius } = shellFrame(progress.value, closing, targetH.value);
+    const shellOpacity = closing
+      ? interpolate(p, [0, 0.14], [0, 1], Extrapolation.CLAMP)
+      : 1;
+
+    return {
+      position: 'absolute',
+      left,
+      top,
+      width,
+      height,
+      borderRadius,
+      borderCurve: 'continuous',
+      backgroundColor: glass ? 'transparent' : colors.card,
+      shadowColor: dark ? '#000000' : '#241E17',
+      shadowOffset: { width: 0, height: 8 },
+      shadowOpacity: (dark ? 0.34 : 0.1) * interpolate(p, [0.2, 1], [0, 1], Extrapolation.CLAMP),
+      shadowRadius: 20,
+      opacity: shellOpacity,
+    };
+  });
+
+  // 与外壳同步的交互层，叠在玻璃层之上承载描边与内容
+  const frameStyle = useAnimatedStyle(() => {
+    const { left, top, width, height, borderRadius } = shellFrame(progress.value, isClosing.value === 1, targetH.value);
+    return {
+      position: 'absolute',
+      left,
+      top,
+      width,
+      height,
+      borderRadius,
+      borderCurve: 'continuous',
+      overflow: 'hidden',
+    };
+  });
+
+  // 内容与内描边：收起前 35%（p: 1 -> 0.65）内朝锚点角聚拢并完全淡出，确保水滴阶段为纯净液态玻璃
+  const contentAnimStyle = useAnimatedStyle(() => {
+    const p = Math.max(0, Math.min(1, progress.value));
+    const closing = isClosing.value === 1;
+    const opacity = closing
+      ? interpolate(p, [0.64, 1], [0, 1], Extrapolation.CLAMP)
+      : interpolate(p, [0.22, 0.86], [0, 1], Extrapolation.CLAMP);
+    const shiftY = (1 - p) * (above ? 8 : -8);
+    const scale = closing
+      ? interpolate(p, [0.55, 1], [0.84, 1], Extrapolation.CLAMP)
+      : interpolate(p, [0, 1], [0.92, 1], Extrapolation.CLAMP);
+    return {
+      opacity,
+      transform: [
+        { translateY: shiftY },
+        { scale },
+      ],
+    };
+  });
+  const borderStyle = useAnimatedStyle(() => {
+    const p = Math.max(0, Math.min(1, progress.value));
+    const closing = isClosing.value === 1;
+    return {
+      opacity: closing
+        ? interpolate(p, [0.72, 1], [0, 1], Extrapolation.CLAMP)
+        : interpolate(p, [0.45, 1], [0, 1], Extrapolation.CLAMP),
+    };
+  });
+
+  const scrollable = contentRawH > maxH + 2;
+  const ContentContainer = scrollable ? ScrollView : View;
+  const containerProps = scrollable
+    ? { style: { maxHeight: maxH }, showsVerticalScrollIndicator: false, bounces: false }
+    : null;
+
+  const contentAnchorStyle = {
+    width: menuW,
+    position: 'absolute',
+    [alignRight ? 'right' : 'left']: 0,
+    [above ? 'bottom' : 'top']: 0,
+    transformOrigin: `${above ? 'bottom' : 'top'} ${alignRight ? 'right' : 'left'}`,
+  };
+
+  const renderRows = () => (
+    <View style={{ paddingVertical: large ? 8 : 6 }} testID={testID}>
+      {header ? header : title ? (
+        <View style={{ paddingHorizontal: 16, paddingTop: 6, paddingBottom: 8 }}>
+          <Text accessibilityRole="header" numberOfLines={1} style={{ color: colors.ink2, fontSize: 13, fontWeight: '500' }}>
+            {title}
+          </Text>
+        </View>
+      ) : null}
+      {header || title ? (
+        <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: colors.glassBorder, marginHorizontal: 14, marginBottom: 2 }} />
+      ) : null}
+      {children}
+      {items.map((item, i) => {
+        if (item.type === 'section') {
+          return (
+            <View
+              key={item.key}
+              accessible
+              accessibilityRole="header"
+              style={{ flexDirection: 'row', alignItems: 'center', paddingTop: i > 0 ? 10 : 6, paddingBottom: 4, paddingHorizontal: 16 }}
+            >
+              <Text numberOfLines={1} style={{ flex: 1, color: colors.ink2, fontSize: 12.5, fontWeight: '600' }}>
+                {item.label}
+              </Text>
+              {item.count != null ? (
+                <Text style={{ color: colors.ink3, fontSize: 12, marginRight: 24, fontVariant: ['tabular-nums'] }}>
+                  {item.count}
+                </Text>
+              ) : null}
+            </View>
+          );
+        }
+        const subText = item.detail ?? item.sub;
+        const hasIcon = !!item.icon;
+        const showCheck = item.selected !== undefined;
+        const prevItem = i > 0 ? items[i - 1] : null;
+        const showSep = i > 0 && !large && prevItem?.type !== 'section';
+        return (
+          <Fragment key={item.key}>
+            {showSep ? (
+              <View
+                style={{
+                  height: StyleSheet.hairlineWidth,
+                  backgroundColor: colors.glassBorder,
+                  marginLeft: hasIcon ? 52 : (item.indent ? 28 : 16),
+                  marginRight: 16,
+                }}
+              />
+            ) : null}
+            <Pressable
+              onPress={() => select(item)}
+              disabled={item.disabled}
+              testID={item.testID}
+              accessibilityRole={item.accessibilityRole || 'menuitem'}
+              accessibilityState={item.selected !== undefined ? { selected: !!item.selected, disabled: !!item.disabled } : (item.disabled ? { disabled: true } : undefined)}
+              accessibilityLabel={item.accessibilityLabel || [item.label, item.badge, item.count != null ? `${item.count} 个对话` : '', subText].filter(Boolean).join('，')}
+              style={({ pressed }) => ({
+                minHeight: large ? 60 : 48,
+                marginHorizontal: large ? 8 : 6,
+                paddingLeft: large ? 8 : (item.indent ? 24 : 10),
+                paddingRight: large ? 8 : 10,
+                paddingVertical: large ? 6 : 8,
+                borderRadius: large ? 24 : 16,
+                borderCurve: 'continuous',
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: large ? 14 : 12,
+                backgroundColor: pressed ? colors.glassPressed : 'transparent',
+                opacity: item.disabled ? 0.45 : 1,
+              })}
+            >
+              {hasIcon ? (
+                <View
+                  style={large
+                    ? { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.controlFill }
+                    : { width: 24, alignItems: 'center' }}
+                >
+                  <Icon name={item.icon} size={large ? 21 : 19} color={item.tone === 'danger' ? colors.danger : colors.ink} />
+                </View>
+              ) : null}
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text
+                    numberOfLines={1}
+                    style={{
+                      flexShrink: 1,
+                      color: item.tone === 'danger' ? colors.danger : colors.inkStrong,
+                      fontSize: large ? 17 : 15.5,
+                      fontWeight: large ? '400' : '500',
+                    }}
+                  >
+                    {item.label}
+                  </Text>
+                  {item.badge ? (
+                    <Text style={{ color: colors.ink3, fontSize: 11.5 }}>{item.badge}</Text>
+                  ) : null}
+                </View>
+                {subText ? (
+                  <Text
+                    numberOfLines={1}
+                    ellipsizeMode="middle"
+                    style={{
+                      color: item.detailTone === 'danger' ? colors.danger : colors.ink2,
+                      fontSize: 12.5,
+                      marginTop: 2,
+                    }}
+                  >
+                    {subText}
+                  </Text>
+                ) : null}
+              </View>
+              {item.count != null ? (
+                <Text style={{ color: colors.ink3, fontSize: 12.5, fontVariant: ['tabular-nums'] }}>
+                  {item.count}
+                </Text>
+              ) : null}
+              {showCheck ? (
+                <View style={{ width: 20, alignItems: 'center', justifyContent: 'center' }}>
+                  {item.selected ? <Icon name="check" size={17} strokeWidth={2.2} color={colors.accent} /> : null}
+                </View>
+              ) : null}
+              {item.chevron ? <Icon name="chevronRight" size={16} color={colors.ink3} /> : null}
+            </Pressable>
+          </Fragment>
+        );
+      })}
+    </View>
+  );
+
+  // GlassContainer 内部的 UIVisualEffectView 会吞掉所有触摸（box-none 拦不住原生子视图），
+  // 所以玻璃层整体 pointerEvents="none"，可点的内容放在其上方独立的一层。
+  const Wrapper = glass ? GlassContainer : View;
+  const wrapperProps = glass
+    ? { spacing: MERGE_SPACING, style: StyleSheet.absoluteFill, pointerEvents: 'none' }
+    : { style: StyleSheet.absoluteFill, pointerEvents: 'none' };
 
   return (
-    <Modal transparent visible={mounted} animationType="none" statusBarTranslucent onRequestClose={onClose} onDismiss={flush}>
+    <Modal
+      transparent
+      visible={mounted}
+      animationType="none"
+      statusBarTranslucent
+      onRequestClose={onClose}
+      onShow={() => visible && startOpen()}
+      onDismiss={flush}
+    >
       <Pressable
         style={StyleSheet.absoluteFill}
         onPress={onClose}
         accessibilityRole="button"
         accessibilityLabel="关闭菜单"
       />
-      <Animated.View
-        accessibilityViewIsModal
-        style={{
-          position: 'absolute',
-          top,
-          right,
-          width,
-          maxHeight: screenH - top - EDGE * 3,
-          transformOrigin: 'top right',
-          transform: [{ translateY }, { scale }],
-        }}
-      >
-        <GlassSurface style={{ borderRadius: 24 }}>
-          <Animated.View accessibilityRole="menu" style={{ opacity: contentOpacity, paddingVertical: 6 }}>
-            {items.map((item, i) => (
-              <Fragment key={item.key}>
-                {i > 0 ? (
-                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: colors.glassBorder, marginLeft: 52, marginRight: 16 }} />
-                ) : null}
-                <Pressable
-                  onPress={() => select(item)}
-                  testID={item.testID}
-                  accessibilityRole="menuitem"
-                  accessibilityLabel={item.detail ? `${item.label}，${item.detail}` : item.label}
-                  style={({ pressed }) => ({
-                    minHeight: 48,
-                    marginHorizontal: 6,
-                    paddingHorizontal: 10,
-                    paddingVertical: 8,
-                    borderRadius: 16,
-                    borderCurve: 'continuous',
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    gap: 12,
-                    backgroundColor: pressed ? colors.glassPressed : 'transparent',
-                  })}
-                >
-                  <View style={{ width: 24, alignItems: 'center' }}>
-                    <Icon name={item.icon} size={19} color={item.tone === 'danger' ? colors.danger : colors.ink} />
-                  </View>
-                  <View style={{ flex: 1, minWidth: 0 }}>
-                    <Text numberOfLines={1} style={{ color: item.tone === 'danger' ? colors.danger : colors.inkStrong, fontSize: 15.5, fontWeight: '500' }}>
-                      {item.label}
-                    </Text>
-                    {item.detail ? (
-                      <Text numberOfLines={1} ellipsizeMode="middle" style={{ color: item.detailTone === 'danger' ? colors.danger : colors.ink2, fontSize: 12.5, marginTop: 2 }}>
-                        {item.detail}
-                      </Text>
-                    ) : null}
-                  </View>
-                  {item.chevron ? <Icon name="chevronRight" size={16} color={colors.ink3} /> : null}
-                </Pressable>
-              </Fragment>
-            ))}
-          </Animated.View>
-        </GlassSurface>
+      <Wrapper {...wrapperProps}>
+        <Animated.View style={orbStyle}>
+          {glass ? (
+            <GlassView
+              glassEffectStyle="regular"
+              tintColor={colors.glassTint}
+              colorScheme={dark ? 'dark' : 'light'}
+              style={[StyleSheet.absoluteFill, { borderRadius: ballSize / 2, borderCurve: 'continuous' }]}
+            />
+          ) : null}
+        </Animated.View>
+
+        <Animated.View style={shellStyle}>
+          {glass ? (
+            <GlassView
+              glassEffectStyle="regular"
+              tintColor={colors.glassTint}
+              colorScheme={dark ? 'dark' : 'light'}
+              style={[StyleSheet.absoluteFill, { borderRadius: targetRadius, borderCurve: 'continuous' }]}
+            />
+          ) : null}
+        </Animated.View>
+      </Wrapper>
+
+      <Animated.View accessibilityViewIsModal style={frameStyle}>
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            StyleSheet.absoluteFill,
+            {
+              borderRadius: targetRadius,
+              borderCurve: 'continuous',
+              borderWidth: 1,
+              borderColor: colors.glassBorder,
+            },
+            borderStyle,
+          ]}
+        />
+        <Animated.View style={[contentAnchorStyle, contentAnimStyle]} accessibilityRole="menu">
+          <ContentContainer {...containerProps}>
+            <View onLayout={onContentLayout}>
+              {renderRows()}
+            </View>
+          </ContentContainer>
+        </Animated.View>
       </Animated.View>
     </Modal>
   );

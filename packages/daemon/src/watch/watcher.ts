@@ -71,7 +71,11 @@ export interface WatcherResyncEvent {
   reason: ResyncReason;
 }
 
-/** 文件字节数变化即视为一次写入（ActivityTracker 的外部活动信号）。 */
+/**
+ * 新增了对话行（带 uuid 的 user/assistant/attachment 等）或文件被截断即视为一次写入
+ * （ActivityTracker 的外部活动信号）。last-prompt / cost-state / mode 这类元数据行不算：
+ * CLI 进程收尾时会补写它们，不代表有人在终端里对话。
+ */
 export interface WatcherWriteEvent {
   sessionId: string;
   at: number;
@@ -333,9 +337,10 @@ export class SessionWatcher extends EventEmitter {
       return; // 文件暂时不可见（替换中/被删）：等下一轮；替换完成表现为 size 变化
     }
     if (size === state.offset) return;
-    this.#emitEvent("write", { sessionId: state.sessionId, at: this.#now() });
+    const at = this.#now();
 
     if (size < state.offset) {
+      this.#emitEvent("write", { sessionId: state.sessionId, at });
       // 截断/替换：重扫全文件重建 seq 与链尾，消费方全量重拉
       const init = await scanExisting(state.file);
       state.offset = init.offset;
@@ -348,12 +353,14 @@ export class SessionWatcher extends EventEmitter {
 
     const chunk = await readRange(state.file, state.offset, size);
     state.offset += chunk.length;
-    this.#consume(state, chunk);
+    if (this.#consume(state, chunk)) this.#emitEvent("write", { sessionId: state.sessionId, at });
   }
 
   // -- 字节 → 行 → 消息 -----------------------------------------------------
 
-  #consume(state: SessionState, chunk: Buffer): void {
+  /** 返回本块是否含对话行。 */
+  #consume(state: SessionState, chunk: Buffer): boolean {
+    let conversation = false;
     let data = state.remainder.length > 0 ? Buffer.concat([state.remainder, chunk]) : chunk;
     for (;;) {
       const nl = data.indexOf(0x0a);
@@ -361,28 +368,31 @@ export class SessionWatcher extends EventEmitter {
       const line = data.subarray(0, nl).toString("utf8");
       data = data.subarray(nl + 1);
       state.lineCount += 1;
-      this.#handleLine(state, line, state.lineCount);
+      if (this.#handleLine(state, line, state.lineCount)) conversation = true;
     }
     // subarray 引用底层大 buffer，复制断开引用
     state.remainder = data.length > 0 ? Buffer.from(data) : Buffer.alloc(0);
+    return conversation;
   }
 
-  #handleLine(state: SessionState, line: string, seq: number): void {
+  /** 返回该行是否为对话行（带 uuid）。 */
+  #handleLine(state: SessionState, line: string, seq: number): boolean {
     const info = lineChainInfo(line);
-    if (info === null) return; // 空行/坏行：占 seq，不产出、不动链
-    if (info.sidechain) return; // sidechain 自成链，不校验也不推送
+    if (info === null) return false; // 空行/坏行：占 seq，不产出、不动链
+    if (info.sidechain) return info.uuid !== null; // sidechain 自成链，不校验也不推送
     if (info.uuid !== null) {
       if (state.lastUuid !== null && info.parentUuid !== state.lastUuid) {
         // 外部 rewind/fork 到历史节点：本地行号仍有效，但消费方的链视图已失效
         state.lastUuid = info.uuid;
         this.#emitEvent("resync", { sessionId: state.sessionId, reason: "chain-mismatch" });
-        return;
+        return true;
       }
       state.lastUuid = info.uuid;
     }
     for (const message of parseTranscriptLine(line, seq)) {
       this.#emitEvent("message", { sessionId: state.sessionId, message });
     }
+    return info.uuid !== null;
   }
 }
 
