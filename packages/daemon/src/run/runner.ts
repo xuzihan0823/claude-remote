@@ -16,6 +16,7 @@ import {
   type PermissionBroker,
   type QueryFactory,
   type SdkQueryHandle,
+  type EffortLevel,
   type WorkerEvent,
 } from "@claude-remote/agent-bridge";
 
@@ -45,6 +46,7 @@ export interface StartTurnOptions {
   text: string;
   /** Per-turn override. Omit to follow the Mac-side CLI/settings default. */
   model?: string;
+  effort?: EffortLevel;
   /** Start a new persisted SDK session with sessionId instead of resuming it. */
   newSession?: boolean;
   /** 权限模式覆盖；省略时由 SDK 走 "default"。 */
@@ -137,7 +139,7 @@ export class TurnRunner {
   }
 
   startTurn(options: StartTurnOptions): TurnHandle {
-    const { sessionId, cwd, text, model, newSession = false, permissionMode } = options;
+    const { sessionId, cwd, text, model, effort, newSession = false, permissionMode } = options;
     if (typeof text !== "string" || text.trim() === "") {
       throw new TypeError("text must be a non-empty string");
     }
@@ -168,6 +170,7 @@ export class TurnRunner {
           signal: controller.signal,
           ...(newSession ? { sessionId } : { resume: sessionId }),
           ...(model === undefined ? {} : { model }),
+          ...(effort === undefined ? {} : { effort }),
           ...(permissionMode === undefined ? {} : { permissionMode }),
         },
         this.#queryFactory,
