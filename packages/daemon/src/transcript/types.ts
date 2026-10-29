@@ -33,6 +33,7 @@ export interface RenderMessage {
   blockIndex: number;
   uuid: string;
   parentUuid: string | null;
+  apiMessageId?: string;
   role: RenderRole;
   kind: RenderKind;
   /** text / thinking / tool_result / meta 的文本。 */

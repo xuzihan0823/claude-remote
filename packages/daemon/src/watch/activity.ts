@@ -112,15 +112,23 @@ export class ActivityTracker extends EventEmitter {
     this.#setStatus(sessionId, state, "terminal-driving");
   }
 
+  /** 当前处于 terminal-driving 的会话。 */
+  terminalSessions(): string[] {
+    const ids: string[] = [];
+    for (const [id, state] of this.#sessions) if (state.status === "terminal-driving") ids.push(id);
+    return ids;
+  }
+
   /**
-   * 手动解除 terminal-driving（手机端「解除占用」）：仅在无 daemon run 时生效，
+   * 解除 terminal-driving（手机端「解除占用」/ 检测到终端进程退出）：仅在无 daemon run 时生效，
    * 立刻回 idle；终端若仍在写入，下一次写入会重新判定为 terminal-driving。
-   * 返回是否真的改变了状态。
+   * graceMs 内的写入不算外部信号（终端退出时的收尾写入）。返回是否真的改变了状态。
    */
-  release(sessionId: string): boolean {
+  release(sessionId: string, graceMs = 0): boolean {
     const state = this.#sessions.get(sessionId);
     if (state === undefined || state.running || state.status !== "terminal-driving") return false;
     state.lastWriteAt = null;
+    if (graceMs > 0) this.#graceUntil.set(sessionId, this.#now() + graceMs);
     this.#clearTimer(state);
     this.#setStatus(sessionId, state, "idle");
     this.#gc(sessionId, state);
