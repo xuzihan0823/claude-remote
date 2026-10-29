@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, appendFile, readFile, writeFile, rm, utimes } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test, after } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocket } from "ws";
@@ -330,6 +330,29 @@ test("POST upload：落盘到 uploadsDir/sessionId、文件名消毒；空体 40
     method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: "x",
   }));
   assert.equal(missing.status, 404);
+});
+
+test("GET /api/uploads：回读已上传图片；穿越、非图片、缺失一律 404；需鉴权", async () => {
+  const up = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/upload?filename=pic.png`, authed({
+    method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: "fake png",
+  }));
+  const { path } = (await up.json()) as { path: string };
+  const name = encodeURIComponent(basename(path));
+  const ok = await fetch(`${harness.base}/api/uploads/${SESSION_ID}/${name}`, authed());
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get("content-type"), "image/png");
+  assert.equal(await ok.text(), "fake png");
+
+  const noAuth = await fetch(`${harness.base}/api/uploads/${SESSION_ID}/${name}`);
+  assert.equal(noAuth.status, 401);
+  for (const bad of [`..%2F${SESSION_ID}/${name}`, `${SESSION_ID}/..%2F..%2Fsecret.png`, `..%2F..%2F/x.png`, `${SESSION_ID}/missing.png`]) {
+    assert.equal((await fetch(`${harness.base}/api/uploads/${bad}`, authed())).status, 404, bad);
+  }
+  const txt = await fetch(`${harness.base}/api/sessions/${SESSION_ID}/upload?filename=a.txt`, authed({
+    method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: "secret",
+  }));
+  const txtName = encodeURIComponent(basename(((await txt.json()) as { path: string }).path));
+  assert.equal((await fetch(`${harness.base}/api/uploads/${SESSION_ID}/${txtName}`, authed())).status, 404);
 });
 
 test("GET /api/sessions：fixture 会话 + 状态覆盖 + 分页 total", async () => {
