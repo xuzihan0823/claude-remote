@@ -44,6 +44,19 @@ test('Bash / TodoWrite / 其它工具', () => {
   assert.deepEqual(toolView('Bash', { command: 'npm test', description: '跑测试' }), { kind: 'bash', command: 'npm test', description: '跑测试' });
   assert.equal(toolHeadline('Bash', { command: 'ls\npwd' }), '$ ls');
   assert.equal(toolHeadline('TodoWrite', { todos: [{ content: 'a', status: 'completed' }, { content: 'b', status: 'pending' }] }), '1/2 已完成');
+  assert.deepEqual(
+    toolView('AskUserQuestion', {
+      questions: [{ header: '审批检查', question: '页面正常吗？', options: [{ label: '正常' }, { label: '需要微调' }] }],
+    }),
+    {
+      kind: 'questions',
+      questions: [{ header: '审批检查', question: '页面正常吗？', multiSelect: false, options: ['正常', '需要微调'] }],
+    },
+  );
+  assert.equal(
+    toolHeadline('AskUserQuestion', { questions: [{ header: '审批检查', question: '页面正常吗？' }] }),
+    '审批检查 · 页面正常吗？',
+  );
   assert.deepEqual(toolView('Grep', { pattern: 'foo', path: 'src' }), { kind: 'fields', fields: [['路径', 'src'], ['匹配', 'foo']] });
   assert.deepEqual(toolView('Unknown', { x: 1 }), { kind: 'json' });
   assert.deepEqual(toolView('Edit', null), { kind: 'json' });

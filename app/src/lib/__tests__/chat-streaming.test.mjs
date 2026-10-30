@@ -90,6 +90,7 @@ function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: fals
       msgKey: (m) => `${m.seq}:${m.blockIndex || 0}`, cmpMsg: (a, b) => a.seq - b.seq || (a.blockIndex || 0) - (b.blockIndex || 0),
       applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys,
       toast() {}, setSessionMode() {}, PERMISSION_MODES: ['default'],
+      haptics: { success() {} },
       isEcho: () => false, pendingText: (p) => p.text,
       ...dependencies,
     });
@@ -99,6 +100,37 @@ function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: fals
 const user = { seq: 1, role: 'user', kind: 'text', text: '问题' };
 const answer = { seq: 2, blockIndex: 0, apiMessageId: 'msg', role: 'assistant', kind: 'text', text: '好的' };
 const stream = { sessionId: 'session', key: 'msg:0', offset: 0, text: '好的', done: true };
+
+test('actual ChatScreen: replies vibrate once on completion, without feedback for streaming, history, other sessions or stale runs', async () => {
+  const feedback = [];
+  const page = screen(async () => ({ messages: [user, answer], firstSeq: 1, hasMore: false }), {
+    haptics: { success: () => feedback.push('success') },
+  });
+  page.effects();
+  await new Promise(setImmediate);
+  await page.emit('ws-open');
+  page.emit('ws:run', { sessionId: 'other', state: 'done', runId: 'other' });
+  page.emit('ws:run', { sessionId: 'session', state: 'started', runId: 'A' });
+  page.emit('ws:stream', stream);
+  page.emit('ws:message', { sessionId: 'session', message: answer });
+  await new Promise(setImmediate);
+  assert.deepEqual(feedback, []);
+  page.emit('ws:run', { sessionId: 'session', state: 'done', runId: 'A' });
+  page.render();
+  page.emit('ws:run', { sessionId: 'session', state: 'done', runId: 'A' });
+  assert.deepEqual(feedback, ['success']);
+  page.emit('ws:run', { sessionId: 'session', state: 'started', runId: 'B' });
+  page.emit('ws:run', { sessionId: 'session', state: 'done', runId: 'old' });
+  page.emit('ws:run', { sessionId: 'session', state: 'error', runId: 'B', error: 'aborted' });
+  page.emit('ws:run', { sessionId: 'session', state: 'started', runId: 'C' });
+  page.emit('ws:run', { sessionId: 'session', state: 'error', runId: 'C', error: 'network_error' });
+  assert.deepEqual(feedback, ['success']);
+  page.emit('ws:run', { sessionId: 'session', state: 'started', runId: 'D' });
+  page.emit('ws:session-state', { sessionId: 'session', status: 'idle', activeRunId: null });
+  page.emit('ws:run', { sessionId: 'session', state: 'done', runId: 'D' });
+  assert.deepEqual(feedback, ['success', 'success'], 'idle snapshot may arrive before completion');
+  page.unmount();
+});
 
 test('actual ChatScreen: HTTP reconnect, duplicate fetch and late stream snapshot reconcile', async () => {
   const page = screen(async () => ({ messages: [user, answer], firstSeq: 1, hasMore: false }));
@@ -154,7 +186,7 @@ function composer(api, callbacks = {}, deps = {}) {
       getSessionEffort, setSessionEffort, effortLabel, effortUsable,
       api,
       uploadAttachments: async (files) => files, withAttachmentNote: (text) => text || '附件',
-      haptics: { stop() {}, tap() {}, selection() {}, success() {}, error() {} }, toast() {},
+      haptics: { stop() {}, confirm() {}, tap() {}, selection() {}, success() {}, error() {} }, toast() {},
       ...deps,
     });
   // Preserve the actual destructuring header when executing this component body.
@@ -399,7 +431,7 @@ test('actual NewChatComposer: sends effort on creation and stores it for the new
       onCreated: (res, body) => createdPayloads.push({ res, body }),
     },
     {
-      haptics: { tap: () => feedback.push('tap'), error: () => feedback.push('error') },
+      haptics: { confirm: () => feedback.push('confirm'), error: () => feedback.push('error') },
       useTheme: () => ({ colors: {}, dark: false }),
       useSafeAreaInsets: () => ({ bottom: 0, left: 0, right: 0 }),
       useModelCatalog: () => ({ models: [{ id: 'opus', alias: 'opus' }], loaded: true }),
@@ -412,7 +444,7 @@ test('actual NewChatComposer: sends effort on creation and stores it for the new
       setSessionModel: () => {},
       setSessionEffort,
       createSession: async (args) => {
-        assert.deepEqual(feedback, ['tap'], 'first-message feedback must precede the creation response');
+        assert.deepEqual(feedback, ['confirm'], 'first-message feedback must precede the creation response');
         return {
           result: { sessionId: 'sess-created-1', runId: 'r1' },
           body: { cwd: args.cwd, text: args.text, ...(args.model ? { model: args.model } : {}), ...(args.effort ? { effort: args.effort } : {}) },
@@ -436,13 +468,13 @@ test('actual NewChatComposer: sends effort on creation and stores it for the new
   assert.equal(createdPayloads[0].body.model, 'opus');
   assert.equal(getSessionEffort('sess-created-1'), 'max');
   assert.equal(newChat.render().effort, '', 'draft effort resets after creation');
-  assert.deepEqual(feedback, ['tap'], 'creation success must not play a second effect');
+  assert.deepEqual(feedback, ['confirm'], 'creation success must not play a second effect');
 
   newChat.render().setEffort('medium');
   newChat.render().setDraft('第二个任务');
   await newChat.render().create();
   assert.equal(createdPayloads.length, 1, 'effort the gateway does not list must block creation');
-  assert.deepEqual(feedback, ['tap'], 'blocked creation must not play send feedback');
+  assert.deepEqual(feedback, ['confirm'], 'blocked creation must not play send feedback');
 });
 
 test('actual ChatComposer: send feedback is immediate, success is quiet, and only actionable failures vibrate', async () => {
@@ -454,17 +486,17 @@ test('actual ChatComposer: send feedback is immediate, success is quiet, and onl
       return { runId: 'A' };
     }, {}, {
       haptics: {
-        tap: () => feedback.push('tap'), success: () => feedback.push('success'), error: () => feedback.push('error'),
+        confirm: () => feedback.push('confirm'), success: () => feedback.push('success'), error: () => feedback.push('error'),
       },
       uploadAttachments: () => new Promise((resolve) => { finishUpload = resolve; }),
     });
     instance.render({ ...initial, status: 'idle', isRunning: false, activeRunId: null });
     instance.render().setDraft('问题');
     const sending = instance.render().doSend();
-    assert.deepEqual(feedback, ['tap'], 'feedback must precede attachment upload and HTTP response');
+    assert.deepEqual(feedback, ['confirm'], 'feedback must precede attachment upload and HTTP response');
     finishUpload([]);
     await sending;
-    assert.deepEqual(feedback, code === 'network_error' ? ['tap', 'error'] : ['tap']);
+    assert.deepEqual(feedback, code === 'network_error' ? ['confirm', 'error'] : ['confirm']);
   }
 });
 

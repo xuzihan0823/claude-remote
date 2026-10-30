@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 const values = new Map();
 globalThis.localStorage = { getItem: (k) => values.get(k) ?? null, setItem: (k, v) => values.set(k, String(v)) };
-const { MAX_UPLOAD_BYTES, normalizeAsset, uploadAttachments, withAttachmentNote, parseAttachmentNote, uploadImageSource, tooLargeMessage } = await import('../attachments.js');
+const { MAX_UPLOAD_BYTES, normalizeAsset, resolveMediaLibraryAsset, toggleSelectedId, uploadAttachments, withAttachmentNote, parseAttachmentNote, uploadImageSource, tooLargeMessage } = await import('../attachments.js');
 const { saveConn } = await import('../../../../web/core/api.js');
 
 test('normalizeAsset：HEIC 原名按实际 JPEG 改扩展名', () => {
@@ -68,4 +68,42 @@ test('uploadAttachments：超限文件在上传前拒绝', async () => {
   await assert.rejects(uploadAttachments([{ uri: 'file:///big', name: 'big.mov', size: MAX_UPLOAD_BYTES + 1 }], '/api/upload'),
     (e) => e.status === 413 && tooLargeMessage(e).includes('big.mov'));
   assert.equal(called, false);
+});
+
+test('resolveMediaLibraryAsset：PNG 保留原文件，HEIC 转成 JPEG 并修正扩展名', async () => {
+  const png = await resolveMediaLibraryAsset(
+    { id: 'ph://1', filename: 'screen.png' },
+    {
+      getFileUri: async () => 'file:///var/mobile/screen.png',
+      convertToJpeg: async () => { throw new Error('should not convert png'); },
+    },
+  );
+  assert.equal(png.uri, 'file:///var/mobile/screen.png');
+  assert.equal(png.name, 'screen.png');
+  assert.equal(png.isImage, true);
+
+  const heic = await resolveMediaLibraryAsset(
+    { id: 'ph://2/L0/001', filename: 'IMG_0099.HEIC' },
+    {
+      getFileUri: async () => 'file:///var/mobile/IMG_0099.HEIC',
+      convertToJpeg: async (src) => {
+        assert.equal(src, 'file:///var/mobile/IMG_0099.HEIC');
+        return 'file:///cache/ImageManipulator/out.jpg';
+      },
+    },
+  );
+  assert.equal(heic.uri, 'file:///cache/ImageManipulator/out.jpg');
+  assert.equal(heic.name, 'IMG_0099.jpg');
+  assert.equal(heic.isImage, true);
+});
+
+test('toggleSelectedId：保持点选顺序、支持取消勾选与数量上限', () => {
+  let state = toggleSelectedId([], 'a', 2);
+  assert.deepEqual(state, { next: ['a'], overLimit: false });
+  state = toggleSelectedId(state.next, 'b', 2);
+  assert.deepEqual(state, { next: ['a', 'b'], overLimit: false });
+  const blocked = toggleSelectedId(state.next, 'c', 2);
+  assert.deepEqual(blocked, { next: ['a', 'b'], overLimit: true });
+  const removed = toggleSelectedId(state.next, 'a', 2);
+  assert.deepEqual(removed, { next: ['b'], overLimit: false });
 });

@@ -19,6 +19,7 @@ import { MarkdownView } from '../components/markdown/MarkdownView.js';
 import { TypingDots } from '../components/TypingDots.js';
 import { ChatComposer } from '../components/composer/ChatComposer.js';
 import { useTheme } from '../theme.js';
+import { haptics } from '../lib/haptics.js';
 
 // 移植 web/ui/screens/chat.js。列表用 inverted FlatList：
 // - 数据倒序（最新在 index 0）。贴底时倒置列表天然「新内容把旧内容往上顶」；
@@ -92,6 +93,8 @@ export function ChatScreen({ route }) {
   const loadGeneration = useRef(0);
   const stateRevision = useRef(0);
   const recoveryGeneration = useRef(0);
+  const completedRuns = useRef(new Set());
+  const liveKeys = useRef(new Set());
   const applyRunState = useCallback((nextStatus, runId = null) => {
     if (nextStatus !== 'daemon-driving' || runId) stateRevision.current += 1;
     activeRunIdRef.current = runId;
@@ -132,7 +135,9 @@ export function ChatScreen({ route }) {
     clearTimeout(clearTimer.current);
     pendingBatch.current = null;
     runFloorSeq.current = 0;
+    completedRuns.current.clear();
     applyRunState(sessionCache.get(sessionId)?.status || null);
+    liveKeys.current.clear();
     store.current = { map: new Map(), sorted: [] };
     setVersion((v) => v + 1);
     updateDrafts([]);
@@ -185,6 +190,7 @@ export function ChatScreen({ route }) {
   useBus('ws:message', (e) => {
     if (e.sessionId !== sessionId) return;
     const m = e.message;
+    liveKeys.current.add(msgKey(m));
     if (m.role === 'user' && m.kind === 'text') lastUserEcho.current = m.text?.trim() ?? null;
     setPending((p) => (p && isEcho(m, pendingText(p)) ? null : p));
     const generation = loadGeneration.current;
@@ -244,6 +250,10 @@ export function ChatScreen({ route }) {
     } else {
       // 上一轮终态可能迟到：只能结束它自己，不能清掉已开始的新一轮
       if (e.runId && activeRunIdRef.current && e.runId !== activeRunIdRef.current) return;
+      if (e.state === 'done' && e.runId && !completedRuns.current.has(e.runId)) {
+        completedRuns.current.add(e.runId);
+        haptics.success();
+      }
       applyRunState('idle');
       setPending(null);
       if (e.state === 'error') toast(`运行出错：${e.error || '未知错误'}`, 'error');
@@ -480,9 +490,13 @@ export function ChatScreen({ route }) {
           inverted
           renderScrollComponent={renderScroll}
           keyExtractor={(m) => msgKey(m)}
-          renderItem={({ item }) => (msgKey(item) === highlightKey
-            ? <View style={{ backgroundColor: colors.glassTintAccent, borderRadius: 12, marginHorizontal: -8, paddingHorizontal: 8 }}><MessageRow m={item} /></View>
-            : <MessageRow m={item} />)}
+          renderItem={({ item }) => {
+            const k = msgKey(item);
+            const row = <MessageRow m={item} live={liveKeys.current.has(k)} />;
+            return k === highlightKey
+              ? <View style={{ backgroundColor: colors.glassTintAccent, borderRadius: 12, marginHorizontal: -8, paddingHorizontal: 8 }}>{row}</View>
+              : row;
+          }}
           extraData={highlightKey}
           onScrollToIndexFailed={onScrollToIndexFailed}
           maintainVisibleContentPosition={readingHistory ? MVCP_READING : undefined}

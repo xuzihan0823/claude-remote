@@ -115,6 +115,51 @@ export function ToolInputView({ name, input, maxHeight }) {
         ))}
       </View>
     );
+  } else if (view.kind === 'questions') {
+    body = (
+      <View style={{ gap: 8 }}>
+        {view.questions.map((q, idx) => (
+          <View key={idx} style={{ gap: 4 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              {q.header ? (
+                <Text
+                  style={{
+                    fontSize: 11,
+                    color: colors.ink2,
+                    backgroundColor: colors.bg2,
+                    borderRadius: 5,
+                    paddingHorizontal: 6,
+                    paddingVertical: 1,
+                  }}
+                >
+                  {q.header}
+                </Text>
+              ) : null}
+              <Text style={{ fontSize: 13, color: colors.inkStrong, fontWeight: '500', flexShrink: 1 }}>
+                {q.question}
+              </Text>
+            </View>
+            {q.options.length > 0 ? (
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 2 }}>
+                {q.options.map((opt) => (
+                  <View
+                    key={opt}
+                    style={{
+                      backgroundColor: colors.bg2,
+                      borderRadius: 6,
+                      paddingHorizontal: 8,
+                      paddingVertical: 3,
+                    }}
+                  >
+                    <Text style={{ fontSize: 12, color: colors.ink2 }}>{opt}</Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+          </View>
+        ))}
+      </View>
+    );
   } else {
     body = (
       <View style={{ gap: 4 }}>
