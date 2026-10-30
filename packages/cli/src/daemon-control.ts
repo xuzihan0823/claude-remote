@@ -195,19 +195,18 @@ export async function waitHealthy(ctx: Context, timeoutMs = 20_000): Promise<boo
   return false;
 }
 
-/** 配置文件里已启用的 relay 的手机地址；未启用或配置非法（daemon 会拒启并报错）时 undefined。 */
-export function configuredRelayBase(envFile: string): string | undefined {
+/** 配置文件里已启用的 relay 地址；非法配置由 daemon 拒启并报错。 */
+export function configuredRelayBases(envFile: string): string[] {
   try {
-    const settings = loadRelaySettings(readDotenv(envFile));
-    return settings === undefined ? undefined : relayBase(settings);
+    return loadRelaySettings(readDotenv(envFile)).map(relayBase);
   } catch {
-    return undefined;
+    return [];
   }
 }
 
 export function pairInfo(ctx: Context): PairInfo | undefined {
   if (ctx.env.token === undefined) return undefined;
-  return { bases: pairBases(ctx.env.port, configuredRelayBase(ctx.env.envFile)), token: ctx.env.token };
+  return { bases: pairBases(ctx.env.port, configuredRelayBases(ctx.env.envFile)), token: ctx.env.token };
 }
 
 /**

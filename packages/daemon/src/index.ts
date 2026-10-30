@@ -88,8 +88,7 @@ async function main(): Promise<void> {
     claudeCliVersion = version;
   });
 
-  // relay：没配置或 RELAY_ENABLED=off 时不创建，daemon 行为与未接入 relay 时一致
-  const connector = config.relay === undefined ? undefined : new RelayConnector({ settings: config.relay });
+  const connectors = config.relays.map((settings) => new RelayConnector({ settings }));
 
   server = new DaemonServer({
     config,
@@ -100,15 +99,14 @@ async function main(): Promise<void> {
     notifier,
     version: pkg.version,
     claudeCliVersion: () => claudeCliVersion,
-    ...(connector === undefined ? {} : { relayStatus: () => connector.status() }),
+    relayStatuses: () => connectors.map((connector) => connector.status()),
   });
 
   await server.listen();
   const { host, port } = server.address();
   console.log(`${pkg.name} ${pkg.version} listening on http://${host}:${port} (projects: ${config.projectsDir})`);
-  if (connector === undefined) {
-    console.log("relay: 未启用");
-  } else {
+  if (connectors.length === 0) console.log("relay: 未启用");
+  for (const connector of connectors) {
     connector.start({ host, port });
     console.log(`relay: 已启用，正在连接（手机地址 ${connector.status().base}）`);
   }
@@ -134,7 +132,7 @@ async function main(): Promise<void> {
     console.log(`${signal} received, shutting down…`);
     void (async () => {
       try {
-        await connector?.stop();
+        await Promise.all(connectors.map((connector) => connector.stop()));
       } catch (error) {
         console.error("relay connector stop failed:", error);
       }

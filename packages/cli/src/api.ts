@@ -69,7 +69,7 @@ export type ServerFrame =
   | { type: "approval"; interaction: ApprovalCard }
   | { type: "approval.resolved"; interactionId: string; status: string };
 
-/** relay connector 状态（daemon /api/connect-info 的 relay 字段）。 */
+/** relay connector 状态（daemon /api/connect-info 的 relays 字段）。 */
 export interface RelayStatus {
   state: "disabled" | "connecting" | "connected" | "error";
   error?: string;
@@ -79,7 +79,7 @@ export interface RelayStatus {
 
 export interface ConnectInfo {
   bases: string[];
-  relay: RelayStatus;
+  relays: RelayStatus[];
 }
 
 export class ApiError extends Error {

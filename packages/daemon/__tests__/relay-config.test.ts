@@ -14,26 +14,25 @@ function env(overrides: Record<string, string | undefined> = {}): NodeJS.Process
 }
 
 test("RELAY_*：四项齐全且未关闭 → 启用；URL 规范化去末尾斜杠", () => {
-  assert.deepEqual(loadRelaySettings(env({ RELAY_URL: "https://relay.example.com:8443/" })), {
+  assert.deepEqual(loadRelaySettings(env({ RELAY_URL: "https://relay.example.com:8443/" })), [{
     url: "https://relay.example.com:8443",
     secret: SECRET,
     deviceId: ID,
     deviceKey: KEY,
-  });
-  assert.equal(loadRelaySettings(env({ RELAY_ENABLED: "on" }))?.deviceId, ID);
-  const settings = loadRelaySettings(env({ RELAY_URL: "https://h.example/prefix//" }));
-  assert.equal(settings === undefined ? undefined : relayBase(settings), `https://h.example/prefix/d/${ID}`);
+  }]);
+  assert.equal(loadRelaySettings(env({ RELAY_ENABLED: "on" }))[0]?.deviceId, ID);
+  const settings = loadRelaySettings(env({ RELAY_URL: "https://h.example/prefix//" }))[0]!;
+  assert.equal(relayBase(settings), `https://h.example/prefix/d/${ID}`);
 });
 
-test("RELAY_*：缺任一必需值或 RELAY_ENABLED=off → 未启用（不抛错）", () => {
-  for (const key of ["RELAY_URL", "RELAY_SECRET", "RELAY_DEVICE_ID", "RELAY_DEVICE_KEY"]) {
-    assert.equal(loadRelaySettings(env({ [key]: undefined })), undefined, key);
-    assert.equal(loadRelaySettings(env({ [key]: "  " })), undefined, key);
+test("RELAY_*：缺设备身份、未配置或关闭时返回空数组", () => {
+  for (const key of ["RELAY_DEVICE_ID", "RELAY_DEVICE_KEY"]) {
+    assert.deepEqual(loadRelaySettings(env({ [key]: undefined })), [], key);
+    assert.deepEqual(loadRelaySettings(env({ [key]: "  " })), [], key);
   }
-  assert.equal(loadRelaySettings(env({ RELAY_ENABLED: "off" })), undefined);
-  // off 时不校验其余值：配置坏了也能先关掉
-  assert.equal(loadRelaySettings(env({ RELAY_ENABLED: "off", RELAY_URL: "ftp://x" })), undefined);
-  assert.equal(loadRelaySettings({}), undefined);
+  assert.deepEqual(loadRelaySettings(env({ RELAY_ENABLED: "off" })), []);
+  assert.deepEqual(loadRelaySettings(env({ RELAY_ENABLED: "off", RELAY_URL: "ftp://x", RELAY_URL_3: "bad" })), []);
+  assert.deepEqual(loadRelaySettings({}), []);
 });
 
 test("RELAY_*：非法值抛 ConfigError，loadConfig 同样拒启", () => {
@@ -66,7 +65,36 @@ test("http:// 只允许 localhost / 127.0.0.1", () => {
   assert.equal(normalizeRelayUrl("https://relay.example.com"), "https://relay.example.com");
 });
 
-test("loadConfig：relay 启用时带 relay，未配置时没有该字段", () => {
-  assert.equal(loadConfig({ BRIDGE_TOKEN: "t", ...env() }).relay?.url, "https://relay.example.com");
-  assert.equal("relay" in loadConfig({ BRIDGE_TOKEN: "t" }), false);
+test("loadConfig：单 relay 旧键保持兼容，未配置时 relays 为空", () => {
+  assert.equal(loadConfig({ BRIDGE_TOKEN: "t", ...env() }).relays[0]?.url, "https://relay.example.com");
+  assert.deepEqual(loadConfig({ BRIDGE_TOKEN: "t" }).relays, []);
+});
+
+test("多个 relay：按编号读取，共用身份，密钥可含逗号和竖线", () => {
+  const settings = loadRelaySettings(env({ RELAY_SECRET_2: `${SECRET},|`, RELAY_URL_2: "https://second.example.com/" }));
+  assert.deepEqual(settings.map((entry) => [entry.url, entry.secret, entry.deviceId, entry.deviceKey]), [
+    ["https://relay.example.com", SECRET, ID, KEY],
+    ["https://second.example.com", `${SECRET},|`, ID, KEY],
+  ]);
+});
+
+test("编号空位、不完整、非法或重复地址拒绝启动，并指明 relay 编号", () => {
+  const cases: Array<[Record<string, string | undefined>, RegExp]> = [
+    [{ RELAY_URL: undefined }, /relay 1/],
+    [{ RELAY_SECRET: " " }, /relay 1/],
+    [{ RELAY_URL_2: "https://second.example.com" }, /relay 2/],
+    [{ RELAY_SECRET_2: SECRET }, /relay 2/],
+    [{ RELAY_URL_2: " " }, /relay 2/],
+    [{ RELAY_URL_3: "https://third.example.com", RELAY_SECRET_3: SECRET }, /relay 2/],
+    [{ RELAY_URL_2: "http://second.example.com", RELAY_SECRET_2: SECRET }, /relay 2/],
+    [{ RELAY_URL_2: "https://second.example.com", RELAY_SECRET_2: "short" }, /relay 2/],
+    [{ RELAY_URL_2: "https://RELAY.example.com:443///", RELAY_SECRET_2: SECRET }, /relay 2.*duplicate/],
+    [{ RELAY_URL: undefined, RELAY_SECRET: undefined, RELAY_URL_2: "https://second.example.com", RELAY_SECRET_2: SECRET }, /relay 1/],
+    [{ RELAY_URL_1: "https://second.example.com" }, /relay 1/],
+    [{ RELAY_URL_02: "https://second.example.com" }, /relay 02/],
+  ];
+  for (const [overrides, message] of cases) {
+    assert.throws(() => loadRelaySettings(env(overrides)), message);
+    assert.throws(() => loadConfig({ BRIDGE_TOKEN: "t", ...env(overrides) }), ConfigError);
+  }
 });

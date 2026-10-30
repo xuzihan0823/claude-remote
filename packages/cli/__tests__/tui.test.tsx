@@ -300,11 +300,11 @@ test("设置：重置 token 需 y 确认，之后重载并打开配对", async (
 
 test("设置：只读显示 relay 状态（取自 daemon 快照，光标不会停在这一行）", async () => {
   const base = { launchd: { loaded: true, installed: true }, reachable: true, unauthorized: false, sessions: [], pending: [] };
-  const file = { configured: true, enabled: true, url: "https://r.example.com", base: "https://r.example.com/d/abc" };
+  const file = { configured: true, enabled: true, relays: [{ url: "https://r.example.com", base: "https://r.example.com/d/abc" }] };
   const cases: Array<[DaemonSnapshot, RegExp]> = [
-    [{ ...base, relayFile: file, connect: { bases: [], relay: { state: "connected", base: file.base, since: now } } }, /relay\s+已连接.*https:\/\/r\.example\.com\/d\/abc/],
-    [{ ...base, relayFile: file, connect: { bases: [], relay: { state: "error", error: "auth", since: now } } }, /relay 密钥错误/],
-    [{ ...base, relayFile: { configured: false, enabled: false } }, /relay\s+未配置/],
+    [{ ...base, relayFile: file, connect: { bases: [], relays: [{ state: "connected", base: file.relays[0]!.base, since: now }] } }, /relay\s+1\/1 已连接/],
+    [{ ...base, relayFile: file, connect: { bases: [], relays: [{ state: "error", error: "auth", base: file.relays[0]!.base, since: now }] } }, /relay 密钥错误/],
+    [{ ...base, relayFile: { configured: false, enabled: false, relays: [] } }, /relay\s+未配置/],
   ];
   for (const [snap, expected] of cases) {
     const { deps } = fakeDeps({ snapshot: async () => snap });
