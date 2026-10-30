@@ -44,8 +44,8 @@ test('同 token 合并、地址交集合并、不同 Mac 新增', () => {
 
 test('手动改名后不被 daemon 主机名覆盖', () => {
   const a = D.upsertDevice({ base: 'http://a:1', token: 't' });
-  D.updateDevice(a.id, { autoName: 'Xu-MacBook' });
-  assert.equal(D.getDevice(a.id).name, 'Xu-MacBook');
+  D.updateDevice(a.id, { autoName: 'Example-MacBook' });
+  assert.equal(D.getDevice(a.id).name, 'Example-MacBook');
   D.updateDevice(a.id, { name: '家里' });
   D.updateDevice(a.id, { autoName: 'Other' });
   D.upsertDevice({ base: 'http://a:1', token: 't', name: 'X' });
@@ -66,7 +66,7 @@ test('删除当前设备返回下一台，删光后为空', () => {
 
 test('candidateBases 上次连通的地址优先；displayName 去掉 .local', () => {
   assert.deepEqual(D.candidateBases({ lastBase: 'http://b:1', bases: ['http://a:1', 'http://b:1'] }), ['http://b:1', 'http://a:1']);
-  assert.equal(D.displayName('Xus-MacBook-Pro.local', 'http://a:1'), 'Xus-MacBook-Pro');
+  assert.equal(D.displayName('Example-MacBook-Pro.local', 'http://a:1'), 'Example-MacBook-Pro');
   assert.equal(D.displayName('', 'http://100.1.1.1:8787'), '100.1.1.1:8787');
 });
 
@@ -103,7 +103,7 @@ test('baseChannel：relay / Tailscale(100.64/10) / mDNS / 局域网', () => {
   assert.equal(D.baseChannel('http://100.127.255.1:8787'), 'tailscale');
   assert.equal(D.baseChannel('http://100.63.0.1:8787'), 'lan', '100.63 不在 CGNAT 段');
   assert.equal(D.baseChannel('http://100.128.0.1:8787'), 'lan');
-  assert.equal(D.baseChannel('http://Xu-Mac.local:8787'), 'mdns');
+  assert.equal(D.baseChannel('http://Example-Mac.local:8787'), 'mdns');
   assert.equal(D.baseChannel('http://192.168.1.2:8787'), 'lan');
   assert.equal(D.baseChannel('https://relay.example.com/other'), 'lan', '无 /d/<id> 前缀不算 relay');
 });

@@ -7,7 +7,7 @@
 - 分支：`feat/cli-tui` 与 `feat/self-hosted-relay` 同在 `4f3eb04`，包含 cr 命令行与自建 relay，均**未合并进 `main`**。
 - Mac 端：`cr` 命令行取代了菜单栏 App，daemon 默认随 cr 启停，`cr config set autostart on` 后交给 launchd 常驻。
 - 接入：Tailscale / 局域网直连 + 自建 relay，手机自动选可用通道（直连优先）。不再使用 Cloudflare Tunnel。
-- relay 已部署：华为云 `60.204.203.202`，地址 `https://cr.anyyu.cloud:8443`。
+- relay 已部署：华为云 `<SERVER_IP_A>`，地址 `https://<RELAY_HOST>:8443`。
 - 手机端：React Native 版已用 Distribution 证书装到 iPhone 17（iOS 27.0 Beta），描述文件 2027-08-30 到期。
 
 ## 待办
