@@ -7,14 +7,9 @@ import { useTheme } from '../theme.js';
 // 工具参数的可读展示：Edit/Write 显示红绿 diff，Bash 显示命令，TodoWrite 显示清单，其它显示关键字段。
 // 消息流的 tool_use 折叠块和审批卡片共用。maxHeight 给审批卡片用（diff 很长时内部滚动）。
 
-const DIFF_BG = {
-  light: { '+': 'rgba(91, 140, 90, 0.14)', '-': 'rgba(192, 71, 58, 0.12)' },
-  dark: { '+': 'rgba(107, 170, 106, 0.18)', '-': 'rgba(208, 96, 76, 0.18)' },
-};
-
 function DiffRows({ rows }) {
-  const { colors, fonts, dark } = useTheme();
-  const bg = dark ? DIFF_BG.dark : DIFF_BG.light;
+  const { colors, fonts } = useTheme();
+  const bg = { '+': colors.diffAdd, '-': colors.diffDel };
   return (
     <ScrollView horizontal showsHorizontalScrollIndicator={false}>
       <View style={{ minWidth: '100%' }}>

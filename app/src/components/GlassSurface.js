@@ -11,7 +11,7 @@ export function GlassSurface({
   effectStyle = 'regular',
   tintColor,
 }) {
-  const { colors, dark } = useTheme();
+  const { colors, dark, darkProgress = dark ? 1 : 0 } = useTheme();
   const [reduceTransparency, setReduceTransparency] = useState(false);
 
   useEffect(() => {
@@ -44,11 +44,12 @@ export function GlassSurface({
   );
 
   const fallbackBg = isAccent
-    ? (dark ? '#33241E' : '#F9EBE5')
+    ? (colors.cardAccent ?? (dark ? '#33241E' : '#F9EBE5'))
     : colors.card;
 
   const innerBorderColor = isAccent ? colors.glassBorderAccent : colors.glassBorder;
-
+  const lightShadowOp = isAccent ? 0.12 : isPill ? 0.075 : 0.085;
+  const darkShadowOp = isPill ? 0.26 : 0.32;
   return (
     <View
       style={[
@@ -58,9 +59,9 @@ export function GlassSurface({
           backgroundColor: glass ? 'transparent' : fallbackBg,
           borderWidth: StyleSheet.hairlineWidth,
           borderColor: isAccent ? colors.glassBorderAccent : colors.glassEdgeOuter,
-          shadowColor: isAccent ? '#B85435' : (dark ? '#000000' : '#241E17'),
+          shadowColor: isAccent ? '#B85435' : (colors.glassShadow ?? (dark ? '#000000' : '#241E17')),
           shadowOffset: { width: 0, height: isPill ? 4 : 6 },
-          shadowOpacity: dark ? (isPill ? 0.26 : 0.32) : (isAccent ? 0.12 : isPill ? 0.075 : 0.085),
+          shadowOpacity: lightShadowOp + (darkShadowOp - lightShadowOp) * darkProgress,
           shadowRadius: isPill ? 12 : 18,
         },
         style,

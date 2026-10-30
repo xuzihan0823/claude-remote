@@ -1,3 +1,4 @@
+import { haptics } from '../../lib/haptics.js';
 import { APPEARANCE_LABELS, setPref, usePref } from '../../lib/prefs.js';
 import { Group, Row, SettingsPage } from './ui.js';
 
@@ -6,11 +7,16 @@ export function AppearanceScreen() {
   const codeWrap = usePref('codeWrap');
   const showThinking = usePref('showThinking');
   const toolsExpanded = usePref('toolsExpanded');
+  const pickAppearance = (k) => {
+    if (appearance === k) return;
+    haptics.selection();
+    setPref('appearance', k);
+  };
   return (
     <SettingsPage title="外观">
       <Group title="主题">
         {['system', 'light', 'dark'].map((k) => (
-          <Row key={k} label={APPEARANCE_LABELS[k]} checked={appearance === k} onPress={() => setPref('appearance', k)} />
+          <Row key={k} label={APPEARANCE_LABELS[k]} checked={appearance === k} onPress={() => pickAppearance(k)} />
         ))}
       </Group>
       <Group title="消息">

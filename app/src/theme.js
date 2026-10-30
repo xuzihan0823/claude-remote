@@ -1,12 +1,16 @@
 // Native surfaces share semantic tokens across light and dark appearances.
-import { useColorScheme } from 'react-native';
+import { useEffect, useSyncExternalStore } from 'react';
+import { AccessibilityInfo, Appearance, useColorScheme } from 'react-native';
+import { createThemeTransition } from './lib/theme-transition.js';
 
 export const palettes = {
   light: {
     bg: '#FAF9F6',
     bg2: '#EDEADE',
+    sheet: '#FAF9F6',
     card: '#FFFFFF',
     cardHover: '#F7F6F1',
+    cardAccent: '#F9EBE5',
     bubble: '#EAE3D9',
     accent: '#D97757',
     accentDeep: '#C05B3E',
@@ -20,6 +24,8 @@ export const palettes = {
     warn: '#D97757',
     info: '#6889B0',
     danger: '#C0473A',
+    diffAdd: 'rgba(91, 140, 90, 0.14)',
+    diffDel: 'rgba(192, 71, 58, 0.12)',
     syntax: {
       keyword: '#B0452A',
       string: '#4E7A36',
@@ -38,14 +44,17 @@ export const palettes = {
     glassEdgeOuter: 'rgba(58, 54, 48, 0.08)',
     glassHighlight: 'rgba(255, 255, 255, 0.72)',
     glassPressed: 'rgba(58, 54, 48, 0.08)',
+    glassShadow: '#241E17',
     controlFill: 'rgba(58, 54, 48, 0.055)',
     controlBorder: 'rgba(58, 54, 48, 0.11)',
   },
   dark: {
     bg: '#141414',
     bg2: '#1C1C1C',
+    sheet: '#1C1C1C',
     card: '#282828',
     cardHover: '#333333',
+    cardAccent: '#33241E',
     bubble: '#2C2C2B',
     accent: '#D97757',
     accentDeep: '#C05B3E',
@@ -59,6 +68,8 @@ export const palettes = {
     warn: '#D97757',
     info: '#7A9DC8',
     danger: '#D0604C',
+    diffAdd: 'rgba(107, 170, 106, 0.18)',
+    diffDel: 'rgba(208, 96, 76, 0.18)',
     syntax: {
       keyword: '#E8916F',
       string: '#A8C98A',
@@ -77,6 +88,7 @@ export const palettes = {
     glassEdgeOuter: 'rgba(0, 0, 0, 0.45)',
     glassHighlight: 'rgba(255, 255, 255, 0.09)',
     glassPressed: 'rgba(255, 255, 255, 0.10)',
+    glassShadow: '#000000',
     controlFill: 'rgba(255, 255, 255, 0.08)',
     controlBorder: 'rgba(255, 255, 255, 0.13)',
   },
@@ -95,8 +107,44 @@ export const dur = { fast: 150, base: 250, slow: 400 };
 // 对应 --spring: cubic-bezier(0.32,0.72,0,1)，reanimated 里用 Easing.bezier(...spring)
 export const spring = [0.32, 0.72, 0, 1];
 
+let reduceMotionEnabled = false;
+try {
+  AccessibilityInfo?.isReduceMotionEnabled?.().then((v) => { reduceMotionEnabled = !!v; }).catch(() => {});
+  AccessibilityInfo?.addEventListener?.('reduceMotionChanged', (v) => { reduceMotionEnabled = !!v; });
+} catch { /* 测试或无障碍接口缺失环境忽略 */ }
+
+const themeTransition = createThemeTransition({
+  lightPalette: palettes.light,
+  darkPalette: palettes.dark,
+  initialDark: (() => {
+    try { return Appearance?.getColorScheme?.() === 'dark'; } catch { return false; }
+  })(),
+  duration: 280,
+  isReduceMotion: () => reduceMotionEnabled,
+});
+
+try {
+  Appearance?.addChangeListener?.(({ colorScheme }) => {
+    if (colorScheme === 'light' || colorScheme === 'dark') {
+      themeTransition.setDark(colorScheme === 'dark', { animate: true });
+    }
+  });
+} catch { /* noop */ }
+
+export function setThemeDark(dark, opts) {
+  themeTransition.setDark(dark, opts);
+}
+
 export function useTheme() {
   const scheme = useColorScheme();
-  const dark = scheme === 'dark';
-  return { dark, colors: dark ? palettes.dark : palettes.light, fonts, radius, dur };
+  const snap = useSyncExternalStore(themeTransition.subscribe, themeTransition.getSnapshot);
+  useEffect(() => {
+    if (scheme === 'light' || scheme === 'dark') {
+      const nextDark = scheme === 'dark';
+      if (nextDark !== themeTransition.getSnapshot().dark) {
+        themeTransition.setDark(nextDark, { animate: true });
+      }
+    }
+  }, [scheme]);
+  return { dark: snap.dark, darkProgress: snap.progress, colors: snap.colors, fonts, radius, dur };
 }

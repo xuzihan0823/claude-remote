@@ -1,5 +1,6 @@
 import { Children, Fragment, isValidElement, useEffect, useRef, useState } from 'react';
 import { Animated, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import Reanimated, { FadeIn } from 'react-native-reanimated';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -13,7 +14,7 @@ import { useTheme } from '../../theme.js';
 
 export const HEADER_H = 64;
 
-export function sheetBg(colors, dark) { return dark ? colors.bg2 : colors.bg; }
+export function sheetBg(colors, dark) { return colors?.sheet ?? (dark ? colors.bg2 : colors.bg); }
 
 export function GlassButton({ icon, onPress, label, disabled }) {
   const { colors } = useTheme();
@@ -153,7 +154,7 @@ export function Row({
           style={{ marginLeft: 8, alignSelf: 'center' }}
         />
       ) : null}
-      {checked ? <View style={{ marginLeft: 8 }}><Icon name="check" size={20} color={colors.accent} strokeWidth={2.2} /></View> : null}
+      {checked ? <Reanimated.View entering={FadeIn.duration(150)} style={{ marginLeft: 8 }}><Icon name="check" size={20} color={colors.accent} strokeWidth={2.2} /></Reanimated.View> : null}
       {checked === false ? <View style={{ width: 28 }} /> : null}
       {showChevron ? <View style={{ marginLeft: 4, marginRight: -4 }}><Icon name="chevronRight" size={20} color={colors.ink3} /></View> : null}
     </>
