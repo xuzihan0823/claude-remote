@@ -18,6 +18,8 @@ relay 不保存任何会话数据，也不知道 Mac 的 `BRIDGE_TOKEN`；手机
 curl -fsSL https://raw.githubusercontent.com/xuzihan0823/claude-remote/main/deploy/relay/install.sh | sudo bash
 ```
 
+不需要域名：脚本会直接用服务器的公网 IP，向 Let's Encrypt 申请 IP 地址证书，手机和 Mac 都通过 `https://<公网 IP>` 访问。国内未备案的服务器也能用（备案拦截只针对域名）。
+
 有自己的域名（已解析到这台服务器）时：
 
 ```bash
@@ -50,7 +52,7 @@ cr relay add https://relay.example.com <密钥>
 
 | 参数 | 说明 |
 |---|---|
-| `--domain <域名>` | 不传时用服务器公网 IP 生成 `<ip>.sslip.io` |
+| `--domain <域名或 IP>` | 不传时直接用服务器公网 IP；探测不准时可以手动指定 IP |
 | `--https-port <端口>` | 默认 443 |
 | `--cert <fullchain> --key <私钥>` | 使用已有证书，不自动申请 |
 | `--auto-cert` | 取消之前的 `--cert/--key`，改回自动申请 |
@@ -61,7 +63,7 @@ cr relay add https://relay.example.com <密钥>
 
 ### 端口与安全组
 
-云厂商的安全组（或 `ufw` 等防火墙）需要放行 HTTPS 端口（默认 TCP 443）。HTTPS 端口不是 443 且自动申请证书时，还需要放行 TCP 80 用于证书验证。
+云厂商的安全组（或 `ufw` 等防火墙）需要放行 HTTPS 端口（默认 TCP 443）。使用 IP 证书，或者 HTTPS 端口不是 443 且自动申请证书时，还需要放行 TCP 80 用于证书验证，并且 80 端口不能被其它程序占用。
 
 ## 升级
 
@@ -79,19 +81,22 @@ sudo rm -rf /opt/claude-remote-relay
 
 然后在 Mac 上执行 `cr relay remove`。
 
-## 关于 sslip.io
+## 关于 IP 证书
 
-不传 `--domain` 时，脚本用 `1-2-3-4.sslip.io` 这样的域名，它总是解析到对应 IP，免去买域名和配 DNS。适合先试用：sslip.io 不在公共后缀列表里，所有 sslip.io 子域共用 Let's Encrypt 对同一主域的签发额度，偶尔会签发失败（Caddy 会自动改用 ZeroSSL 重试）。长期使用建议换成自己的域名：
+不传 `--domain` 时，脚本直接用公网 IP，Caddy 向 Let's Encrypt 申请短期 IP 证书。和域名证书相比有两点不同：
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/xuzihan0823/claude-remote/main/deploy/relay/install.sh | sudo bash -s -- --domain relay.example.com
-```
+- 有效期约 6 天，Caddy 会提前自动续期。服务器连续几天连不上 Let's Encrypt，证书就会过期，手机和 Mac 会连不上，恢复网络后 Caddy 会自动补签。
+- 只能用 HTTP 方式验证，所以 80 端口要一直对公网开放，签发和每次续期都要用到。
 
-换域名后需要在 Mac 上用新地址重新执行一次 `cr relay add`。
+服务器换了公网 IP 时，用新 IP 重新执行一次安装命令，再在 Mac 上用新地址重新执行 `cr relay add`。
+
+以前用 sslip.io 域名安装的服务器，升级时会沿用原来的域名。想改用 IP 证书，加上 `--domain <公网 IP>` 重新执行一次安装命令，再在 Mac 上用新地址重新执行 `cr relay add`。
 
 ## 国内未备案的服务器
 
-国内云服务器上，未备案的域名访问 80/443 端口会被拦截，所以既不能用 443 端口，也不能用 80 端口完成证书验证。做法是：用自己的域名，通过 DNS 验证签发证书，再用一个高位端口提供 HTTPS。sslip.io 在这种情况下不可用。
+国内云服务器上，未备案的域名访问 80/443 端口会被拦截，但直接用 IP 访问不受影响，所以默认的 IP 证书方式可以直接使用。
+
+如果想用自己的未备案域名，域名既不能走 443 端口，也不能用 80 端口完成证书验证。做法是：通过 DNS 验证签发证书，再用一个高位端口提供 HTTPS。
 
 以阿里云 DNS 为例，用 [acme.sh](https://github.com/acmesh-official/acme.sh) 签发证书：
 
