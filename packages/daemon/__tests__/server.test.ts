@@ -2,7 +2,7 @@
 // SDK 侧走 fake QueryFactory（不触真 SDK/网络）。fixture 会话文件建在临时目录。
 
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, appendFile, readFile, writeFile, rm, utimes } from "node:fs/promises";
+import { mkdtemp, mkdir, appendFile, readFile, writeFile, rm, symlink, truncate, utimes } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test, after } from "node:test";
@@ -55,6 +55,7 @@ type SdkQuery = ReturnType<QueryFactory>;
 interface FakeSdk {
   factory: QueryFactory;
   params: QueryParams | undefined;
+  calls?: number;
   /** resolve 后 SDK 消息流结束（run → done）。 */
   finish: () => void;
   interrupts: number;
@@ -65,6 +66,7 @@ function fakeSdk(): FakeSdk {
   const holder: FakeSdk = { factory: undefined as never, params: undefined, finish: () => {}, interrupts: 0, delayAbort: false };
   holder.factory = ((params: QueryParams): SdkQuery => {
     holder.params = params;
+    holder.calls = (holder.calls ?? 0) + 1;
     let release: () => void = () => {};
     const gatePromise = new Promise<void>((resolvePromise) => {
       release = resolvePromise;
@@ -1093,5 +1095,95 @@ test("new and resumed turns validate effort and forward the selected value to SD
       assert.equal((h.sdk.params as QueryParams | undefined)?.options?.effort, "max");
       h.sdk.finish();
     } finally { await h.dispose(); }
+  }
+});
+
+test("clientMessageId：新建与续聊的并发、完成后重试均只启动一次，UUID 进入 SDK 输入", async () => {
+  for (const path of ["/api/sessions", `/api/sessions/${SESSION_ID}/messages`]) {
+    const h = await startHarness();
+    try {
+      const id = "abcdefab-1234-4567-8abc-123456789012";
+      const send = (clientMessageId: unknown) => fetch(`${h.base}${path}`, authed({
+        method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, text: "same text", clientMessageId }),
+      }));
+      for (const bad of [null, "", "not-a-uuid", 42, {}]) {
+        const response = await send(bad);
+        assert.equal(response.status, 400);
+        assert.equal((await response.json() as { error: string }).error, "invalid_client_message_id");
+      }
+      assert.equal(h.sdk.calls ?? 0, 0);
+      const responses = await Promise.all([send(id), send(id.toUpperCase())]);
+      assert.deepEqual(responses.map((r) => r.status), [202, 202]);
+      const results = await Promise.all(responses.map((r) => r.json())) as Array<{ runId: string; sessionId?: string; clientMessageId: string }>;
+      assert.equal(results[0]?.runId, results[1]?.runId);
+      assert.equal(results[0]?.clientMessageId, id);
+      assert.equal(h.sdk.calls, 1);
+      const prompt = h.sdk.params?.prompt;
+      assert.ok(prompt && typeof prompt !== "string");
+      const input = await prompt[Symbol.asyncIterator]().next();
+      assert.equal(input.value.uuid, id);
+      assert.equal(input.value.message.content, "same text");
+      h.sdk.finish();
+      await delay(30);
+      const retry = await send(id);
+      assert.equal(retry.status, 202);
+      assert.equal((await retry.json() as { runId: string }).runId, results[0]?.runId);
+      assert.equal(h.sdk.calls, 1);
+      const next = await send("bbbbbbbb-1234-4567-8abc-123456789012");
+      assert.equal(next.status, 202);
+      assert.equal(h.sdk.calls, 2);
+      h.sdk.finish();
+    } finally { await h.dispose(); }
+  }
+});
+
+test("GET session file：鉴权、真实路径类型、大小限制及缺失文件", async () => {
+  const h = await startHarness();
+  try {
+    const dir = join(h.projectsDir, "images");
+    await mkdir(dir);
+    const png = join(dir, "chart.png");
+    const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    await writeFile(png, bytes);
+    const request = (path: string, auth = true, method = "GET", id = SESSION_ID) => fetch(
+      `${h.base}/api/sessions/${id}/file?path=${encodeURIComponent(path)}`,
+      { method, headers: auth ? { Authorization: `Bearer ${TOKEN}` } : {} },
+    );
+    assert.equal((await request(png, false)).status, 401);
+    const ok = await request(png);
+    assert.equal(ok.status, 200);
+    assert.equal(ok.headers.get("content-type"), "image/png");
+    assert.equal(ok.headers.get("x-content-type-options"), "nosniff");
+    assert.deepEqual(Buffer.from(await ok.arrayBuffer()), bytes);
+    assert.equal((await request(`file://${png}`)).status, 200);
+    const session = await readFile(h.sessionFile, "utf8");
+    await writeFile(h.sessionFile, session.replaceAll(SESSION_CWD, dir));
+    assert.equal((await request("./chart.png")).status, 200);
+    const text = join(dir, "secret.txt");
+    await writeFile(text, "private fixture");
+    assert.equal((await request(text)).status, 415);
+    const disguised = join(dir, "disguised.png");
+    await symlink(text, disguised);
+    assert.equal((await request(disguised)).status, 415);
+    const allowed = join(dir, "alias.jpg");
+    await symlink(png, allowed);
+    const alias = await request(allowed);
+    assert.equal(alias.status, 200);
+    assert.equal(alias.headers.get("content-type"), "image/png");
+    const svg = join(dir, "vector.svg");
+    await writeFile(svg, "<svg/>");
+    assert.equal((await request(svg)).status, 415);
+    assert.equal((await request(join(dir, "absent.png"))).status, 404);
+    assert.equal((await request("")).status, 400);
+    assert.equal((await request("file://example.com/image.png")).status, 400);
+    assert.equal((await request(png, true, "POST")).status, 404);
+    assert.equal((await request(png, true, "GET", "00000000-0000-4000-8000-000000000000")).status, 404);
+    const large = join(dir, "large.png");
+    await writeFile(large, "");
+    await truncate(large, 25 * 1024 * 1024 + 1);
+    assert.equal((await request(large)).status, 413);
+    assert.equal((await request(png)).status, 200, "拒绝请求后服务仍可读取图片");
+  } finally {
+    await h.dispose();
   }
 });

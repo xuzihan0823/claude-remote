@@ -95,6 +95,14 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 
 `text` 必填；模型、权限校验同新建。cwd 从该会话 JSONL 读取，无 cwd 时回退 daemon 用户主目录；客户端不能在此覆盖 cwd。成功返回 `202 { "runId": "<uuid>" }`。未知会话返回 404 `session_not_found`，非空闲或已有活跃 run 返回 `409 { "error": "not_idle", "status": "terminal-driving" }` 或 `daemon-driving`。客户端应及时绑定响应 runId，并防止迟到响应覆盖更新的运行终态/新轮次。
 
+### 消息身份与发送重试
+
+新建和续聊都接受可选 `clientMessageId`（UUID，服务端规范为小写）。非法值（含 null、空字符串、非字符串）返回 400 `invalid_client_message_id`；省略时保持旧请求行为。成功受理时响应附带 `clientMessageId`，UUID 经 runner 和 SDK 用户消息写入 JSONL 的 `uuid`，不额外写转录文件。已用 SDK 0.3.212 的真实 CLI 2.1.212 在隔离配置和本地失败网关下确认 UUID 落盘，无需外部模型调用。
+
+daemon 在内存中保存 `clientMessageId → sessionId/runId`，从首次受理起保留 10 分钟；续聊按会话隔离，新建请求使用独立命名空间。窗口内重复请求返回 202，携带原 `sessionId`、`runId`、`clientMessageId` 和 `replayed: true`，无论运行是否结束都不再启动 SDK。异步校验后再次查重，防止并发双重启动。daemon 重启或窗口到期后不保证去重；客户端重复发送必须保持原 ID 和正文。
+
+App 发送前生成 UUID（Hermes 缺少 crypto.randomUUID 时有兜底），保留发送中、已发送、失败、状态不明四种气泡状态。明确失败保留重试入口；请求发出后的网络/5xx 错误显示状态不明并补拉历史。重试复用原 ID、正文、选项和已经上传的附件路径，不再上传附件。正式消息按 UUID 优先对账；旧 daemon 响应不含 clientMessageId 时才回退到发送后的文本匹配，一条回显只确认一条本地消息。回显先于响应不会重复生成气泡，重复请求的旧 runId 也不能使已结束的运行重新显示为运行中。新建会话响应丢失后，未修改的草稿复用同一请求身份；修改正文或选项后生成新身份。
+
 ### 停止或解除占用：`POST /api/sessions/:id/abort`
 
 推荐传 `{ "runId": "<uuid>" }`，以保护指定轮次。sessionId 非 UUID 返回 400 `invalid_session_id`；runId 非 UUID（包括 null、空字符串、数字）返回 400 `invalid_run_id`，无状态副作用。
@@ -175,3 +183,11 @@ run.state 为 started/done/error；`error` 和 `permissionMode` 可选，permiss
 流帧为 `{ "type": "stream", "sessionId": "<uuid>", "key": "<apiMessageId>:<index>", "offset": 0, "text": "回答" }`，block 结束时带 `done: true`；offset 是 JavaScript 字符串偏移，按偏移合并可重复投递。订阅草稿快照从 offset 0 开始，终止清理为 `{ "type": "stream", "sessionId": "<uuid>", "clear": true }`。草稿仅供即时显示，正式正文以消息接口和 message 帧为准，二者需对账。
 
 客户端 `{ "type": "ping" }` 收到 `{ "type": "pong" }`，与订阅无关。会话快照及上述 HTTP/WS 行为由 `server.test.ts` 集成测试覆盖；App 恢复顺序由 `app/src/lib/__tests__/chat-streaming.test.mjs` 覆盖。
+
+## Markdown 公式与图片
+
+手机端支持 `$…$`、`\(…\)` 行内公式，以及 `$$…$$`、`\[…\]` 块级公式。MathJax 3.2.2 在首次渲染公式时加载，输出 SVG 交给原生组件；无效或尚未闭合的公式保留原文，长块级公式可横向滚动。代码块继续使用现有 highlight.js。
+
+本机图片和栅格 `data:image/…` 可自动显示；远程 HTTP(S) 图片须点击占位后才读取尺寸和内容，避免消息渲染自动向外发送请求。loopback URL 保留为链接，不改写为 daemon 或 relay 主机。点开图片复用全屏图片查看器。
+
+`GET /api/sessions/:id/file?path=<path>` 使用 Bearer 鉴权，支持绝对路径、`file://`、`~/` 以及相对会话真实 cwd 的路径。服务端先 `realpath`，再检查真实路径的栅格图片扩展名、普通文件类型和 25 MiB 上限；不提供 SVG。成功返回图片二进制、对应 Content-Type、`nosniff` 和私有不缓存响应。未知会话返回 404 `session_not_found`，空路径或非法 file URL 返回 400 `invalid_path`，非图片返回 415 `unsupported_image`，超限返回 413 `payload_too_large`，文件缺失或不可读返回 404 `not_found`。仅提供 GET；读取错误不会中断 daemon。经 relay 时沿用包含 `/d/<deviceId>` 的 base 和请求头鉴权。

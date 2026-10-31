@@ -10,12 +10,13 @@
 
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { homedir, hostname } from "node:os";
-import { basename, join } from "node:path";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
+import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -97,6 +98,7 @@ export class DaemonServer {
   readonly #watchRefs = new Map<string, number>();
   readonly #activeRuns = new Map<string, TurnHandle>();
   readonly #newSessions = new Set<string>();
+  readonly #messageRequests = new Map<string, { sessionId: string; runId: string; clientMessageId: string; expiresAt: number }>();
   readonly #watchActivations = new Set<string>();
   readonly #watchRetryTimers = new Map<string, NodeJS.Timeout>();
   readonly #streams = new StreamBuffer({ emit: (frame) => this.#broadcastToSubscribers(frame.sessionId, frame) });
@@ -304,6 +306,12 @@ export class DaemonServer {
       await this.#saveUpload(req, res, url, "new");
       return;
     }
+    const imageMatch = /^\/api\/sessions\/([^/]+)\/file$/.exec(path);
+    if (imageMatch !== null && method === "GET") {
+      await this.#serveSessionImage(res, url, decodeURIComponent(imageMatch[1] ?? ""));
+      return;
+    }
+
     const uploadMatch = /^\/api\/sessions\/([^/]+)\/upload$/.exec(path);
     if (uploadMatch !== null && method === "POST") {
       await this.#handleUpload(req, res, url, decodeURIComponent(uploadMatch[1] ?? ""));
@@ -453,9 +461,39 @@ export class DaemonServer {
     return value as EffortLevel;
   }
 
+  #clientMessageId(res: ServerResponse, body: unknown): string | undefined | false {
+    const id = (body as Record<string, unknown>).clientMessageId;
+    if (id === undefined) return undefined;
+    if (typeof id !== "string" || !isUuid(id)) {
+      this.#json(res, 400, { error: "invalid_client_message_id" });
+      return false;
+    }
+    return id.toLowerCase();
+  }
+
+  #repeatMessage(res: ServerResponse, scope: string, id: string | undefined): boolean {
+    const now = Date.now();
+    for (const [key, entry] of this.#messageRequests) {
+      if (entry.expiresAt <= now) this.#messageRequests.delete(key);
+    }
+    if (id === undefined) return false;
+    const previous = this.#messageRequests.get(`${scope}:${id}`);
+    if (!previous) return false;
+    this.#json(res, 202, { sessionId: previous.sessionId, runId: previous.runId, clientMessageId: id, replayed: true });
+    return true;
+  }
+
+  #rememberMessage(scope: string, sessionId: string, runId: string, id: string | undefined): void {
+    if (id !== undefined) this.#messageRequests.set(`${scope}:${id}`, {
+      sessionId, runId, clientMessageId: id, expiresAt: Date.now() + 10 * 60_000,
+    });
+  }
+
   async #handleCreateSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await this.#readJsonBody(req, res);
     if (body === undefined) return;
+    const clientMessageId = this.#clientMessageId(res, body);
+    if (clientMessageId === false || this.#repeatMessage(res, "new", clientMessageId)) return;
     const { cwd: cwdValue, text: textValue, model: modelValue, permissionMode: permModeValue } = body as Record<string, unknown>;
     if (typeof cwdValue !== "string" || cwdValue.trim() === "") {
       this.#json(res, 400, { error: "invalid_cwd" });
@@ -477,6 +515,7 @@ export class DaemonServer {
 
     const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
     if (effort === false) return;
+    if (this.#repeatMessage(res, "new", clientMessageId)) return;
 
     const sessionId = randomUUID();
     let handle: TurnHandle;
@@ -486,6 +525,7 @@ export class DaemonServer {
         cwd,
         text: textValue,
         newSession: true,
+        ...(clientMessageId === undefined ? {} : { clientMessageId }),
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
@@ -503,8 +543,9 @@ export class DaemonServer {
     }
     this.#newSessions.add(sessionId);
     this.#activeRuns.set(handle.runId, handle);
+    this.#rememberMessage("new", sessionId, handle.runId, clientMessageId);
     void this.#pumpRun(sessionId, textValue, handle);
-    this.#json(res, 202, { sessionId, runId: handle.runId });
+    this.#json(res, 202, { sessionId, runId: handle.runId, ...(clientMessageId === undefined ? {} : { clientMessageId }) });
   }
 
   async #handleAbort(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
@@ -575,6 +616,8 @@ export class DaemonServer {
   async #handlePostMessage(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
     const body = await this.#readJsonBody(req, res);
     if (body === undefined) return;
+    const clientMessageId = this.#clientMessageId(res, body);
+    if (clientMessageId === false || this.#repeatMessage(res, sessionId, clientMessageId)) return;
     const text = (body as { text?: unknown }).text;
     if (typeof text !== "string" || text.trim() === "") {
       this.#json(res, 400, { error: "invalid_text" });
@@ -597,12 +640,14 @@ export class DaemonServer {
     const cwd = (await readSessionCwd(file)) || homedir();
     const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
     if (effort === false) return;
+    if (this.#repeatMessage(res, sessionId, clientMessageId)) return;
     let handle: TurnHandle;
     try {
       handle = this.#options.runner.startTurn({
         sessionId,
         cwd,
         text,
+        ...(clientMessageId === undefined ? {} : { clientMessageId }),
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
@@ -619,8 +664,9 @@ export class DaemonServer {
       throw error;
     }
     this.#activeRuns.set(handle.runId, handle);
+    this.#rememberMessage(sessionId, sessionId, handle.runId, clientMessageId);
     void this.#pumpRun(sessionId, text, handle);
-    this.#json(res, 202, { runId: handle.runId });
+    this.#json(res, 202, { runId: handle.runId, ...(clientMessageId === undefined ? {} : { clientMessageId }) });
   }
 
   /** 消费 run 事件流：run 帧 → 订阅者；终态 → notifier。message 帧走 watcher，不在此转发。 */
@@ -665,6 +711,64 @@ export class DaemonServer {
       this.#activeRuns.delete(handle.runId);
       this.#streams.end(sessionId);
       if (this.#newSessions.has(sessionId)) void this.#activateNewSessionWatch(sessionId);
+    }
+  }
+
+  async #serveSessionImage(res: ServerResponse, url: URL, sessionId: string): Promise<void> {
+    let sessionFile: string;
+    try {
+      sessionFile = await resolveSessionFile(this.#options.config.projectsDir, sessionId);
+    } catch (error) {
+      if (!isEnoent(error)) throw error;
+      this.#json(res, 404, { error: "session_not_found" });
+      return;
+    }
+    const requested = url.searchParams.get("path");
+    if (!requested || requested.includes("\0")) {
+      this.#json(res, 400, { error: "invalid_path" });
+      return;
+    }
+    let target = requested;
+    if (target.startsWith("file:")) {
+      try { target = fileURLToPath(target); }
+      catch {
+        this.#json(res, 400, { error: "invalid_path" });
+        return;
+      }
+    } else if (target.startsWith("~/")) {
+      target = join(homedir(), target.slice(2));
+    } else if (!isAbsolute(target)) {
+      target = resolve((await readSessionCwd(sessionFile)) || homedir(), target);
+    }
+    try {
+      target = await realpath(target);
+      const types: Record<string, string> = { ...IMAGE_TYPES, bmp: "image/bmp", avif: "image/avif" };
+      const type = types[extname(target).slice(1).toLowerCase()];
+      if (type === undefined) {
+        this.#json(res, 415, { error: "unsupported_image" });
+        return;
+      }
+      const info = await stat(target);
+      if (!info.isFile()) {
+        this.#json(res, 404, { error: "not_found" });
+        return;
+      }
+      if (info.size > UPLOAD_LIMIT_BYTES) {
+        this.#json(res, 413, { error: "payload_too_large" });
+        return;
+      }
+      const data = await readFile(target);
+      if (data.length > UPLOAD_LIMIT_BYTES) {
+        this.#json(res, 413, { error: "payload_too_large" });
+        return;
+      }
+      res.writeHead(200, { "Content-Type": type, "Content-Length": data.length,
+        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" });
+      res.end(data);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR" && code !== "EACCES" && code !== "ELOOP") throw error;
+      this.#json(res, 404, { error: "not_found" });
     }
   }
 

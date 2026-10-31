@@ -8,6 +8,7 @@ export type EffortLevel = typeof EFFORT_LEVELS[number];
 export interface StartQueryOptions {
   cwd: string;
   prompt: string;
+  clientMessageId?: string;
   canUseTool: CanUseTool;
   resume?: string;
   /** Explicit model override for this turn. Omit to use the CLI/settings default. */
@@ -61,7 +62,7 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
     throw new TypeError("resume and sessionId are mutually exclusive");
   }
   const input = new InputStream();
-  input.push(userMessage(options.prompt));
+  input.push(userMessage(options.prompt, options.clientMessageId));
   const sdkOptions = {
     cwd: options.cwd,
     canUseTool: options.canUseTool,
@@ -106,9 +107,10 @@ function withoutHostAuth(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return copy;
 }
 
-function userMessage(prompt: string): SDKUserMessage {
+function userMessage(prompt: string, uuid?: string): SDKUserMessage {
   return {
     type: "user",
+    ...(uuid === undefined ? {} : { uuid: uuid as NonNullable<SDKUserMessage["uuid"]> }),
     message: { role: "user", content: prompt },
     parent_tool_use_id: null,
   };

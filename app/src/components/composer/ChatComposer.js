@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { api, fetchModels, getSessionModel, modelSelection, setSessionModel } from '../../../../web/core/api.js';
+import { api, token, fetchModels, getSessionModel, modelSelection, setSessionModel } from '../../../../web/core/api.js';
+import { newClientMessageId, sendFailureState } from '../../../../web/core/message-delivery.js';
 import { toast } from '../../../../web/core/bus.js';
 import { effortLabel, effortUsable, getSessionEffort, setSessionEffort } from '../../../../web/core/effort.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
@@ -22,9 +23,9 @@ import { tooLargeMessage, uploadAttachments, withAttachmentNote } from '../../li
 // 契约（不得更改）：props { sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped }
 // 可选 prop：onStatusConflict(status) -- 409 占用时回传最新 status 给父层（ChatScreen 未接时可空）。
 // 可选 prop：onRunMismatch(activeRunId, status) -- 停止请求过期时同步服务端当前运行。
-// 可选 prop：onSending(text) -- 点发送即触发（早于上传/POST），父层先显示待发送气泡；
-//           onSendFailed() -- 发送失败，父层撤掉该气泡（输入框文字会自动回填）。
-// onSent(text, runId, context) 在 POST 成功后触发，context 来自 onSending。
+// onSending(text, delivery) 返回上下文；失败保留气泡并提供原请求重试。
+// onSendFailed(error, context, posted) 区分明确失败和发送状态不明。
+// onSent(text, runId, context) 在受理后确认身份，并保留迟到响应保护。
 // 行为照抄 web/ui/screens/chat.js 的 composer 部分；视觉对齐 ios-ui-redesign 浮岛 24px 圆角。
 export function ChatComposer({
   sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped, onStatusConflict,
@@ -148,6 +149,10 @@ export function ChatComposer({
     }
   }, [sessionId, onStopped, onRunMismatch]);
 
+  const sendLock = useRef(false);
+  const sendGeneration = useRef(0);
+  useEffect(() => () => { sendGeneration.current += 1; }, [sessionId]);
+
   const doSend = useCallback(async () => {
     if (!hasContent || !canSend) return;
     if (modelSelection(catalog, modelOverride).status === 'unavailable') {
@@ -158,51 +163,61 @@ export function ChatComposer({
       toast(`当前模型不支持思考程度「${effortLabel(effort)}」，请重新选择`, 'error');
       return;
     }
-    setSendBusy(true);
+    const generation = sendGeneration.current;
+    const requestToken = token;
+    const delivery = { clientMessageId: newClientMessageId(), text: draft.trim() || '请查看我上传的附件。', files: [...files], body: null };
+    const send = async () => {
+      if (sendLock.current || generation !== sendGeneration.current || requestToken !== token) return;
+      sendLock.current = true;
+      setSendBusy(true);
+      let posted = false;
+      const context = onSending?.(delivery.text, { clientMessageId: delivery.clientMessageId, retry: send }) || {};
+      try {
+        if (!delivery.body) {
+          const uploaded = await uploadAttachments(delivery.files, `/api/sessions/${encodeURIComponent(sessionId)}/upload`, {
+            onProgress: (done, total) => setUploadProgress({ done, total }),
+          });
+          delivery.body = {
+            text: withAttachmentNote(delivery.text, uploaded), clientMessageId: delivery.clientMessageId,
+            ...(modelOverride ? { model: modelOverride } : {}),
+            ...(effort ? { effort } : {}),
+            ...(mode !== 'default' ? { permissionMode: mode } : {}),
+          };
+        }
+        if (generation !== sendGeneration.current || requestToken !== token) return;
+        posted = true;
+        const result = await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+          method: 'POST', body: JSON.stringify(delivery.body),
+        });
+        context.precise = result.clientMessageId === delivery.clientMessageId;
+        context.replayed = result.replayed === true;
+        onSent?.(delivery.body.text, result.runId, context);
+      } catch (e) {
+        if (e.code !== 'connection_changed' && e.code !== 'unauthorized') haptics.error();
+        onSendFailed?.(e, context, posted);
+        if (e.status === 409) {
+          onStatusConflict?.(e.data?.status || null);
+          const why = e.data?.status === 'terminal-driving' ? '会话正在终端上使用'
+            : e.data?.status === 'daemon-driving' ? 'Claude 正在运行' : '会话被占用';
+          toast(`${why}，发送被拒`, 'error');
+        } else if (e.status === 413) {
+          toast(tooLargeMessage(e), 'error');
+        } else if (e.code === 'unknown_model') {
+          toast('该模型已不可用，请重新选择', 'error');
+          fetchModels().catch(() => {});
+        } else if (e.code === 'invalid_effort') {
+          toast('思考程度参数无效，请重新选择', 'error');
+        } else if (e.code === 'connection_changed') {
+          toast('连接已切换，正在核对原消息状态', 'info');
+        } else if (e.code !== 'unauthorized') {
+          toast(sendFailureState(e, posted) === 'unconfirmed' ? '发送状态不明，正在核对历史消息' : `发送失败：${e.code}`, 'error');
+        }
+      } finally { sendLock.current = false; setSendBusy(false); setUploadProgress(null); }
+    };
     haptics.confirm();
-    const typed = draft;
-    const shown = draft.trim();
-    let context;
-    try {
-      context = onSending?.(shown);
-      if (shown) setDraft('');
-      // 先传附件（存到 Mac 本地），再把路径写进消息文本让 Claude 直接读；失败重试不会重复上传
-      const uploaded = await uploadAttachments(files, `/api/sessions/${encodeURIComponent(sessionId)}/upload`, {
-        onProgress: (done, total) => setUploadProgress({ done, total }),
-      });
-      const text = withAttachmentNote(draft.trim(), uploaded);
-      const result = await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
-        method: 'POST',
-        body: JSON.stringify({
-          text,
-          ...(modelOverride ? { model: modelOverride } : {}),
-          ...(effort ? { effort } : {}),
-          ...(mode !== 'default' ? { permissionMode: mode } : {}),
-        }),
-      });
-      onSent?.(text, result.runId, context);
-      setFiles([]);
-    } catch (e) {
-      if (e.code !== 'connection_changed' && e.code !== 'unauthorized') haptics.error();
-      if (shown) { setDraft((d) => d || typed); onSendFailed?.(); }
-      if (e.status === 409) {
-        onStatusConflict?.(e.data?.status || null);
-        const why = e.data?.status === 'terminal-driving' ? '会话正在终端上使用'
-          : e.data?.status === 'daemon-driving' ? 'Claude 正在运行' : '会话被占用';
-        toast(`${why}，发送被拒`, 'error');
-      } else if (e.status === 413) {
-        toast(tooLargeMessage(e), 'error');
-      } else if (e.code === 'unknown_model') {
-        toast('该模型已不可用，请重新选择', 'error');
-        fetchModels().catch(() => {});
-      } else if (e.code === 'invalid_effort') {
-        toast('思考程度参数无效，请重新选择', 'error');
-      } else if (e.code === 'connection_changed') {
-        toast('连接已切换，请重新发送', 'info');
-      } else if (e.code !== 'unauthorized') {
-        toast(`发送失败：${e.code}`, 'error');
-      }
-    } finally { setSendBusy(false); setUploadProgress(null); }
+    setDraft('');
+    setFiles([]);
+    await send();
   }, [draft, files, hasContent, canSend, sessionId, catalog, modelOverride, effort, effortOk, mode, onSent, onStatusConflict, onSending, onSendFailed]);
 
   const onContentSizeChange = (e) => {

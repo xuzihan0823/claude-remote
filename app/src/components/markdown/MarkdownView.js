@@ -5,14 +5,17 @@ import { useMemo, useState } from 'react';
 import { Dimensions, ScrollView, Text, View } from 'react-native';
 import { marked } from '../../../../web/vendor/marked.esm.min.js';
 import { codeFilePath, collectFilePaths, installLinkify, localFilePath, wholeUrl } from '../../../../web/core/linkify.js';
+import { installMath } from '../../../../web/core/md-math.js';
 import { openLink, shareLink } from '../../lib/links.js';
 import { useTheme } from '../../theme.js';
 import { usePref } from '../../lib/prefs.js';
 import { fitColumnWidths, naturalColumnWidths } from '../../lib/table-layout.js';
 import { highlightCode } from './highlight.js';
+import { MathView } from './MathView.js';
+import { MdImage } from './MdImage.js';
 
 installLinkify(marked);
-
+installMath(marked);
 // 基准字号 / 行高（规格约定）
 const BASE_FS = 17;
 const BASE_LH = 28;
@@ -91,9 +94,13 @@ function renderInline(tokens, ctx, keyPrefix) {
         );
         break;
       }
-      case 'link':
-      case 'image': {
-        // image 无原生图片组件，退化为指向图片 URL 的链接（alt 文本作展示）
+      case 'math':
+        out.push(<MathView key={key} tex={tok.text} display={false} ctx={ctx} fontSize={ctx.fs} />);
+        break;
+      case 'image':
+        out.push(<MdImage key={key} href={tok.href} alt={tok.text} sessionId={ctx.sessionId} ctx={ctx} inline />);
+        break;
+      case 'link': {
         const href = tok.href || '';
         const linkPath = ctx.onOpenFile ? localFilePath(href) : null;
         const kids = tok.tokens
@@ -199,6 +206,13 @@ function renderCode(tok, ctx, key) {
       })()}
     </View>
   );
+}
+
+// 段落只有图片（常见的 ![](x) 独占一行）时按块级显示，宽度撑满
+function imageOnly(tokens) {
+  if (!Array.isArray(tokens) || !tokens.some((t) => t.type === 'image')) return null;
+  const ok = tokens.every((t) => t.type === 'image' || t.type === 'br' || (t.type === 'text' && !String(t.text).trim()));
+  return ok ? tokens.filter((t) => t.type === 'image') : null;
 }
 
 function renderBlockquote(tok, ctx, key) {
@@ -376,7 +390,17 @@ function renderBlock(tok, ctx, key) {
       );
     case 'heading':
       return renderHeading(tok, ctx, key);
-    case 'paragraph':
+    case 'math':
+      return <MathView key={key} tex={tok.text} display ctx={ctx} fontSize={ctx.fs} />;
+    case 'paragraph': {
+      const imgs = imageOnly(tok.tokens);
+      if (imgs) {
+        return (
+          <View key={key} style={{ marginVertical: 2 }}>
+            {imgs.map((t, i) => <MdImage key={i} href={t.href} alt={t.text} sessionId={ctx.sessionId} ctx={ctx} />)}
+          </View>
+        );
+      }
       return (
         <Text
           key={key}
@@ -385,6 +409,7 @@ function renderBlock(tok, ctx, key) {
           {renderInline(tok.tokens, ctx, `${key}-`)}
         </Text>
       );
+    }
     case 'code':
       return renderCode(tok, ctx, key);
     case 'blockquote':
@@ -432,6 +457,7 @@ function renderBlocks(tokens, ctx, keyPrefix = '') {
   return tokens.map((tok, i) => renderBlock(tok, ctx, `${keyPrefix}${i}`));
 }
 
+// 必须带上 marked.defaults：只传 {gfm, breaks} 会丢掉 installLinkify / installMath 注册的扩展
 const lexMarkdown = (text) => marked.lexer(String(text ?? ''), { ...marked.defaults, gfm: true, breaks: true });
 
 /** 正文里出现的本机文件路径，用于在消息下方渲染文件卡片。 */
@@ -439,16 +465,15 @@ export function filePathsIn(text) {
   try { return collectFilePaths(marked, lexMarkdown(text)); } catch { return []; }
 }
 
-export function MarkdownView({ text, onOpenFile }) {
+export function MarkdownView({ text, sessionId, onOpenFile }) {
   const { colors, fonts, radius } = useTheme();
   const scale = usePref('fontScale');
   const codeWrap = usePref('codeWrap');
-  const ctx = { colors, fonts, radius, scale, codeWrap, onOpenFile, fs: BASE_FS * scale, lh: Math.round(BASE_LH * scale) };
+  const ctx = { colors, fonts, radius, scale, codeWrap, sessionId, onOpenFile, fs: BASE_FS * scale, lh: Math.round(BASE_LH * scale) };
 
   // lexer 失败退回纯 <Text>；同一 text 稳定（useMemo 仅 memo token 树，渲染每帧用最新 ctx）
   const tokens = useMemo(() => {
     try {
-      // 必须带上 marked.defaults：只传 {gfm, breaks} 会绕过 installLinkify 装的 url 分词器
       return lexMarkdown(text);
     } catch {
       return null;

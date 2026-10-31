@@ -191,7 +191,7 @@ function AssistantMessage({ m, sessionId }) {
   const visible = showAllFiles ? paths : paths.slice(0, VISIBLE_FILE_CARDS);
   return (
     <View style={{ marginTop: 8, marginBottom: 20 }}>
-      <MarkdownView text={m.text} onOpenFile={sessionId ? setPreviewPath : undefined} />
+      <MarkdownView text={m.text} sessionId={sessionId} onOpenFile={sessionId ? setPreviewPath : undefined} />
       {visible.length ? (
         <View style={{ gap: 8, marginTop: 10 }}>
           {visible.map((p) => <FileCard key={p} sessionId={sessionId} path={p} onOpen={setPreviewPath} />)}
