@@ -463,7 +463,7 @@ export class DaemonServer {
     if (id === undefined) return false;
     const previous = this.#messageRequests.get(`${scope}:${id}`);
     if (!previous) return false;
-    this.#json(res, 202, { sessionId: previous.sessionId, runId: previous.runId, clientMessageId: id });
+    this.#json(res, 202, { sessionId: previous.sessionId, runId: previous.runId, clientMessageId: id, replayed: true });
     return true;
   }
 

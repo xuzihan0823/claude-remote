@@ -10,6 +10,7 @@ import { PERMISSION_MODES, getSessionMode, setSessionMode } from '../../../web/c
 import { ws } from '../../../web/core/ws.js';
 import { applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys } from '../../../web/core/stream-drafts.js';
 import { findFocusIndex, loadUntilSeq } from '../../../web/core/search.js';
+import { newClientMessageId, reconcilePending, sendFailureState } from '../../../web/core/message-delivery.js';
 import { cmpMsg, msgKey } from '../lib/format.js';
 import { ConversationHeader } from '../components/ConversationHeader.js';
 import { GlassSurface } from '../components/GlassSurface.js';
@@ -29,12 +30,12 @@ import { haptics } from '../lib/haptics.js';
 //   键盘动画期间不改布局（逐帧改 padding 会整页重排，收键盘时掉帧）。贴底 offset 因此是 -inset 而非 0
 // - 向上翻更早消息 = onEndReached（视觉顶部），追加到数据尾端，无需 web 的 prepend 滚动补偿
 const MVCP_READING = { minIndexForVisible: 0 };
-const isEcho = (m, text) => m.role === 'user' && m.kind === 'text' && m.text?.trim() === text.trim();
-
-const pendingText = (p) => p.match ?? p.text;
 
 // 刚发出的气泡从输入框方向弹起；回显后由同尺寸的正式消息原位替换
-function PendingBubble({ text, sending }) {
+function PendingBubble({ item, canRetry }) {
+  const { colors } = useTheme();
+  const { text, state } = item;
+  const labels = { sending: '发送中', accepted: '已发送', failed: '发送失败', unconfirmed: '状态不明，请确认后重试' };
   const reduceMotion = useReducedMotion();
   const p = useSharedValue(reduceMotion ? 1 : 0);
   useEffect(() => {
@@ -46,7 +47,15 @@ function PendingBubble({ text, sending }) {
   }));
   return (
     <Animated.View style={[{ transformOrigin: 'right bottom' }, style]}>
-      <MessageRow m={{ role: 'user', text }} sending={sending} />
+      <MessageRow m={{ role: 'user', text }} sending={state === 'sending'} />
+      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>
+        <Text accessibilityLiveRegion="polite" style={{ color: state === 'failed' ? colors.danger : colors.ink2, fontSize: 12 }}>{labels[state]}</Text>
+        {(state === 'failed' || state === 'unconfirmed') && item.retry ? (
+          <TouchableOpacity disabled={!canRetry} onPress={item.retry} accessibilityRole="button" accessibilityLabel="重试发送" style={{ minHeight: 44, justifyContent: 'center', opacity: canRetry ? 1 : 0.5 }}>
+            <Text style={{ color: colors.accent, fontSize: 13 }}>重试</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
     </Animated.View>
   );
 }
@@ -68,10 +77,7 @@ export function ChatScreen({ route }) {
   const [initLoading, setInitLoading] = useState(true);
   const [loadErr, setLoadErr] = useState('');
   const [runActive, setRunActive] = useState(() => sessionCache.get(sessionId)?.status === 'daemon-driving');
-  // 已点发送、尚未从 WS 回显的用户消息：{ id, text, match? }。
-  // text 是气泡显示的输入内容；match 是 POST 实际发出的文本（带附件说明时与 text 不同），用于认回显
-  const [pending, setPending] = useState(null);
-  const lastUserEcho = useRef(null); // 最近一条用户消息回显：回显可能先于 POST 响应到达
+  const [pending, setPending] = useState([]);
   const [mode, setMode] = useState(() => getSessionMode(sessionId));
   const [activeRunId, setActiveRunId] = useState(null);
   const activeRunIdRef = useRef(null);
@@ -126,6 +132,7 @@ export function ChatScreen({ route }) {
     }
     // 首屏、WS、重连、resync、分页都从这里对账；重复补拉也要能消解草稿
     updateDrafts((d) => reconcileCurrentTurnDrafts(d, st.sorted, runFloorSeq.current));
+    setPending((items) => reconcilePending(items, st.sorted));
     return fresh.length > 0;
   }, [updateDrafts]);
 
@@ -143,11 +150,9 @@ export function ChatScreen({ route }) {
     updateDrafts([]);
     setInitLoading(true);
     setLoadErr('');
-    const initialText = pendingSessionMessages.get(sessionId);
-    if (initialText) {
-      setPending({ id: Date.now(), text: initialText, after: null, sent: true });
-      pendingSessionMessages.delete(sessionId);
-    }
+    const initial = pendingSessionMessages.get(sessionId);
+    setPending(initial ? [{ ...(typeof initial === 'string' ? { text: initial, precise: false } : initial), id: initial.clientMessageId || Date.now(), state: 'accepted', floorSeq: 0 }] : []);
+    pendingSessionMessages.delete(sessionId);
     ws.subscribe(sessionId);
     (async () => {
       try {
@@ -163,8 +168,6 @@ export function ChatScreen({ route }) {
         }
         if (generation !== loadGeneration.current) return;
         addMsgs(d.messages);
-        // 新会话的首条消息可能在订阅前就已落盘（WS 回显错过），以首屏数据为准撤掉"发送中"
-        setPending((p) => (p && d.messages.some((m) => isEcho(m, pendingText(p))) ? null : p));
         setFirstSeq(d.firstSeq);
         setHasMore(d.hasMore);
       } catch (e) {
@@ -191,8 +194,6 @@ export function ChatScreen({ route }) {
     if (e.sessionId !== sessionId) return;
     const m = e.message;
     liveKeys.current.add(msgKey(m));
-    if (m.role === 'user' && m.kind === 'text') lastUserEcho.current = m.text?.trim() ?? null;
-    setPending((p) => (p && isEcho(m, pendingText(p)) ? null : p));
     const generation = loadGeneration.current;
     if (!pendingBatch.current) {
       pendingBatch.current = [];
@@ -255,7 +256,6 @@ export function ChatScreen({ route }) {
         haptics.success();
       }
       applyRunState('idle');
-      setPending(null);
       if (e.state === 'error') toast(`运行出错：${e.error || '未知错误'}`, 'error');
     }
   }, [sessionId, updateDrafts, applyRunState]);
@@ -307,7 +307,6 @@ export function ChatScreen({ route }) {
         setFirstSeq(d.firstSeq);
         setHasMore(d.hasMore);
       }
-      setPending((p) => (p && tail.messages.some((m) => isEcho(m, pendingText(p))) ? null : p));
       setInitLoading(false);
       setLoadErr('');
     } catch { /* 断线补拉失败，等下次重连 */ }
@@ -367,22 +366,40 @@ export function ChatScreen({ route }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, focusSeq, focusNonce, initLoading, loadErr]);
 
-  const lastKey = () => {
-    const s = store.current.sorted;
-    return s.length ? msgKey(s[s.length - 1]) : null;
-  };
-  const onSending = useCallback((text) => {
-    lastUserEcho.current = null;
-    if (text) setPending({ id: Date.now(), text, after: lastKey(), sent: false });
-    return { generation: loadGeneration.current, revision: stateRevision.current };
+  const onSending = useCallback((text, delivery = {}) => {
+    const clientMessageId = delivery.clientMessageId || newClientMessageId();
+    const sorted = store.current.sorted;
+    const context = { generation: loadGeneration.current, revision: stateRevision.current, clientMessageId };
+    setPending((items) => {
+      const previous = items.find((p) => p.clientMessageId === clientMessageId);
+      const next = { ...previous, ...delivery, id: clientMessageId, clientMessageId, text, state: 'sending', floorSeq: previous?.floorSeq ?? (sorted.at(-1)?.seq || 0) };
+      return [...items.filter((p) => p.clientMessageId !== clientMessageId), next];
+    });
+    return context;
   }, []);
   const onSent = useCallback((text, runId, context) => {
     if (!context || context.generation !== loadGeneration.current) return;
-    if (context.revision === stateRevision.current && runId) applyRunState('daemon-driving', runId);
-    else if (activeRunIdRef.current !== runId) return;
-    if (lastUserEcho.current === text.trim()) { setPending(null); return; }
-    setPending((p) => (p ? { ...p, text, match: text, sent: true } : { id: Date.now(), text, match: text, after: lastKey(), sent: true }));
-  }, [applyRunState]);
+    setPending((items) => reconcilePending(items.map((p) => p.clientMessageId === context.clientMessageId
+      ? { ...p, match: text, state: 'accepted', precise: context.precise, runId } : p), store.current.sorted));
+    if (!context.replayed && context.revision === stateRevision.current && runId) applyRunState('daemon-driving', runId);
+    if (context.replayed) {
+      const generation = loadGeneration.current;
+      api(`/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=100`).then((d) => {
+        if (generation === loadGeneration.current) addMsgs(d.messages);
+      }).catch(() => {});
+    }
+  }, [sessionId, addMsgs, applyRunState]);
+  const onSendFailed = useCallback((error, context, posted) => {
+    if (!context || context.generation !== loadGeneration.current) return;
+    setPending((items) => reconcilePending(items.map((p) => p.clientMessageId === context.clientMessageId
+      ? { ...p, state: sendFailureState(error, posted) } : p), store.current.sorted));
+    if (posted) {
+      const generation = loadGeneration.current;
+      api(`/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=100`).then((d) => {
+        if (generation === loadGeneration.current) addMsgs(d.messages);
+      }).catch(() => {});
+    }
+  }, [sessionId, addMsgs]);
 
   const kbOffset = Math.max(insets.bottom, 8); // 与 ChatComposer 底部安全区间距一致
   const insetTop = useRef(0);
@@ -424,16 +441,8 @@ export function ChatScreen({ route }) {
     setTimeout(() => listRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 }), 120);
   }, []);
 
-  // 回显可能经 WS、首屏、重连补拉任一路径进列表，各自 setPending 会和加消息错开一帧（两个气泡并存）；
-  // 渲染时直接判断：pending 之后的新消息里已有回显就不再画待发送气泡
-  const showPending = useMemo(() => {
-    if (!pending) return false;
-    for (const m of msgsDesc) {
-      if (msgKey(m) === pending.after) return true;
-      if (isEcho(m, pendingText(pending))) return false;
-    }
-    return true;
-  }, [pending, msgsDesc]);
+  const visiblePending = useMemo(() => reconcilePending(pending, store.current.sorted), [pending, msgsDesc]);
+  const showPending = visiblePending.length > 0;
 
   const isRunning = runActive || status === 'daemon-driving';
   const title = meta?.title || sessionId.slice(0, 8);
@@ -442,13 +451,13 @@ export function ChatScreen({ route }) {
   // 转圈只表示 POST 未返回；发出前不出打字点，保证「转圈 → 发出 → Claude 开始回复」的顺序
   const listHeader = (
     <View>
-      {showPending ? <PendingBubble key={pending.id} text={pending.text} sending={!pending.sent} /> : null}
+      {visiblePending.map((item) => <PendingBubble key={item.id} item={item} canRetry={status === 'idle' && !isRunning && !pending.some((p) => p.state === 'sending')} />)}
       {drafts.map((d) => (
         <View key={d.key} style={{ marginTop: 8, marginBottom: 20 }}>
           <MarkdownView text={d.text} />
         </View>
       ))}
-      {isRunning && !(showPending && !pending.sent) && !drafts.some((d) => !d.done) ? (
+      {isRunning && !pending.some((p) => p.state === 'sending') && !drafts.some((d) => !d.done) ? (
         <TypingDots style={{ marginVertical: 8 }} />
       ) : null}
     </View>
@@ -543,7 +552,7 @@ export function ChatScreen({ route }) {
         onStatusConflict={(s) => applyRunState(s, s === 'daemon-driving' ? activeRunIdRef.current : null)}
         onSending={onSending}
         onSent={onSent}
-        onSendFailed={() => setPending(null)}
+        onSendFailed={onSendFailed}
         onRunMismatch={(runId, s) => applyRunState(s, runId)}
         onStopped={() => applyRunState('idle')}
       />

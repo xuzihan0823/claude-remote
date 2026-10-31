@@ -77,3 +77,24 @@ test('a delayed creation response cannot navigate or populate state after a conn
   remote.resolve(Response.json({ sessionId: 'old-session', runId: 'run' }));
   await assert.rejects(request, { code: 'connection_changed' });
 });
+
+test('creation retry reuses UUID and prepared body after a lost response without uploading again', async () => {
+  saveConn('http://example.com', 'test');
+  let uploads = 0;
+  const bodies = [];
+  globalThis.fetch = async (url, opts) => {
+    if (url.startsWith('file:')) return new Response('file');
+    if (url.includes('/upload')) { uploads++; return Response.json({ path: '/uploads/doc.txt' }); }
+    bodies.push(JSON.parse(opts.body));
+    if (bodies.length === 1) throw new Error('response lost');
+    return Response.json({ sessionId: 'original', runId: 'run', clientMessageId: bodies[0].clientMessageId });
+  };
+  const request = {};
+  const input = { cwd: '/workspace', text: 'original text', mode: 'default', files: [{ uri: 'file:///fixture', name: 'doc.txt' }], request };
+  await assert.rejects(createSession(input), { code: 'network_error' });
+  const { result } = await createSession(input);
+  assert.equal(result.sessionId, 'original');
+  assert.equal(uploads, 1);
+  assert.deepEqual(bodies[0], bodies[1]);
+  assert.match(bodies[0].clientMessageId, /^[a-f0-9-]{36}$/);
+});

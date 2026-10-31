@@ -40,6 +40,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
   const [inputH, setInputH] = useState(44);
   const lastH = useRef(44);
 
+  const createRequest = useRef(null);
   const [effortOpen, setEffortOpen] = useState(false);
   const openEffort = useCallback(() => {
     reloadEffortLevels();
@@ -74,6 +75,8 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
     }
     setBusy(true);
     haptics.confirm();
+    const key = JSON.stringify({ cwd, text, model, effort, mode, files: files.map((f) => f.uri) });
+    if (createRequest.current?.key !== key) createRequest.current = { key };
     try {
       const { result, body } = await createSession({
         cwd,
@@ -82,6 +85,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
         effort,
         mode,
         files,
+        request: createRequest.current,
       });
       setSessionMode(result.sessionId, mode);
       setSessionModel(result.sessionId, model);
@@ -91,6 +95,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
       setFiles([]);
       setModelChoice(null);
       setEffort('');
+      createRequest.current = null;
     } catch (e) {
       if (e.code !== 'connection_changed' && e.code !== 'unauthorized') haptics.error();
       if (e.status === 409) toast('所选项目当前不可创建新会话', 'error');
