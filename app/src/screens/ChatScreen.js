@@ -492,7 +492,7 @@ export function ChatScreen({ route }) {
           keyExtractor={(m) => msgKey(m)}
           renderItem={({ item }) => {
             const k = msgKey(item);
-            const row = <MessageRow m={item} live={liveKeys.current.has(k)} />;
+            const row = <MessageRow m={item} sessionId={sessionId} live={liveKeys.current.has(k)} />;
             return k === highlightKey
               ? <View style={{ backgroundColor: colors.glassTintAccent, borderRadius: 12, marginHorizontal: -8, paddingHorizontal: 8 }}>{row}</View>
               : row;
