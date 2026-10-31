@@ -95,6 +95,14 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 
 `text` 必填；模型、权限校验同新建。cwd 从该会话 JSONL 读取，无 cwd 时回退 daemon 用户主目录；客户端不能在此覆盖 cwd。成功返回 `202 { "runId": "<uuid>" }`。未知会话返回 404 `session_not_found`，非空闲或已有活跃 run 返回 `409 { "error": "not_idle", "status": "terminal-driving" }` 或 `daemon-driving`。客户端应及时绑定响应 runId，并防止迟到响应覆盖更新的运行终态/新轮次。
 
+### 消息身份与发送重试
+
+新建和续聊都接受可选 `clientMessageId`（UUID，服务端规范为小写）。非法值（含 null、空字符串、非字符串）返回 400 `invalid_client_message_id`；省略时保持旧请求行为。成功受理时响应附带 `clientMessageId`，UUID 经 runner 和 SDK 用户消息写入 JSONL 的 `uuid`，不额外写转录文件。已用 SDK 0.3.212 的真实 CLI 2.1.212 在隔离配置和本地失败网关下确认 UUID 落盘，无需外部模型调用。
+
+daemon 在内存中保存 `clientMessageId → sessionId/runId`，从首次受理起保留 10 分钟；续聊按会话隔离，新建请求使用独立命名空间。窗口内重复请求返回 202，携带原 `sessionId`、`runId`、`clientMessageId` 和 `replayed: true`，无论运行是否结束都不再启动 SDK。异步校验后再次查重，防止并发双重启动。daemon 重启或窗口到期后不保证去重；客户端重复发送必须保持原 ID 和正文。
+
+App 发送前生成 UUID（Hermes 缺少 crypto.randomUUID 时有兜底），保留发送中、已发送、失败、状态不明四种气泡状态。明确失败保留重试入口；请求发出后的网络/5xx 错误显示状态不明并补拉历史。重试复用原 ID、正文、选项和已经上传的附件路径，不再上传附件。正式消息按 UUID 优先对账；旧 daemon 响应不含 clientMessageId 时才回退到发送后的文本匹配，一条回显只确认一条本地消息。回显先于响应不会重复生成气泡，重复请求的旧 runId 也不能使已结束的运行重新显示为运行中。新建会话响应丢失后，未修改的草稿复用同一请求身份；修改正文或选项后生成新身份。
+
 ### 停止或解除占用：`POST /api/sessions/:id/abort`
 
 推荐传 `{ "runId": "<uuid>" }`，以保护指定轮次。sessionId 非 UUID 返回 400 `invalid_session_id`；runId 非 UUID（包括 null、空字符串、数字）返回 400 `invalid_run_id`，无状态副作用。

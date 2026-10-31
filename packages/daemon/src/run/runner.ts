@@ -44,6 +44,7 @@ export interface StartTurnOptions {
   sessionId: string;
   cwd: string;
   text: string;
+  clientMessageId?: string;
   /** Per-turn override. Omit to follow the Mac-side CLI/settings default. */
   model?: string;
   effort?: EffortLevel;
@@ -166,6 +167,7 @@ export class TurnRunner {
         {
           cwd,
           prompt: text,
+          ...(options.clientMessageId === undefined ? {} : { clientMessageId: options.clientMessageId }),
           canUseTool,
           signal: controller.signal,
           ...(newSession ? { sessionId } : { resume: sessionId }),

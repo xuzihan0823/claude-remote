@@ -71,7 +71,7 @@ export function HomeScreen() {
       status: 'daemon-driving',
     };
     cacheSessions([summary]);
-    pendingSessionMessages.set(result.sessionId, body.text);
+    pendingSessionMessages.set(result.sessionId, { text: body.text, clientMessageId: body.clientMessageId, precise: result.clientMessageId === body.clientMessageId });
     ws.subscribe(result.sessionId);
     setDraftActive(false);
     noteCreated(summary);

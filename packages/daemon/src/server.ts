@@ -95,6 +95,7 @@ export class DaemonServer {
   readonly #watchRefs = new Map<string, number>();
   readonly #activeRuns = new Map<string, TurnHandle>();
   readonly #newSessions = new Set<string>();
+  readonly #messageRequests = new Map<string, { sessionId: string; runId: string; clientMessageId: string; expiresAt: number }>();
   readonly #watchActivations = new Set<string>();
   readonly #watchRetryTimers = new Map<string, NodeJS.Timeout>();
   readonly #streams = new StreamBuffer({ emit: (frame) => this.#broadcastToSubscribers(frame.sessionId, frame) });
@@ -451,9 +452,39 @@ export class DaemonServer {
     return value as EffortLevel;
   }
 
+  #clientMessageId(res: ServerResponse, body: unknown): string | undefined | false {
+    const id = (body as Record<string, unknown>).clientMessageId;
+    if (id === undefined) return undefined;
+    if (typeof id !== "string" || !isUuid(id)) {
+      this.#json(res, 400, { error: "invalid_client_message_id" });
+      return false;
+    }
+    return id.toLowerCase();
+  }
+
+  #repeatMessage(res: ServerResponse, scope: string, id: string | undefined): boolean {
+    const now = Date.now();
+    for (const [key, entry] of this.#messageRequests) {
+      if (entry.expiresAt <= now) this.#messageRequests.delete(key);
+    }
+    if (id === undefined) return false;
+    const previous = this.#messageRequests.get(`${scope}:${id}`);
+    if (!previous) return false;
+    this.#json(res, 202, { sessionId: previous.sessionId, runId: previous.runId, clientMessageId: id, replayed: true });
+    return true;
+  }
+
+  #rememberMessage(scope: string, sessionId: string, runId: string, id: string | undefined): void {
+    if (id !== undefined) this.#messageRequests.set(`${scope}:${id}`, {
+      sessionId, runId, clientMessageId: id, expiresAt: Date.now() + 10 * 60_000,
+    });
+  }
+
   async #handleCreateSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await this.#readJsonBody(req, res);
     if (body === undefined) return;
+    const clientMessageId = this.#clientMessageId(res, body);
+    if (clientMessageId === false || this.#repeatMessage(res, "new", clientMessageId)) return;
     const { cwd: cwdValue, text: textValue, model: modelValue, permissionMode: permModeValue } = body as Record<string, unknown>;
     if (typeof cwdValue !== "string" || cwdValue.trim() === "") {
       this.#json(res, 400, { error: "invalid_cwd" });
@@ -475,6 +506,7 @@ export class DaemonServer {
 
     const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
     if (effort === false) return;
+    if (this.#repeatMessage(res, "new", clientMessageId)) return;
 
     const sessionId = randomUUID();
     let handle: TurnHandle;
@@ -484,6 +516,7 @@ export class DaemonServer {
         cwd,
         text: textValue,
         newSession: true,
+        ...(clientMessageId === undefined ? {} : { clientMessageId }),
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
@@ -501,8 +534,9 @@ export class DaemonServer {
     }
     this.#newSessions.add(sessionId);
     this.#activeRuns.set(handle.runId, handle);
+    this.#rememberMessage("new", sessionId, handle.runId, clientMessageId);
     void this.#pumpRun(sessionId, textValue, handle);
-    this.#json(res, 202, { sessionId, runId: handle.runId });
+    this.#json(res, 202, { sessionId, runId: handle.runId, ...(clientMessageId === undefined ? {} : { clientMessageId }) });
   }
 
   async #handleAbort(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
@@ -573,6 +607,8 @@ export class DaemonServer {
   async #handlePostMessage(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
     const body = await this.#readJsonBody(req, res);
     if (body === undefined) return;
+    const clientMessageId = this.#clientMessageId(res, body);
+    if (clientMessageId === false || this.#repeatMessage(res, sessionId, clientMessageId)) return;
     const text = (body as { text?: unknown }).text;
     if (typeof text !== "string" || text.trim() === "") {
       this.#json(res, 400, { error: "invalid_text" });
@@ -595,12 +631,14 @@ export class DaemonServer {
     const cwd = (await readSessionCwd(file)) || homedir();
     const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
     if (effort === false) return;
+    if (this.#repeatMessage(res, sessionId, clientMessageId)) return;
     let handle: TurnHandle;
     try {
       handle = this.#options.runner.startTurn({
         sessionId,
         cwd,
         text,
+        ...(clientMessageId === undefined ? {} : { clientMessageId }),
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
@@ -617,8 +655,9 @@ export class DaemonServer {
       throw error;
     }
     this.#activeRuns.set(handle.runId, handle);
+    this.#rememberMessage(sessionId, sessionId, handle.runId, clientMessageId);
     void this.#pumpRun(sessionId, text, handle);
-    this.#json(res, 202, { runId: handle.runId });
+    this.#json(res, 202, { runId: handle.runId, ...(clientMessageId === undefined ? {} : { clientMessageId }) });
   }
 
   /** 消费 run 事件流：run 帧 → 订阅者；终态 → notifier。message 帧走 watcher，不在此转发。 */

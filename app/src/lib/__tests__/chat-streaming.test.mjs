@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys } from '../../../../web/core/stream-drafts.js';
+import { newClientMessageId, reconcilePending, sendFailureState } from '../../../../web/core/message-delivery.js';
 
 const storageValues = new Map();
 if (!globalThis.localStorage) {
@@ -82,7 +83,7 @@ function mount(source, start, end, exposed, initialProps, dependencies) {
 
 function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: false }), dependencies = {}) {
   const instance = mount(screenSource, 'export function ChatScreen({ route }) {', '  const kbOffset =',
-    'drafts, store, runActive, activeRunId, status, addMsgs, onSending, onSent, loadErr, initLoading, firstSeq, hasMore', {}, {
+    'pending, onSendFailed, drafts, store, runActive, activeRunId, status, addMsgs, onSending, onSent, loadErr, initLoading, firstSeq, hasMore', {}, {
       route: { params: { sessionId: 'session' } },
       useNavigation: () => ({}), useTheme: () => ({ colors: {} }), useSafeAreaInsets: () => ({}),
       sessionCache: new Map(), pendingSessionMessages: new Map(), getSessionMode: () => 'default',
@@ -91,7 +92,7 @@ function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: fals
       applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys,
       toast() {}, setSessionMode() {}, PERMISSION_MODES: ['default'],
       haptics: { success() {} },
-      isEcho: () => false, pendingText: (p) => p.text,
+      newClientMessageId, reconcilePending, sendFailureState,
       ...dependencies,
     });
   instance.render();
@@ -184,6 +185,7 @@ function composer(api, callbacks = {}, deps = {}) {
       getSessionModel: () => '', setSessionModel: () => {}, modelSelection: () => ({ status: 'default' }),
       fetchModels: async () => {},
       getSessionEffort, setSessionEffort, effortLabel, effortUsable,
+      token: 'test-token', newClientMessageId, sendFailureState,
       api,
       uploadAttachments: async (files) => files, withAttachmentNote: (text) => text || '附件',
       haptics: { stop() {}, confirm() {}, tap() {}, selection() {}, success() {}, error() {} }, toast() {},
@@ -342,7 +344,7 @@ test('actual ChatComposer: text and attachment sends forward run identity and pr
     if (attachmentOnly) instance.render().setFiles([{ name: 'file' }]);
     else instance.render().setDraft('问题');
     await instance.render().doSend();
-    assert.deepEqual(sent, [[attachmentOnly ? '附件' : '问题', 'A', context]]);
+    assert.deepEqual(sent, [[attachmentOnly ? '请查看我上传的附件。' : '问题', 'A', context]]);
   }
 });
 
@@ -435,7 +437,7 @@ test('actual NewChatComposer: sends effort on creation and stores it for the new
       useTheme: () => ({ colors: {}, dark: false }),
       useSafeAreaInsets: () => ({ bottom: 0, left: 0, right: 0 }),
       useModelCatalog: () => ({ models: [{ id: 'opus', alias: 'opus' }], loaded: true }),
-      usePref: () => '',
+      usePref: () => '', token: 'test-token',
       useEffortLevels: () => ({ options: { levels: ['low', 'high', 'max'], verified: true }, reload: () => {} }),
       modelSelection: () => ({ status: 'ok' }),
       effortLabel,
@@ -524,4 +526,73 @@ test('actual ApprovalLayer: duplicate live events and pending sync notify once b
   assert.equal(reminders, 1, 'expired approvals must stay quiet');
   layer.emit('ws:approval', { interaction: { ...interaction, interactionId: 'approval-B' } });
   assert.equal(reminders, 2, 'a distinct approval must still be eligible for feedback');
+});
+
+test('actual ChatScreen: identical texts reconcile by UUID, echo before HTTP response stays confirmed', async () => {
+  const page = screen();
+  const first = page.render().onSending('问题', { clientMessageId: 'first' });
+  page.render().onSending('问题', { clientMessageId: 'second' });
+  page.emit('ws:message', { sessionId: 'session', message: { ...user, uuid: 'first' } });
+  await new Promise(setImmediate);
+  assert.deepEqual(page.render().pending.map((p) => p.clientMessageId), ['second']);
+  page.render().onSent('问题', 'A', { ...first, precise: true });
+  assert.deepEqual(page.render().pending.map((p) => p.clientMessageId), ['second']);
+  page.render().addMsgs([{ ...user, seq: 2, uuid: 'second' }]);
+  assert.deepEqual(page.render().pending, []);
+});
+
+test('actual ChatScreen: lost response retains unknown state and reconnect confirms from history; definite failure stays retryable', async () => {
+  const page = screen(async () => ({ messages: [{ ...user, uuid: 'lost' }], firstSeq: 1, hasMore: false }));
+  const context = page.render().onSending('问题', { clientMessageId: 'lost', retry() {} });
+  page.render().onSendFailed({ status: 0, code: 'network_error' }, context, true);
+  assert.equal(page.render().pending[0].state, 'unconfirmed');
+  await new Promise(setImmediate);
+  assert.deepEqual(page.render().pending, []);
+  const rejected = page.render().onSending('另一条', { clientMessageId: 'rejected', retry() {} });
+  page.render().onSendFailed({ status: 409 }, rejected, true);
+  assert.equal(page.render().pending[0].state, 'failed');
+  assert.equal(typeof page.render().pending[0].retry, 'function');
+});
+
+test('actual ChatScreen: old daemon response enables text matching for an echo that arrived first', () => {
+  const page = screen();
+  const context = page.render().onSending('问题', { clientMessageId: 'new-client' });
+  page.render().addMsgs([{ ...user, uuid: 'old-daemon-generated' }]);
+  assert.equal(page.render().pending.length, 1);
+  page.render().onSent('问题', 'A', { ...context, precise: false });
+  assert.deepEqual(page.render().pending, []);
+});
+
+test('actual ChatScreen: replayed response confirms delivery without reviving a completed run', () => {
+  const page = screen();
+  const context = page.render().onSending('问题', { clientMessageId: 'old' });
+  page.render().onSent('问题', 'completed', { ...context, precise: true, replayed: true });
+  assert.equal(page.render().runActive, false);
+  assert.equal(page.render().activeRunId, null);
+});
+
+test('actual ChatComposer: retry reuses original UUID, text and uploaded attachment body', async () => {
+  let retry;
+  let uploads = 0;
+  const bodies = [];
+  const failed = [];
+  const { instance, initial } = composer(async (_path, opts) => {
+    bodies.push(JSON.parse(opts.body));
+    if (bodies.length === 1) throw { status: 0, code: 'network_error' };
+    return { runId: 'A', clientMessageId: bodies[0].clientMessageId };
+  }, { onSending: (_text, item) => { retry = item.retry; return {}; }, onSendFailed: (...args) => failed.push(args) }, {
+    uploadAttachments: async () => { uploads++; return ['/uploaded/picture.png']; },
+    withAttachmentNote: (text, files) => `${text}\n${files.join('\n')}`,
+  });
+  instance.render({ ...initial, status: 'idle', isRunning: false, activeRunId: null });
+  instance.render().setDraft('原文');
+  instance.render().setFiles([{ uri: 'file:///fixture' }]);
+  await instance.render().doSend();
+  assert.equal(instance.render().draft, '');
+  assert.equal(failed[0][2], true);
+  instance.render().setDraft('新的草稿');
+  await retry();
+  assert.equal(uploads, 1);
+  assert.deepEqual(bodies[0], bodies[1]);
+  assert.equal(instance.render().draft, '新的草稿');
 });
