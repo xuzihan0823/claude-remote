@@ -356,6 +356,105 @@ test("GET /api/uploads：回读已上传图片；穿越、非图片、缺失一�
   assert.equal((await fetch(`${harness.base}/api/uploads/${SESSION_ID}/${txtName}`, authed())).status, 404);
 });
 
+test("GET files：meta 与 content 的鉴权、错误码、响应头和 Range", async (t) => {
+  const harness = await startHarness();
+  t.after(() => harness.dispose());
+  const sessionId = "aaaaaaaa-0000-4000-8000-000000000001";
+  const noCwdSession = "aaaaaaaa-0000-4000-8000-000000000002";
+  const workspace = join(harness.uploadsDir, "..", "workspace");
+  await mkdir(join(workspace, "sub"), { recursive: true });
+  const body = Buffer.from("0123456789abcdef");
+  await writeFile(join(workspace, "data.txt"), body);
+  await writeFile(join(workspace, "empty.txt"), "");
+  await writeFile(join(workspace, "archive.zip"), "PK");
+  await writeFile(join(workspace, ".env"), "SECRET=1");
+  await writeFile(join(harness.uploadsDir, "..", "outside.txt"), "x");
+  const project = join(harness.projectsDir, "file-api");
+  await mkdir(project);
+  await writeFile(join(project, `${sessionId}.jsonl`), jsonlLine({ type: "user", cwd: workspace, sessionId }));
+  await writeFile(join(project, `${noCwdSession}.jsonl`), jsonlLine({ type: "user", sessionId: noCwdSession }));
+
+  const fileUrl = (kind: string, path: string, id = sessionId) =>
+    `${harness.base}/api/sessions/${id}/files/${kind}?path=${encodeURIComponent(path)}`;
+  const errorOf = async (res: Response) => ((await res.json()) as { error: string }).error;
+
+  const meta = await fetch(fileUrl("meta", "data.txt"), authed());
+  assert.equal(meta.status, 200);
+  const info = (await meta.json()) as Record<string, unknown>;
+  assert.equal(info.name, "data.txt");
+  assert.equal(info.sizeBytes, body.length);
+  assert.equal(info.previewKind, "text");
+  assert.equal(info.mime, "text/plain; charset=utf-8");
+  assert.equal(typeof info.mtimeMs, "number");
+  const zip = (await (await fetch(fileUrl("meta", "archive.zip"), authed())).json()) as { previewKind: string };
+  assert.equal(zip.previewKind, "none");
+
+  const full = await fetch(fileUrl("content", String(info.path)), authed());
+  assert.equal(full.status, 200);
+  assert.equal(full.headers.get("content-disposition"), "attachment");
+  assert.equal(full.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(full.headers.get("cache-control"), "private, no-store");
+  assert.equal(full.headers.get("accept-ranges"), "bytes");
+  assert.equal(full.headers.get("content-length"), String(body.length));
+  assert.deepEqual(Buffer.from(await full.arrayBuffer()), body);
+
+  const partial = await fetch(fileUrl("content", "data.txt"), authed({ headers: { Range: "bytes=4-7" } }));
+  assert.equal(partial.status, 206);
+  assert.equal(partial.headers.get("content-range"), `bytes 4-7/${body.length}`);
+  assert.equal(partial.headers.get("content-disposition"), "attachment");
+  assert.equal(await partial.text(), "4567");
+  const suffix = await fetch(fileUrl("content", "data.txt"), authed({ headers: { Range: "bytes=-3" } }));
+  assert.equal(await suffix.text(), "def");
+
+  const beyond = await fetch(fileUrl("content", "data.txt"), authed({ headers: { Range: "bytes=16-" } }));
+  assert.equal(beyond.status, 416);
+  assert.equal(beyond.headers.get("content-range"), `bytes */${body.length}`);
+  assert.equal(await errorOf(beyond), "range_not_satisfiable");
+
+  const empty = await fetch(fileUrl("content", "empty.txt"), authed());
+  assert.equal(empty.status, 200);
+  assert.equal((await empty.arrayBuffer()).byteLength, 0);
+
+  assert.equal((await fetch(fileUrl("content", "data.txt"))).status, 401);
+  assert.equal((await fetch(fileUrl("meta", "data.txt"))).status, 401);
+
+  const cases: Array<[string, number, string, string?]> = [
+    ["", 400, "invalid_path"],
+    ["../outside.txt", 403, "outside_workspace"],
+    [".env", 403, "sensitive_file"],
+    ["missing.txt", 404, "file_not_found"],
+    ["sub", 404, "file_not_found"],
+    ["data.txt", 404, "session_not_found", "aaaaaaaa-0000-4000-8000-00000000dead"],
+    ["data.txt", 403, "outside_workspace", noCwdSession],
+  ];
+  for (const kind of ["meta", "content"]) {
+    for (const [path, status, error, id] of cases) {
+      const res = await fetch(fileUrl(kind, path, id), authed());
+      assert.equal(res.status, status, `${kind} ${path}`);
+      assert.equal(await errorOf(res), error, `${kind} ${path}`);
+    }
+  }
+});
+
+test("GET files：不能用含路径分隔符的会话 ID 指向上传目录里伪造的会话", async (t) => {
+  const harness = await startHarness();
+  t.after(() => harness.dispose());
+  const secret = join(harness.uploadsDir, "..", "outside.txt");
+  await writeFile(secret, "x");
+  const upload = await fetch(`${harness.base}/api/upload?filename=forged.jsonl`, authed({
+    method: "POST", body: jsonlLine({ type: "user", cwd: "/" }),
+  }));
+  const forged = ((await upload.json()) as { path: string }).path;
+  assert.ok(forged.startsWith(harness.uploadsDir));
+  const escaped = `../../uploads/new/${basename(forged).replace(/\.jsonl$/, "")}`;
+  const res = await fetch(
+    `${harness.base}/api/sessions/${encodeURIComponent(escaped)}/files/content?path=${encodeURIComponent(secret)}`,
+    authed(),
+  );
+  assert.equal(res.status, 404);
+  assert.equal(((await res.json()) as { error: string }).error, "session_not_found");
+});
+
 test("GET /api/sessions：fixture 会话 + 状态覆盖 + 分页 total", async () => {
   const res = await fetch(`${harness.base}/api/sessions?limit=10`, authed());
   assert.equal(res.status, 200);
