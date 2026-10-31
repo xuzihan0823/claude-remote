@@ -373,7 +373,7 @@ export function ChatScreen({ route }) {
     setPending((items) => {
       const previous = items.find((p) => p.clientMessageId === clientMessageId);
       const next = { ...previous, ...delivery, id: clientMessageId, clientMessageId, text, state: 'sending', floorSeq: previous?.floorSeq ?? (sorted.at(-1)?.seq || 0) };
-      return [...items.filter((p) => p.clientMessageId !== clientMessageId), next];
+      return reconcilePending([...items.filter((p) => p.clientMessageId !== clientMessageId), next], sorted);
     });
     return context;
   }, []);

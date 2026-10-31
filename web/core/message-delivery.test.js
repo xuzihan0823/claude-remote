@@ -12,6 +12,7 @@ test('matching prefers identity and only uses text for legacy requests', () => {
   assert.deepEqual(reconcilePending(pending, [message]), [pending[1]]);
   assert.equal(reconcilePending(pending, [message, { ...message, seq: 2, uuid: 'second' }]).length, 0);
   assert.equal(reconcilePending([{ text: 'same', precise: false, floorSeq: 1 }], [message]).length, 1);
+  assert.equal(reconcilePending([{ ...pending[0], floorSeq: 1 }], [message]).length, 0, 'UUID 确认不受重试时已更新的分页边界限制');
 });
 test('failure state distinguishes rejection and unknown delivery', () => {
   assert.equal(sendFailureState({ status: 0 }, true), 'unconfirmed');
