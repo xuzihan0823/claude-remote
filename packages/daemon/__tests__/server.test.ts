@@ -55,6 +55,7 @@ type SdkQuery = ReturnType<QueryFactory>;
 interface FakeSdk {
   factory: QueryFactory;
   params: QueryParams | undefined;
+  calls?: number;
   /** resolve 后 SDK 消息流结束（run → done）。 */
   finish: () => void;
   interrupts: number;
@@ -65,6 +66,7 @@ function fakeSdk(): FakeSdk {
   const holder: FakeSdk = { factory: undefined as never, params: undefined, finish: () => {}, interrupts: 0, delayAbort: false };
   holder.factory = ((params: QueryParams): SdkQuery => {
     holder.params = params;
+    holder.calls = (holder.calls ?? 0) + 1;
     let release: () => void = () => {};
     const gatePromise = new Promise<void>((resolvePromise) => {
       release = resolvePromise;
@@ -992,6 +994,45 @@ test("new and resumed turns validate effort and forward the selected value to SD
       const accepted = await send("max");
       assert.equal(accepted.status, 202);
       assert.equal((h.sdk.params as QueryParams | undefined)?.options?.effort, "max");
+      h.sdk.finish();
+    } finally { await h.dispose(); }
+  }
+});
+
+test("clientMessageId：新建与续聊的并发、完成后重试均只启动一次，UUID 进入 SDK 输入", async () => {
+  for (const path of ["/api/sessions", `/api/sessions/${SESSION_ID}/messages`]) {
+    const h = await startHarness();
+    try {
+      const id = "abcdefab-1234-4567-8abc-123456789012";
+      const send = (clientMessageId: unknown) => fetch(`${h.base}${path}`, authed({
+        method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, text: "same text", clientMessageId }),
+      }));
+      for (const bad of [null, "", "not-a-uuid", 42, {}]) {
+        const response = await send(bad);
+        assert.equal(response.status, 400);
+        assert.equal((await response.json() as { error: string }).error, "invalid_client_message_id");
+      }
+      assert.equal(h.sdk.calls ?? 0, 0);
+      const responses = await Promise.all([send(id), send(id.toUpperCase())]);
+      assert.deepEqual(responses.map((r) => r.status), [202, 202]);
+      const results = await Promise.all(responses.map((r) => r.json())) as Array<{ runId: string; sessionId?: string; clientMessageId: string }>;
+      assert.equal(results[0]?.runId, results[1]?.runId);
+      assert.equal(results[0]?.clientMessageId, id);
+      assert.equal(h.sdk.calls, 1);
+      const prompt = h.sdk.params?.prompt;
+      assert.ok(prompt && typeof prompt !== "string");
+      const input = await prompt[Symbol.asyncIterator]().next();
+      assert.equal(input.value.uuid, id);
+      assert.equal(input.value.message.content, "same text");
+      h.sdk.finish();
+      await delay(30);
+      const retry = await send(id);
+      assert.equal(retry.status, 202);
+      assert.equal((await retry.json() as { runId: string }).runId, results[0]?.runId);
+      assert.equal(h.sdk.calls, 1);
+      const next = await send("bbbbbbbb-1234-4567-8abc-123456789012");
+      assert.equal(next.status, 202);
+      assert.equal(h.sdk.calls, 2);
       h.sdk.finish();
     } finally { await h.dispose(); }
   }
