@@ -142,3 +142,11 @@ run.state 为 started/done/error；`error` 和 `permissionMode` 可选，permiss
 流帧为 `{ "type": "stream", "sessionId": "<uuid>", "key": "<apiMessageId>:<index>", "offset": 0, "text": "回答" }`，block 结束时带 `done: true`；offset 是 JavaScript 字符串偏移，按偏移合并可重复投递。订阅草稿快照从 offset 0 开始，终止清理为 `{ "type": "stream", "sessionId": "<uuid>", "clear": true }`。草稿仅供即时显示，正式正文以消息接口和 message 帧为准，二者需对账。
 
 客户端 `{ "type": "ping" }` 收到 `{ "type": "pong" }`，与订阅无关。会话快照及上述 HTTP/WS 行为由 `server.test.ts` 集成测试覆盖；App 恢复顺序由 `app/src/lib/__tests__/chat-streaming.test.mjs` 覆盖。
+
+## Markdown 公式与图片
+
+手机端支持 `$…$`、`\(…\)` 行内公式，以及 `$$…$$`、`\[…\]` 块级公式。MathJax 3.2.2 在首次渲染公式时加载，输出 SVG 交给原生组件；无效或尚未闭合的公式保留原文，长块级公式可横向滚动。代码块继续使用现有 highlight.js。
+
+本机图片和栅格 `data:image/…` 可自动显示；远程 HTTP(S) 图片须点击占位后才读取尺寸和内容，避免消息渲染自动向外发送请求。loopback URL 保留为链接，不改写为 daemon 或 relay 主机。点开图片复用全屏图片查看器。
+
+`GET /api/sessions/:id/file?path=<path>` 使用 Bearer 鉴权，支持绝对路径、`file://`、`~/` 以及相对会话真实 cwd 的路径。服务端先 `realpath`，再检查真实路径的栅格图片扩展名、普通文件类型和 25 MiB 上限；不提供 SVG。成功返回图片二进制、对应 Content-Type、`nosniff` 和私有不缓存响应。未知会话返回 404 `session_not_found`，空路径或非法 file URL 返回 400 `invalid_path`，非图片返回 415 `unsupported_image`，超限返回 413 `payload_too_large`，文件缺失或不可读返回 404 `not_found`。仅提供 GET；读取错误不会中断 daemon。经 relay 时沿用包含 `/d/<deviceId>` 的 base 和请求头鉴权。

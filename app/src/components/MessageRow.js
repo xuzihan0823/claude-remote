@@ -179,7 +179,7 @@ function UserAttachments({ paths }) {
   );
 }
 
-export function MessageRow({ m, sending = false, live = false }) {
+export function MessageRow({ m, sessionId, sending = false, live = false }) {
   const { colors } = useTheme();
   const scale = usePref('fontScale');
   const showThinking = usePref('showThinking');
@@ -249,7 +249,7 @@ export function MessageRow({ m, sending = false, live = false }) {
   }
   return (
     <View style={{ marginTop: 8, marginBottom: 20 }}>
-      <MarkdownView text={m.text} />
+      <MarkdownView text={m.text} sessionId={sessionId} />
       <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
         <TouchableOpacity accessibilityRole="button" accessibilityLabel="分享回复"
           onPress={() => Share.share({ message: m.text || '' }).catch(() => {})}
