@@ -1,11 +1,11 @@
 // 手机读取会话文件的路径校验与类型判断。
 //
 // Agent 读文件要经过模型和会话记录，这个接口不经过，所以只开放会话工作目录内的普通文件，
-// 工作目录取不到时直接拒绝，不回退到 home。
+// 以及这个会话自己写过的文件。其余路径一律拒绝，工作目录取不到时不回退到 home。
 
 import type { Stats } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
-import { basename, extname, resolve, sep } from "node:path";
+import { basename, extname, isAbsolute, resolve, sep } from "node:path";
 
 export type PreviewKind = "html" | "image" | "text" | "markdown" | "pdf" | "none";
 export type FileAccessErrorCode = "invalid_path" | "outside_workspace" | "sensitive_file" | "file_not_found";
@@ -45,29 +45,28 @@ export interface SessionFile {
   stats: Stats;
 }
 
-/** cwd 为空或不存在都按目录外处理；realpath 失败时不暴露工作目录外的文件是否存在。 */
-export async function resolveWorkspaceFile(cwd: string, requested: string | null): Promise<SessionFile> {
+/** cwd 为空或不存在时只认会话写过的文件；realpath 失败时不暴露目录外的文件是否存在。 */
+export async function resolveWorkspaceFile(
+  cwd: string,
+  requested: string | null,
+  wroteFile: (path: string) => Promise<boolean> = async () => false,
+): Promise<SessionFile> {
   if (!requested || requested.includes("\0")) throw new FileAccessError("invalid_path");
-  if (cwd === "") throw new FileAccessError("outside_workspace");
-
-  let root: string;
-  try {
-    root = await realpath(cwd);
-  } catch {
-    throw new FileAccessError("outside_workspace");
-  }
+  if (cwd === "" && !isAbsolute(requested)) throw new FileAccessError("outside_workspace");
 
   const target = resolve(cwd, requested);
   if (isSensitive(target)) throw new FileAccessError("sensitive_file");
+  const root = cwd === "" ? null : await realpath(cwd).catch(() => null);
 
   let real: string;
   try {
     real = await realpath(target);
   } catch {
-    const inside = isInside(target, cwd) || isInside(target, root);
-    throw new FileAccessError(inside ? "file_not_found" : "outside_workspace");
+    const inside = root !== null && (isInside(target, cwd) || isInside(target, root));
+    throw new FileAccessError(inside || (await wroteFile(target)) ? "file_not_found" : "outside_workspace");
   }
-  if (!isInside(real, root)) throw new FileAccessError("outside_workspace");
+  const inside = root !== null && isInside(real, root);
+  if (!inside && !(await wroteFile(real))) throw new FileAccessError("outside_workspace");
   if (isSensitive(real)) throw new FileAccessError("sensitive_file");
 
   let stats: Stats;

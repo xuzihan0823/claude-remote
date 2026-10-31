@@ -26,7 +26,7 @@ import type { DaemonConfig } from "./config.js";
 import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
 import { FileAccessError, fileMeta, fileTypeOf, parseRange, resolveWorkspaceFile, type SessionFile } from "./session-file-access.js";
-import { readSessionCwd, resolveSessionFile } from "./session-files.js";
+import { readSessionCwd, resolveSessionFile, sessionWroteFile } from "./session-files.js";
 import { StreamBuffer } from "./run/stream-buffer.js";
 import { approvalLink, NotIdleError, sessionLink, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
 import { listSessions } from "./transcript/indexer.js";
@@ -828,7 +828,7 @@ export class DaemonServer {
     }
     let file: SessionFile;
     try {
-      file = await resolveWorkspaceFile(await readSessionCwd(sessionFile), url.searchParams.get("path"));
+      file = await resolveWorkspaceFile(await readSessionCwd(sessionFile), url.searchParams.get("path"), (path) => sessionWroteFile(sessionFile, path));
     } catch (error) {
       if (!(error instanceof FileAccessError)) throw error;
       this.#json(res, error.status, { error: error.code });

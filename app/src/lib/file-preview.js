@@ -5,7 +5,7 @@ export const TEXT_PREVIEW_BYTES = 1024 * 1024;
 export const ASK_BEFORE_DOWNLOAD_BYTES = 50 * 1024 * 1024;
 
 const ERROR_TEXT = {
-  outside_workspace: '文件不在项目目录内',
+  outside_workspace: '文件不在项目目录内，也不是这个会话写入的',
   sensitive_file: '敏感文件不能在手机上查看',
   file_not_found: '文件不存在',
   session_not_found: '会话不存在',

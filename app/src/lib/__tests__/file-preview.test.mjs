@@ -19,7 +19,7 @@ test('fileContentRequest：令牌只在请求头，路径编码后进查询参�
 });
 
 test('错误码转成文案，未知错误有兜底', () => {
-  assert.equal(fileErrorText('outside_workspace'), '文件不在项目目录内');
+  assert.equal(fileErrorText('outside_workspace'), '文件不在项目目录内，也不是这个会话写入的');
   assert.equal(fileErrorText('network_error'), '无法读取文件');
 });
 

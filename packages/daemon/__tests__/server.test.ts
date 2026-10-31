@@ -438,6 +438,42 @@ test("GET files：meta 与 content 的鉴权、错误码、响应头和 Range", 
   }
 });
 
+test("GET files：会话写过的工作目录外文件可读，先取信息再用返回路径取内容", async (t) => {
+  const harness = await startHarness();
+  t.after(() => harness.dispose());
+  const sessionId = "aaaaaaaa-0000-4000-8000-000000000003";
+  const base = join(harness.uploadsDir, "..");
+  const workspace = join(base, "workspace");
+  const desktop = join(base, "desktop");
+  await mkdir(workspace);
+  await mkdir(desktop);
+  await writeFile(join(desktop, "page.html"), "<h1>ok</h1>");
+  await writeFile(join(desktop, "other.html"), "x");
+  await symlink(desktop, join(base, "desktop-link"));
+  const written = join(base, "desktop-link", "page.html");
+  const project = join(harness.projectsDir, "file-api-written");
+  await mkdir(project);
+  await writeFile(join(project, `${sessionId}.jsonl`), [
+    jsonlLine({ type: "user", cwd: workspace, sessionId }),
+    jsonlLine({ type: "assistant", message: { content: [{ type: "tool_use", id: "w1", name: "Write", input: { file_path: written } }] } }),
+    jsonlLine({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "w1", content: "ok" }] } }),
+  ].join(""));
+  const fileUrl = (kind: string, path: string) =>
+    `${harness.base}/api/sessions/${sessionId}/files/${kind}?path=${encodeURIComponent(path)}`;
+
+  const meta = await fetch(fileUrl("meta", written), authed());
+  assert.equal(meta.status, 200);
+  const info = (await meta.json()) as { path: string; previewKind: string };
+  assert.equal(info.previewKind, "html");
+  const content = await fetch(fileUrl("content", info.path), authed());
+  assert.equal(content.status, 200);
+  assert.equal(await content.text(), "<h1>ok</h1>");
+
+  const other = await fetch(fileUrl("content", join(desktop, "other.html")), authed());
+  assert.equal(other.status, 403);
+  assert.equal(((await other.json()) as { error: string }).error, "outside_workspace");
+});
+
 test("GET files：不能用含路径分隔符的会话 ID 指向上传目录里伪造的会话", async (t) => {
   const harness = await startHarness();
   t.after(() => harness.dispose());
