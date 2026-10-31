@@ -134,6 +134,7 @@ async function startHarness(): Promise<Harness> {
     cooldownMs: 120_000,
     interactionsDbPath: ":memory:",
     permissionTimeoutMs: 300_000,
+    relays: [],
   };
 
   const store = new InteractionStore(":memory:");
@@ -296,9 +297,9 @@ test("GET /api/connect-info：需鉴权；返回直连地址与 relay 状态，�
   const res = await fetch(`${harness.base}/api/connect-info`, authed());
   assert.equal(res.status, 200);
   const info = (await res.json()) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(info).sort(), ["bases", "relay"]);
+  assert.deepEqual(Object.keys(info).sort(), ["bases", "relays"]);
   assert.deepEqual(info.bases, harness.server.pairInfo.bases);
-  assert.deepEqual(info.relay, { state: "disabled" });
+  assert.deepEqual(info.relays, []);
   assert.equal(JSON.stringify(info).includes(TOKEN), false);
 });
 

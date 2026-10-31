@@ -39,7 +39,7 @@ node packages/cli/bin/cr.mjs setup
 手机连到 Mac 有两种方式，可以同时启用，手机会自动选当前能用的那条（能直连时优先直连）：
 
 - **Tailscale**（没有服务器时用）：Mac 和手机装 Tailscale 并登录同一账号，`cr pair` 扫码即可。在同一 Wi-Fi 下也能直接走局域网。
-- **自建 relay**（有一台公网 Linux 服务器时用）：在服务器上执行一行安装命令，再在 Mac 上执行它打印出的 `cr relay add …`。详见 [deploy/relay/README.md](deploy/relay/README.md)。
+- **自建 relay**（有公网 Linux 服务器时用）：在每台服务器执行一行安装命令，再在 Mac 上执行它打印出的 `cr relay add …`。支持同时接入多个自有 relay，一台故障时手机自动重选可用通道。已配对手机完整连接一次即可同步新地址，无需更新 App 或重新扫码。详见 [deploy/relay/README.md](deploy/relay/README.md)。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/xuzihan0823/claude-remote/main/deploy/relay/install.sh | sudo bash

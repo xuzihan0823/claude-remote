@@ -2,14 +2,17 @@
 // 手机侧用普通 HTTP / WS 客户端经 relay 访问 /d/<deviceId>/*。
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
 import { InteractionManager, InteractionStore } from "@claude-remote/interactions";
 import { startRelay, type RelayHandle } from "@claude-remote/relay";
@@ -17,7 +20,7 @@ import { deriveDeviceId, generateDeviceKey } from "@claude-remote/relay/protocol
 import { WebSocket, WebSocketServer } from "ws";
 
 import type { DaemonConfig, RelaySettings } from "../src/config.js";
-import { looksProxied } from "../src/pair.js";
+import { looksProxied, pairPayload } from "../src/pair.js";
 import { RelayConnector, forwardHeaders, type ConnectorTimings } from "../src/relay/connector.js";
 import { ApprovalBridge, TurnRunner, type ActivityGate } from "../src/run/index.js";
 import { DaemonServer } from "../src/server.js";
@@ -40,7 +43,7 @@ interface Daemon {
   dispose(): Promise<void>;
 }
 
-async function startDaemon(relayStatus?: () => ReturnType<RelayConnector["status"]>): Promise<Daemon> {
+async function startDaemon(relayStatuses?: () => ReturnType<RelayConnector["status"]>[]): Promise<Daemon> {
   const root = await mkdtemp(join(tmpdir(), "claude-remote-relay-it-"));
   const projectsDir = join(root, "projects");
   await mkdir(projectsDir, { recursive: true });
@@ -53,6 +56,7 @@ async function startDaemon(relayStatus?: () => ReturnType<RelayConnector["status
     cooldownMs: 120_000,
     interactionsDbPath: ":memory:",
     permissionTimeoutMs: 300_000,
+    relays: [],
   };
   const store = new InteractionStore(":memory:");
   const manager = new InteractionManager(store, { defaultTtlMs: 300_000 });
@@ -72,7 +76,7 @@ async function startDaemon(relayStatus?: () => ReturnType<RelayConnector["status
     version: "0.1.0-test",
     claudeCliVersion: () => "test",
     modelCatalog: async () => ({ models: [] }),
-    ...(relayStatus === undefined ? {} : { relayStatus }),
+    ...(relayStatuses === undefined ? {} : { relayStatuses }),
   });
   await server.listen();
   return {
@@ -166,7 +170,7 @@ let phoneBase: string;
 before(async () => {
   relay = await launchRelay();
   connector = new RelayConnector({ settings: settingsFor(relay.port), timings: FAST, log: () => {} });
-  daemon = await startDaemon(() => connector.status());
+  daemon = await startDaemon(() => [connector.status()]);
   connector.start(daemon.server.address());
   phoneBase = `http://127.0.0.1:${relay.port}/d/${ID}`;
   await until(() => connector.status().state === "connected");
@@ -195,8 +199,8 @@ test("经 relay：带 token 200、无 token 401；状态与 base 正确", async 
 test("connect-info 与 pairInfo：relay base 排在直连地址之后", async () => {
   const res = await request(`${phoneBase}/api/connect-info`, { headers: bearer });
   assert.equal(res.status, 200);
-  const info = json(res) as { bases: string[]; relay: { state: string; base: string } };
-  assert.equal(info.relay.state, "connected");
+  const info = json(res) as { bases: string[]; relays: { state: string; base: string }[] };
+  assert.equal(info.relays[0]?.state, "connected");
   assert.equal(info.bases.at(-1), phoneBase);
   assert.equal(info.bases.indexOf(phoneBase), info.bases.length - 1);
   assert.equal(daemon.server.pairInfo.bases.at(-1), phoneBase);
@@ -420,4 +424,106 @@ test("stop()：进行中的 WS 被关闭、relay 侧设备离线、之后不再�
   const attempts = counter.count();
   await delay(200);
   assert.equal(counter.count(), attempts);
+});
+
+test("多个 relay 同时转发，第二台故障不影响第一台；配对与同步均包含全部地址", async () => {
+  const firstRelay = await launchRelay();
+  let secondRelay = await launchRelay();
+  const ports = [firstRelay.port, secondRelay.port];
+  const connectors = ports.map((port) => new RelayConnector({ settings: settingsFor(port), timings: FAST, log: () => {} }));
+  const ownDaemon = await startDaemon(() => connectors.map((item) => item.status()));
+  const bases = ports.map((port) => `http://127.0.0.1:${port}/d/${ID}`);
+  try {
+    for (const item of connectors) item.start(ownDaemon.server.address());
+    await until(() => connectors.every((item) => item.status().state === "connected"));
+    for (const base of bases) {
+      const res = await request(`${base}/api/connect-info`, { headers: bearer });
+      assert.equal(res.status, 200);
+      const info = json(res) as { bases: string[]; relays: { state: string; base: string }[] };
+      assert.deepEqual(info.bases.slice(-2), bases);
+      assert.deepEqual(info.relays.map((item) => item.base), bases);
+      assert.ok(info.relays.every((item) => item.state === "connected"));
+    }
+    const pair = await request(`http://127.0.0.1:${ownDaemon.port}/api/pair-info`);
+    assert.deepEqual((json(pair).bases as string[]).slice(-2), bases);
+    const payload = pairPayload(ownDaemon.server.pairInfo);
+    assert.ok(bases.every((base) => payload.includes(encodeURIComponent(base))));
+
+    await secondRelay.close();
+    await until(() => connectors[1]!.status().state === "error");
+    assert.equal(connectors[0]!.status().state, "connected");
+    const healthy = await request(`${bases[0]}/api/connect-info`, { headers: bearer });
+    assert.equal(healthy.status, 200);
+    assert.deepEqual((json(healthy).bases as string[]).slice(-2), bases);
+    assert.deepEqual((json(healthy).relays as { state: string }[]).map((item) => item.state), ["connected", "error"]);
+    secondRelay = await launchRelay(ports[1]!);
+    await until(() => connectors[1]!.status().state === "connected");
+    assert.equal((await request(`${bases[1]}/api/health`, { headers: bearer })).status, 200);
+    await Promise.all(connectors.map((item) => item.stop()));
+    for (const base of bases) assert.equal((await request(`${base}/api/health`, { headers: bearer })).status, 503);
+  } finally {
+    await Promise.all(connectors.map((item) => item.stop()));
+    await ownDaemon.dispose();
+    await Promise.all([firstRelay.close(), secondRelay.close()]);
+  }
+});
+
+test("daemon 实际入口启动所有 relay，第二台启动失败仍可使用第一台，退出关闭全部连接", async () => {
+  const first = await launchRelay();
+  let second = await launchRelay();
+  const secondPort = second.port;
+  await second.close();
+  const root = await mkdtemp(join(tmpdir(), "claude-remote-multi-entry-"));
+  const portProbe = createServer();
+  await new Promise<void>((resolve) => portProbe.listen(0, "127.0.0.1", resolve));
+  const daemonPort = (portProbe.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => portProbe.close(() => resolve()));
+  const key = generateDeviceKey();
+  const id = deriveDeviceId(key);
+  const bases = [first.port, secondPort].map((port) => `http://127.0.0.1:${port}/d/${id}`);
+  const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../src/index.ts", import.meta.url))], {
+    cwd: fileURLToPath(new URL("../../../", import.meta.url)),
+    env: {
+      ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("RELAY_"))),
+      CLAUDE_REMOTE_ENV_FILE: join(root, "absent.env"),
+      BRIDGE_TOKEN: TOKEN, BRIDGE_HOST: "127.0.0.1", BRIDGE_PORT: String(daemonPort),
+      CLAUDE_PROJECTS_DIR: root, INTERACTIONS_DB_PATH: ":memory:",
+      RELAY_URL: `http://127.0.0.1:${first.port}`, RELAY_SECRET: SECRET,
+      RELAY_URL_2: `http://127.0.0.1:${secondPort}`, RELAY_SECRET_2: SECRET,
+      RELAY_DEVICE_ID: id, RELAY_DEVICE_KEY: key, RELAY_ENABLED: "on",
+    },
+    stdio: "ignore",
+  });
+  const exited = once(child, "exit");
+  async function waitConnected(base: string): Promise<void> {
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if (child.exitCode !== null) throw new Error(`daemon exited: ${child.exitCode}`);
+      const res = await request(`${base}/api/connect-info`, { headers: bearer });
+      if (res.status === 200) {
+        assert.deepEqual((json(res).bases as string[]).slice(-2), bases);
+        return;
+      }
+      assert.ok(Date.now() < deadline, "daemon did not connect relay");
+      await delay(50);
+    }
+  }
+  try {
+    await waitConnected(bases[0]!);
+    const info = json(await request(`${bases[0]}/api/connect-info`, { headers: bearer }));
+    assert.equal((info.relays as unknown[]).length, 2);
+    second = await launchRelay(secondPort);
+    await waitConnected(bases[1]!);
+    child.kill("SIGTERM");
+    const [code] = await exited;
+    assert.equal(code, 0);
+    for (const base of bases) assert.equal((await request(`${base}/api/health`, { headers: bearer })).status, 503);
+  } finally {
+    if (child.exitCode === null) {
+      child.kill("SIGTERM");
+      await exited;
+    }
+    await Promise.all([first.close(), second.close()]);
+    await rm(root, { recursive: true, force: true });
+  }
 });

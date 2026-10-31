@@ -159,7 +159,7 @@ export function ChatComposer({
       return;
     }
     setSendBusy(true);
-    haptics.tap();
+    haptics.confirm();
     const typed = draft;
     const shown = draft.trim();
     let context;

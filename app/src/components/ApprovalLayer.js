@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Text, TextInput, TouchableOpacity, View } from 'react-native';
+import Animated, {
+  Easing,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 import { KeyboardStickyView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, sessionCache } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
 import { truncate } from '../lib/format.js';
 import { haptics } from '../lib/haptics.js';
+import { Icon, toolIconName } from './Icon.js';
 import { ToolInputView } from './ToolInputView.js';
 import { useTheme } from '../theme.js';
 
@@ -72,6 +81,8 @@ function InputBlock({ toolName, value }) {
 function ApprovalCard({ item, onDecide }) {
   const { colors, fonts, radius } = useTheme();
   const it = item.interaction;
+  const reduceMotion = useReducedMotion();
+  const progress = useSharedValue(reduceMotion ? 1 : 0);
   const [busy, setBusy] = useState(false);
   const [denyMsg, setDenyMsg] = useState('');
   const [answers, setAnswers] = useState(
@@ -79,6 +90,29 @@ function ApprovalCard({ item, onDecide }) {
   );
   const sess = sessionCache.get(it.sessionId);
   const sessLabel = sess?.title ? truncate(sess.title, 24) : it.sessionId.slice(0, 8);
+
+  useEffect(() => {
+    if (reduceMotion) {
+      progress.value = item.resolved ? 0 : 1;
+      return undefined;
+    }
+    if (item.resolved) {
+      progress.value = withTiming(0, { duration: 200, easing: Easing.out(Easing.cubic) });
+      return undefined;
+    }
+    const id = requestAnimationFrame(() => {
+      progress.value = withSpring(1, { damping: 21, stiffness: 220, mass: 0.8 });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [item.resolved, reduceMotion, progress]);
+
+  const cardAnimStyle = useAnimatedStyle(() => ({
+    opacity: Math.min(1, progress.value * 1.35),
+    transform: [
+      { translateY: (1 - progress.value) * 96 },
+      { scale: 0.94 + 0.06 * progress.value },
+    ],
+  }));
 
   const decide = async (body) => {
     const status = body.type === 'deny' ? 'denied' : (body.type === 'answer' ? 'answered' : 'allowed');
@@ -135,24 +169,28 @@ function ApprovalCard({ item, onDecide }) {
   };
 
   return (
-    <View
-      style={{
-        width: '100%',
-        maxWidth: 480,
-        backgroundColor: colors.card,
-        borderWidth: 1,
-        borderColor: colors.line,
-        borderRadius: radius.island,
-        padding: 14,
-        paddingTop: 16,
-        shadowColor: '#000',
-        shadowOpacity: 0.22,
-        shadowRadius: 17,
-        shadowOffset: { width: 0, height: 10 },
-        elevation: 6,
-        position: 'relative',
-        overflow: 'hidden',
-      }}
+    <Animated.View
+      pointerEvents={item.resolved ? 'none' : 'auto'}
+      style={[
+        {
+          width: '100%',
+          maxWidth: 480,
+          backgroundColor: colors.card,
+          borderWidth: 1,
+          borderColor: colors.line,
+          borderRadius: radius.island,
+          padding: 14,
+          paddingTop: 16,
+          shadowColor: '#000',
+          shadowOpacity: 0.22,
+          shadowRadius: 17,
+          shadowOffset: { width: 0, height: 10 },
+          elevation: 6,
+          position: 'relative',
+          overflow: 'hidden',
+        },
+        cardAnimStyle,
+      ]}
     >
       {item.resolved ? (
         <View
@@ -189,12 +227,44 @@ function ApprovalCard({ item, onDecide }) {
       ) : null}
 
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-        <Text style={{ fontSize: 13, fontWeight: '600', color: colors.inkStrong }}>
-          {it.kind === 'question' ? '❓ 提问' : '🔐 审批'}
+        <View
+          style={{
+            width: 24,
+            height: 24,
+            borderRadius: 7,
+            backgroundColor: colors.accent + '1F',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <Icon
+            name={it.kind === 'question' ? 'help' : 'shieldCheck'}
+            size={15}
+            color={colors.accentDeep}
+            strokeWidth={2}
+          />
+        </View>
+        <Text style={{ fontSize: 13.5, fontWeight: '600', color: colors.inkStrong }}>
+          {it.kind === 'question' ? '提问' : '审批'}
         </Text>
-        <Text style={{ fontFamily: fonts.mono, fontSize: 12.5, color: colors.accentDeep }}>
-          {it.toolName || ''}
-        </Text>
+        {it.toolName ? (
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 5,
+              backgroundColor: colors.bg2,
+              borderRadius: 6,
+              paddingHorizontal: 7,
+              paddingVertical: 2.5,
+            }}
+          >
+            <Icon name={toolIconName(it.toolName)} size={13} color={colors.accentDeep} strokeWidth={1.9} />
+            <Text style={{ fontFamily: fonts.mono, fontSize: 12, color: colors.accentDeep }}>
+              {it.toolName}
+            </Text>
+          </View>
+        ) : null}
         <Countdown expiresAt={it.expiresAt} stop={!!item.resolved} />
       </View>
 
@@ -373,7 +443,7 @@ function ApprovalCard({ item, onDecide }) {
           </View>
         </>
       ) : null}
-    </View>
+    </Animated.View>
   );
 }
 
@@ -402,7 +472,7 @@ export function ApprovalLayer() {
     const t = setTimeout(() => {
       removalTimers.current.delete(id);
       setItems((xs) => xs.filter((x) => x.interaction.interactionId !== id));
-    }, 500);
+    }, 210);
     removalTimers.current.set(id, t);
   }, []);
 

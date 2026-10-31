@@ -45,6 +45,10 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 - 流控：每个流每个方向初始窗口 256 KiB，接收方消费后回 `credit`。不能发 `bytes: 0` 的 credit（空 WS 消息不产生 credit 帧）。
 - `RELAY_SECRET` 写入 `.env` 时不加引号，所以不能包含 `#`、引号、反引号和反斜杠，否则 `process.loadEnvFile` 会截断。
 - 设备离线时 relay 立即返回 503 `device_offline`，手机会回退到其它地址。
+- 多 relay 配置：第一项沿用 `RELAY_URL` / `RELAY_SECRET`，后续为 `_2`、`_3` 等连续编号。`loadRelaySettings` 返回数组；缺配对密钥、编号空位、规范化后地址重复或非法时拒启，错误指出编号。`RELAY_ENABLED=off` 时返回空数组。
+- daemon 为每项创建独立 `RelayConnector`，全部启动和停止，各自退避、重连和发送心跳；单台失败不影响其他连接。不改变 relay 服务端或隧道协议。
+- 所有 relay 共用 `RELAY_DEVICE_ID` / `RELAY_DEVICE_KEY`。`add` 追加地址或更新已有地址的密钥；`remove <地址>` 重排编号并保留设备身份；`remove --all` 清除身份。每台 relay 都会收到设备私钥，并能看到转发的 token 和内容，因此仅适用于自己控制的服务器。
+- 配对码和 `GET /api/connect-info` 都在直连地址后追加所有已启用的 relay 地址，暂时故障的 relay 也保留。`connect-info` 返回 `{ bases: string[], relays: RelayStatus[] }`，不再返回单数 `relay`；未启用时 `relays` 为空，状态只含 `state`、`base`、`since` 和可选 `error`，不包含密钥。
 
 ## 手机端多通道
 
@@ -52,7 +56,8 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 
 - 一台设备保存多个地址：`bases`（同步而来）、`manualBases`（用户手填，同步时不能删）、`lastBase`、`channelPref`（`auto`/`direct`/`relay`）。
 - `probeBases` 并行探测：直连先通就立即使用；relay 先通则再等 1.5 秒看有没有直连；任一地址返回 401 就停止并提示 token 错误。不要改回串行探测，一个失效的 Tailscale IP 就要等 8 秒超时。
-- 连上后调用 `GET /api/connect-info`，用 `syncBases` 把新通道（比如刚加的 relay）同步给已配对的手机。
+- 完整连接时调用 `GET /api/connect-info`，用 `syncBases` 把新通道同步给已配对的手机，并删除 daemon 不再承认的旧通道；手填地址保留。冷启动或点“重新连接”会同步，`reselect` 只重新探测现有候选地址。新增 relay 后必须趁现有通道可用时完整连接一次。
+- 多个 relay 没有优先级，选最先探测成功的那个；故障后重选通道，恢复后不会主动切回。Mac 或 daemon 离线时全部 relay 都不可用。
 - WS 应用层心跳：每 10 秒发 `{type:"ping"}`，daemon 先回 `{type:"pong"}` 再做其它检查。收到过 pong 之后 5 秒内无任何帧视为半开连接；连续 2 次连接失败或半开时发出 `ws-reselect`，App 重新选路。App 回到前台时也会重新选路。
 
 ## 模型目录与项目分组

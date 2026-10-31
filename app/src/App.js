@@ -292,7 +292,7 @@ export default function App() {
         <SafeAreaProvider>
           <BottomSheetModalProvider>
             <ConnActions.Provider value={{ tryConnect, tryConnectBases, switchDevice, reselect }}>
-              <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
+              <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} animated />
               {auth !== 'ok' ? (
                 <ConnectScreen busy={auth === 'checking'} error={authErr} onSubmit={tryConnect} onScan={tryConnectBases} />
               ) : (

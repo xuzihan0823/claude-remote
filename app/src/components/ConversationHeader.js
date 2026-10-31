@@ -5,10 +5,11 @@ import { GlassMenu } from './GlassMenu.js';
 import { GlassSurface } from './GlassSurface.js';
 import { Icon } from './Icon.js';
 import { buildModeMenuItems, MODE_LABELS } from './composer/ModeSheet.js';
+import { haptics } from '../lib/haptics.js';
 import { useTheme } from '../theme.js';
 
-// 顶栏：左侧抽屉按钮；右侧三点菜单承载「会话信息 / 选择工作目录 / 权限模式」。
-// 点击「权限模式」直接在同一个液态玻璃菜单内展开子列表，选完或点空白处后水滴收起回三点按钮。
+// 顶栏：左侧抽屉按钮；右侧胶囊（新建会话 + 三点菜单）点击时整体原位变形为液态玻璃下拉框。
+// 点击「权限模式」在下拉框内直接展开圆角内层下拉框（上方条目保留并半透明淡化），选完或点空白处后收起回右上角胶囊。
 export function ConversationHeader({
   title,
   subtitle,
@@ -24,9 +25,9 @@ export function ConversationHeader({
   const navigation = useNavigation();
   const { colors } = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [subpage, setSubpage] = useState(null); // null | 'mode'
+  const [pillHidden, setPillHidden] = useState(false);
   const [menuAnchor, setMenuAnchor] = useState(null);
-  const moreBtnRef = useRef(null);
+  const pillRef = useRef(null);
 
   const buttonStyle = ({ pressed }) => ({
     width: 48,
@@ -38,6 +39,7 @@ export function ConversationHeader({
   });
 
   const hasMode = showModeSelector && !!mode;
+  const modeItems = hasMode ? buildModeMenuItems(mode, onModeChange) : [];
   const rootItems = [];
   if (details) {
     rootItems.push({
@@ -69,50 +71,39 @@ export function ConversationHeader({
       detailTone: mode === 'bypassPermissions' ? 'danger' : undefined,
       chevron: true,
       testID: 'menu-mode',
-      keepOpen: true,
-      onPress: () => setSubpage('mode'),
+      subItems: modeItems,
     });
   }
 
-  const modeItems = hasMode ? buildModeMenuItems(mode, onModeChange) : [];
-
-  const modeHeader = subpage === 'mode' ? (
-    <Pressable
-      onPress={() => setSubpage(null)}
-      accessibilityRole="button"
-      accessibilityLabel="返回上一级菜单"
-      style={({ pressed }) => ({
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 6,
-        paddingHorizontal: 12,
-        paddingVertical: 8,
-        marginHorizontal: 6,
-        borderRadius: 12,
-        backgroundColor: pressed ? colors.glassPressed : 'transparent',
-      })}
-    >
-      <Icon name="back" size={16} color={colors.ink2} />
-      <Text style={{ color: colors.ink2, fontSize: 13, fontWeight: '600' }}>权限模式</Text>
-    </Pressable>
-  ) : null;
-
   const closeMenu = () => {
     setMenuOpen(false);
-    setTimeout(() => setSubpage(null), 280);
   };
 
   const openMenu = () => {
     Keyboard.dismiss();
     if (!rootItems.length) return;
-    const node = moreBtnRef.current;
+    haptics.tap();
+    const node = pillRef.current;
     if (!node) return;
     node.measureInWindow((x, y, width, height) => {
-      setSubpage(null);
       setMenuAnchor({ x, y, width, height });
+      setPillHidden(true);
       setMenuOpen(true);
     });
   };
+
+  const pillIconsSnapshot = (
+    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+      {newChat ? (
+        <View style={{ width: 48, height: 48, alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name="newChat" size={21} strokeWidth={2} />
+        </View>
+      ) : null}
+      <View style={{ width: 48, height: 48, alignItems: 'center', justifyContent: 'center' }}>
+        <Icon name="more" />
+      </View>
+    </View>
+  );
 
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 }}>
@@ -125,24 +116,32 @@ export function ConversationHeader({
         {title ? <Text numberOfLines={1} style={{ color: colors.inkStrong, fontSize: 15, fontWeight: '500' }}>{title}</Text> : null}
         {subtitle}
       </View>
-      <GlassSurface interactive variant="pill" style={{ borderRadius: 24, flexDirection: 'row' }}>
-        {newChat ? (
-          <Pressable style={buttonStyle} onPress={onNewChat || (() => navigation.navigate('Home'))} testID="header-new-chat" accessibilityRole="button" accessibilityLabel="新建会话">
-            <Icon name="newChat" size={21} />
-          </Pressable>
-        ) : null}
-        <View ref={moreBtnRef} collapsable={false}>
+      <View
+        ref={pillRef}
+        collapsable={false}
+        pointerEvents={pillHidden ? 'none' : 'auto'}
+        style={{ opacity: pillHidden ? 0 : 1 }}
+      >
+        <GlassSurface interactive variant="pill" style={{ borderRadius: 24, flexDirection: 'row' }}>
+          {newChat ? (
+            <Pressable style={buttonStyle} onPress={onNewChat || (() => navigation.navigate('Home'))} testID="header-new-chat" accessibilityRole="button" accessibilityLabel="新建会话">
+              <Icon name="newChat" size={21} strokeWidth={2} />
+            </Pressable>
+          ) : null}
           <Pressable style={buttonStyle} onPress={openMenu} testID="header-more" accessibilityRole="button" accessibilityLabel="更多选项" accessibilityState={{ expanded: menuOpen }}>
             <Icon name="more" />
           </Pressable>
-        </View>
-      </GlassSurface>
+        </GlassSurface>
+      </View>
       <GlassMenu
         visible={menuOpen}
         anchor={menuAnchor}
-        header={modeHeader}
-        items={subpage === 'mode' ? modeItems : rootItems}
+        morphAnchor
+        anchorSnapshot={pillIconsSnapshot}
+        title={title || undefined}
+        items={rootItems}
         onClose={closeMenu}
+        onAfterClose={() => setPillHidden(false)}
       />
     </View>
   );

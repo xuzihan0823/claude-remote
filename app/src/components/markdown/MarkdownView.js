@@ -1,13 +1,14 @@
 // RN 端 Markdown 渲染器：与 web/ui/components/markdown.js 输出对齐，流式增量友好。
 // 用 vendored marked 的 lexer 产 token 树，再 token -> RN 组件递归渲染。
 // 纯函数式：同一 text 重渲染稳定（列表 key 用索引即可）。
-import { useMemo } from 'react';
-import { ScrollView, Text, View } from 'react-native';
+import { useMemo, useState } from 'react';
+import { Dimensions, ScrollView, Text, View } from 'react-native';
 import { marked } from '../../../../web/vendor/marked.esm.min.js';
 import { installLinkify, wholeUrl } from '../../../../web/core/linkify.js';
 import { openLink, shareLink } from '../../lib/links.js';
 import { useTheme } from '../../theme.js';
 import { usePref } from '../../lib/prefs.js';
+import { fitColumnWidths, naturalColumnWidths } from '../../lib/table-layout.js';
 import { highlightCode } from './highlight.js';
 
 installLinkify(marked);
@@ -213,29 +214,76 @@ function renderBlockquote(tok, ctx, key) {
   );
 }
 
-// 表格简化为等宽文本网格：表头 / 分隔行 / 数据行，每行单元格用 ' | ' 连接
-function renderTable(tok, ctx, key) {
-  const header = (tok.header || []).map((h) => h.text ?? '');
-  const rows = (tok.rows || []).map((r) => (r || []).map((c) => c.text ?? ''));
-  const lines = [];
-  if (header.length) {
-    lines.push(header.join(' | '));
-    lines.push(header.map(() => '---').join(' | '));
-  }
-  for (const r of rows) lines.push(r.join(' | '));
+const TABLE_CELL_PAD = 10;
+const TABLE_MIN_COLUMN = 96;
+
+function renderTableRow(cells, tok, widths, ctx, key, isHeader) {
   return (
-    <View key={key} style={{ marginVertical: 8 }}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-        <Text
+    <View
+      key={key}
+      style={{
+        flexDirection: 'row',
+        backgroundColor: isHeader ? ctx.colors.card : undefined,
+        borderTopWidth: isHeader ? 0 : 1,
+        borderTopColor: ctx.colors.line,
+      }}
+    >
+      {cells.map((cell, col) => (
+        <View
+          key={col}
           style={{
-            fontFamily: ctx.fonts.mono,
-            fontSize: ctx.fs * 0.86,
-            lineHeight: Math.round(ctx.lh * 0.95),
-            color: ctx.colors.ink,
+            width: widths[col],
+            flexGrow: widths[col],
+            paddingHorizontal: TABLE_CELL_PAD,
+            paddingVertical: 7,
+            borderLeftWidth: col === 0 ? 0 : 1,
+            borderLeftColor: ctx.colors.line,
           }}
         >
-          {lines.join('\n')}
-        </Text>
+          <Text
+            style={{
+              color: isHeader ? ctx.colors.inkStrong : ctx.colors.ink,
+              fontSize: ctx.fs * 0.88,
+              lineHeight: Math.round(ctx.lh * 0.84),
+              fontWeight: isHeader ? '700' : undefined,
+              textAlign: tok.align?.[col] || 'left',
+            }}
+          >
+            {renderInline(cell.tokens, ctx, `${key}-${col}-`)}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// RN 没有表格布局，各行靠相同的固定列宽对齐；横向 ScrollView 里 flexBasis 不生效，必须用 width。
+// 首帧按聊天页宽度估算（两侧各 20），避免 onLayout 校正时表格跳动。
+function MarkdownTable({ tok, ctx }) {
+  const [available, setAvailable] = useState(() => Dimensions.get('window').width - 42);
+  const widths = fitColumnWidths(
+    naturalColumnWidths(tok, ctx.fs * 0.88, TABLE_CELL_PAD),
+    available,
+    TABLE_MIN_COLUMN * ctx.scale,
+  );
+  return (
+    <View
+      onLayout={(e) => setAvailable(e.nativeEvent.layout.width - 2)}
+      style={{
+        marginVertical: 8,
+        borderWidth: 1,
+        borderColor: ctx.colors.line,
+        borderRadius: ctx.radius.sm,
+        overflow: 'hidden',
+      }}
+    >
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ flexGrow: 1, flexDirection: 'column' }}
+      >
+        {renderTableRow(tok.header, tok, widths, ctx, 'h', true)}
+        {tok.rows.map((row, i) => renderTableRow(row, tok, widths, ctx, `r${i}`, false))}
       </ScrollView>
     </View>
   );
@@ -341,7 +389,7 @@ function renderBlock(tok, ctx, key) {
     case 'list':
       return renderList(tok, ctx, key);
     case 'table':
-      return renderTable(tok, ctx, key);
+      return <MarkdownTable key={key} tok={tok} ctx={ctx} />;
     case 'html':
       // 块级 html：作为纯文本展示（等宽，弱化色）
       return (

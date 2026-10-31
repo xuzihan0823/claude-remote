@@ -73,7 +73,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
       return;
     }
     setBusy(true);
-    haptics.tap();
+    haptics.confirm();
     try {
       const { result, body } = await createSession({
         cwd,

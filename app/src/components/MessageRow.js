@@ -1,7 +1,15 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ActivityIndicator, Image, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
+import Animated, {
+  FadeIn,
+  LinearTransition,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withSpring,
+} from 'react-native-reanimated';
 import { MarkdownView } from './markdown/MarkdownView.js';
-import { Icon } from './Icon.js';
+import { Icon, toolIconName } from './Icon.js';
 import { Spark } from './Spark.js';
 import { fmtClock, toolSummary } from '../lib/format.js';
 import { toolHeadline } from '../lib/tool-view.js';
@@ -9,25 +17,69 @@ import { ToolInputView } from './ToolInputView.js';
 import { useTheme } from '../theme.js';
 import { LinkText } from './LinkText.js';
 import { usePref } from '../lib/prefs.js';
+import { haptics } from '../lib/haptics.js';
 import { isImagePath, parseAttachmentNote, uploadImageSource } from '../lib/attachments.js';
+import { ImageViewer } from './ImageViewer.js';
 
 // 折叠块：thinking / tool_use / tool_result 共用（web 的 <details> 对应物）
-function Block({ icon, title, sub, err, children, defaultOpen = false }) {
+const BLOCK_SPRING = { damping: 18, stiffness: 210, mass: 0.75 };
+const CHEVRON_SPRING = { damping: 20, stiffness: 260, mass: 0.7 };
+
+function Block({ icon, title, sub, err, live = false, children, defaultOpen = false }) {
   const { colors, fonts, radius } = useTheme();
+  const reduceMotion = useReducedMotion();
   const [open, setOpen] = useState(defaultOpen);
+  const enter = useSharedValue(live && !reduceMotion ? 0 : 1);
+  const fold = useSharedValue(defaultOpen ? 1 : 0);
+
+  useEffect(() => {
+    if (!live || reduceMotion) {
+      enter.value = 1;
+      return undefined;
+    }
+    const id = requestAnimationFrame(() => {
+      enter.value = withSpring(1, BLOCK_SPRING);
+    });
+    return () => cancelAnimationFrame(id);
+  }, [live, reduceMotion, enter]);
+
+  useEffect(() => {
+    fold.value = reduceMotion ? (open ? 1 : 0) : withSpring(open ? 1 : 0, CHEVRON_SPRING);
+  }, [open, reduceMotion, fold]);
+
+  const enterStyle = useAnimatedStyle(() => ({
+    opacity: Math.min(1, enter.value * 1.4),
+    transform: [
+      { translateY: (1 - enter.value) * 16 },
+      { scale: 0.96 + 0.04 * enter.value },
+    ],
+  }));
+
+  const chevronStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${fold.value * 180}deg` }],
+  }));
+
   return (
-    <View
-      style={{
-        backgroundColor: colors.card,
-        borderRadius: radius.sm,
-        borderWidth: 1,
-        borderColor: err ? colors.danger : colors.line,
-        marginVertical: 4,
-        overflow: 'hidden',
-      }}
+    <Animated.View
+      layout={reduceMotion ? undefined : LinearTransition.springify().damping(22).stiffness(260)}
+      style={[
+        {
+          backgroundColor: colors.card,
+          borderRadius: radius.sm,
+          borderWidth: 1,
+          borderColor: err ? colors.danger : colors.line,
+          marginVertical: 4,
+          overflow: 'hidden',
+        },
+        enterStyle,
+      ]}
     >
       <TouchableOpacity
-        onPress={() => setOpen((o) => !o)}
+        activeOpacity={0.75}
+        onPress={() => {
+          haptics.selection();
+          setOpen((o) => !o);
+        }}
         style={{ flexDirection: 'row', alignItems: 'center', padding: 10, gap: 6 }}
       >
         {icon}
@@ -39,10 +91,19 @@ function Block({ icon, title, sub, err, children, defaultOpen = false }) {
         ) : (
           <View style={{ flex: 1 }} />
         )}
-        <Text style={{ color: colors.ink3, fontSize: 12 }}>{open ? '⌃' : '⌄'}</Text>
+        <Animated.View style={chevronStyle}>
+          <Icon name="chevron" size={16} color={colors.ink3} />
+        </Animated.View>
       </TouchableOpacity>
-      {open ? <View style={{ paddingHorizontal: 10, paddingBottom: 10 }}>{children}</View> : null}
-    </View>
+      {open ? (
+        <Animated.View
+          entering={reduceMotion ? undefined : FadeIn.duration(160)}
+          style={{ paddingHorizontal: 10, paddingBottom: 10 }}
+        >
+          {children}
+        </Animated.View>
+      ) : null}
+    </Animated.View>
   );
 }
 
@@ -59,6 +120,7 @@ function SentImage({ path, single }) {
   const { colors } = useTheme();
   const [ratio, setRatio] = useState(1);
   const [failed, setFailed] = useState(false);
+  const [viewing, setViewing] = useState(false);
   const source = uploadImageSource(path);
   const width = single ? 220 : 120;
   const height = single ? Math.min(Math.max(width / ratio, 120), 320) : 120;
@@ -72,14 +134,26 @@ function SentImage({ path, single }) {
     );
   }
   return (
-    <Image
-      source={source}
-      resizeMode="cover"
-      accessibilityLabel={fileName(path)}
-      onLoad={(e) => { const { width: w, height: h } = e.nativeEvent.source || {}; if (w && h) setRatio(w / h); }}
-      onError={() => setFailed(true)}
-      style={frame}
-    />
+    <>
+      <TouchableOpacity
+        activeOpacity={0.75}
+        accessibilityRole="imagebutton"
+        accessibilityLabel={`查看图片 ${fileName(path)}`}
+        onPress={() => {
+          haptics.selection();
+          setViewing(true);
+        }}
+      >
+        <Image
+          source={source}
+          resizeMode="cover"
+          onLoad={(e) => { const { width: w, height: h } = e.nativeEvent.source || {}; if (w && h) setRatio(w / h); }}
+          onError={() => setFailed(true)}
+          style={frame}
+        />
+      </TouchableOpacity>
+      <ImageViewer source={source} label={fileName(path)} visible={viewing} onClose={() => setViewing(false)} />
+    </>
   );
 }
 
@@ -105,7 +179,7 @@ function UserAttachments({ paths }) {
   );
 }
 
-export function MessageRow({ m, sending = false }) {
+export function MessageRow({ m, sending = false, live = false }) {
   const { colors } = useTheme();
   const scale = usePref('fontScale');
   const showThinking = usePref('showThinking');
@@ -121,7 +195,7 @@ export function MessageRow({ m, sending = false }) {
   if (m.kind === 'thinking') {
     if (!showThinking) return null;
     return (
-      <Block icon={<Spark size={13} />} title="思考过程">
+      <Block icon={<Spark size={13} />} title="思考过程" live={live}>
         <LinkText text={m.text} style={{ color: colors.ink2, fontSize: 13 * scale, lineHeight: Math.round(20 * scale) }} selectable />
       </Block>
     );
@@ -129,10 +203,11 @@ export function MessageRow({ m, sending = false }) {
   if (m.kind === 'tool_use') {
     return (
       <Block
-        icon={<Text style={{ fontSize: 12 }}>⚒</Text>}
+        icon={<Icon name={toolIconName(m.toolName)} size={15} color={colors.accentDeep} />}
         title={m.toolName || '工具'}
         sub={toolHeadline(m.toolName, m.toolInput) || toolSummary(m)}
         defaultOpen={toolsExpanded}
+        live={live}
       >
         <ToolInputView name={m.toolName} input={m.toolInput} />
       </Block>
@@ -142,11 +217,12 @@ export function MessageRow({ m, sending = false }) {
     const chars = (m.text || '').length;
     return (
       <Block
-        icon={<Text style={{ fontSize: 12, color: m.isError ? colors.danger : colors.ok }}>{m.isError ? '✕' : '✓'}</Text>}
+        icon={<Icon name={m.isError ? 'close' : 'check'} size={15} color={m.isError ? colors.danger : colors.ok} strokeWidth={2.1} />}
         title={m.isError ? '工具出错' : '工具结果'}
         sub={`${chars} 字符`}
         err={m.isError}
         defaultOpen={toolsExpanded}
+        live={live}
       >
         <MonoBody text={m.text || ''} err={m.isError} />
       </Block>

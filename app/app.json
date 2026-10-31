@@ -66,6 +66,17 @@
           "cameraPermission": "扫描 Mac 上的配对二维码，以及拍照发给 Claude",
           "microphonePermission": false
         }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "选择照片发给 Claude",
+          "savePhotosPermission": "保存图片到相册",
+          "preventAutomaticLimitedAccessAlert": true,
+          "granularPermissions": [
+            "photo"
+          ]
+        }
       ]
     ]
   }

@@ -8,7 +8,7 @@ const extOf = (s) => {
   return m ? m[1].toLowerCase() : '';
 };
 const IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif']);
-
+const KEEP_ORIGINAL_EXT = new Set(['png', 'gif', 'webp']);
 /**
  * picker 结果 → { uri, name, size, mimeType, isImage }。
  * 相册原名常是 IMG_0001.HEIC，但 Compatible 模式下实际文件已转成 JPEG：扩展名以 uri 为准，
@@ -30,6 +30,68 @@ export function normalizeAsset(a, { now = Date.now() } = {}) {
     mimeType,
     isImage: a.type === 'image' || mimeType.startsWith('image/') || IMAGE_EXT.has(extOf(name)),
   };
+}
+
+/**
+ * 将相册网格选中的资源转为可上传的附件项：
+ * PNG / GIF / WebP 优先保留原文件；HEIC / HEIF / 其他格式统一转成兼容 JPEG，避免 Claude Read 报错。
+ */
+export async function resolveMediaLibraryAsset(item, { getFileUri, convertToJpeg, now = Date.now() } = {}) {
+  const filename = item?.filename || '';
+  const ext = extOf(filename);
+  let sourceUri = item?.uri || item?.id || '';
+  if (getFileUri) {
+    try {
+      const localUri = await getFileUri(item.id);
+      if (localUri) sourceUri = localUri;
+    } catch {}
+  }
+  const actualExt = extOf(sourceUri) || ext;
+  if (KEEP_ORIGINAL_EXT.has(actualExt) && sourceUri.startsWith('file:')) {
+    return normalizeAsset({
+      uri: sourceUri,
+      fileName: filename || `photo-${now}.${actualExt}`,
+      type: 'image',
+      mimeType: `image/${actualExt}`,
+    }, { now });
+  }
+  if (convertToJpeg) {
+    let jpegUri;
+    try {
+      jpegUri = await convertToJpeg(sourceUri);
+    } catch (err) {
+      if (sourceUri !== item?.id && item?.id) {
+        jpegUri = await convertToJpeg(item.id);
+      } else {
+        throw err;
+      }
+    }
+    if (jpegUri) {
+      return normalizeAsset({
+        uri: jpegUri,
+        fileName: filename || `photo-${now}.jpg`,
+        type: 'image',
+        mimeType: 'image/jpeg',
+      }, { now });
+    }
+  }
+  return normalizeAsset({
+    uri: sourceUri,
+    fileName: filename || `photo-${now}.${actualExt || 'jpg'}`,
+    type: 'image',
+  }, { now });
+}
+
+/** 照片网格多选切换：保持点选顺序，超出上限时返回 overLimit。 */
+export function toggleSelectedId(selectedIds, id, limit = 10) {
+  const list = Array.isArray(selectedIds) ? selectedIds : [];
+  if (list.includes(id)) {
+    return { next: list.filter((x) => x !== id), overLimit: false };
+  }
+  if (list.length >= limit) {
+    return { next: list, overLimit: true };
+  }
+  return { next: [...list, id], overLimit: false };
 }
 
 const DEFAULT_NOTE_TEXT = '请查看我上传的附件。';

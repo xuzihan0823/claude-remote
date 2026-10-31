@@ -60,7 +60,7 @@ export interface DaemonServerOptions {
   modelCatalog?: () => Promise<ModelCatalog>;
   effortOptions?: (cwd: string, model?: string) => Promise<EffortOptions>;
   /** relay connector 只读状态；缺省视为未启用。 */
-  relayStatus?: () => RelayStatus;
+  relayStatuses?: () => RelayStatus[];
 }
 
 export interface RelayStatus {
@@ -134,7 +134,8 @@ export class DaemonServer {
   /** 配对信息（候选地址每次现查——Tailscale 可能在 daemon 启动后才拉起）；listen() 后用实际端口。 */
   get pairInfo(): PairInfo {
     const { token } = this.#options.config;
-    return { bases: pairBases(this.#pairPort, this.#options.relayStatus?.().base), token };
+    const relayBases = (this.#options.relayStatuses?.() ?? []).flatMap((relay) => relay.base === undefined ? [] : [relay.base]);
+    return { bases: pairBases(this.#pairPort, relayBases), token };
   }
 
   /** 实际监听地址（测试用 port 0）。 */
@@ -234,8 +235,9 @@ export class DaemonServer {
     }
 
     if (method === "GET" && path === "/api/connect-info") {
-      const relay = this.#options.relayStatus?.() ?? { state: "disabled" };
-      this.#json(res, 200, { bases: pairBases(this.#pairPort, relay.base), relay });
+      const relays = this.#options.relayStatuses?.() ?? [];
+      const relayBases = relays.flatMap((relay) => relay.base === undefined ? [] : [relay.base]);
+      this.#json(res, 200, { bases: pairBases(this.#pairPort, relayBases), relays });
       return;
     }
 

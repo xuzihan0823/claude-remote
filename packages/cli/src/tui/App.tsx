@@ -627,7 +627,7 @@ export function App({
           </Text>
           <Box marginTop={1}>
             <Text color="gray">{fit("  relay", 22)}</Text>
-            <Text color="gray">{fit(snapshotRelayLine(snap, { configured: false, enabled: false }), inner - 24, false)}</Text>
+            <Text color="gray">{fit(snapshotRelayLine(snap, { configured: false, enabled: false, relays: [] }), inner - 24, false)}</Text>
           </Box>
         </Box>
         <Box borderStyle="single" borderColor="gray" paddingX={1} marginTop={1} width={width}>

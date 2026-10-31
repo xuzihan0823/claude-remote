@@ -65,10 +65,8 @@ export function enumeratePairBases(port: number): string[] {
 }
 
 /** 配对/同步用的全部候选地址：直连在前，relay base（启用时）追加在最后。 */
-export function pairBases(port: number, relayBase?: string): string[] {
-  const bases = enumeratePairBases(port);
-  if (relayBase !== undefined && !bases.includes(relayBase)) bases.push(relayBase);
-  return bases;
+export function pairBases(port: number, relayBases: string[] = []): string[] {
+  return [...new Set([...enumeratePairBases(port), ...relayBases])];
 }
 
 export function pairPayload(info: PairInfo): string {

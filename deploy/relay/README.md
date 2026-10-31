@@ -6,9 +6,9 @@ relay 让手机在没有 Tailscale、也不和 Mac 在同一 Wi-Fi 时，经你�
 
 ## 安全须知
 
-relay 会在服务器上解开 HTTPS，会话内容（消息、代码、附件）对 relay 所在的服务器可见。请只部署在你自己信任的服务器上。
+relay 会在服务器上解开 HTTPS，能看到手机请求中的 `BRIDGE_TOKEN` 和会话内容（消息、代码、附件）。请只添加自己控制的服务器。多个 relay 共用设备私钥，daemon 接入时会把私钥交给每台 relay。
 
-relay 不保存任何会话数据，也不知道 Mac 的 `BRIDGE_TOKEN`；手机带的 token 原样交给 Mac 上的 daemon 校验。配对接口（会返回 token 的 `/api/pair-info` 和配对二维码）经 relay 访问一律 403，只能在 Mac 本机打开。
+relay 不保存会话数据；手机带的 token 由 Mac 上的 daemon 校验。配对接口（会返回 token 的 `/api/pair-info` 和配对二维码）经 relay 访问一律 403，只能在 Mac 本机打开。
 
 ## 一行安装
 
@@ -46,7 +46,25 @@ sudo bash install.sh --domain relay.example.com
 cr relay add https://relay.example.com <密钥>
 ```
 
-之后在 Mac 上执行 `cr pair` 重新扫码，或者直接打开手机 App——已配对的手机连上 Mac 后会自动拿到 relay 地址。
+之后让已配对的手机完整连接一次（冷启动或点“重新连接”），即可同步 relay 地址，无需重新扫码。新手机用 `cr pair` 扫码。
+
+### 多个 relay 同时在线
+
+对每台服务器执行它打印的 `cr relay add <地址> <密钥>`，daemon 会同时连接所有 relay。地址已存在时只更新该项密钥；添加和删除单个 relay 都保留设备 ID、设备私钥和配对关系。
+
+```bash
+cr relay status                       # 逐条显示状态、手机地址和连接数
+cr relay remove https://old.example.com # 删除一个，保留设备身份
+cr relay off                          # 全部停用，保留配置
+cr relay on                           # 全部启用
+cr relay remove --all                 # 删除全部配置，含设备私钥
+```
+
+只有一个 relay 时，`cr relay remove` 等同 `remove --all`；多个时必须指定地址或 `--all`。换服务器时先 `add` 新地址，再 `remove <旧地址>`，以保留设备身份。
+
+配置变动需要重启 daemon，所有 relay 连接会短暂断开。launchd 托管时命令会自动重启；随 `cr` 运行时，在 `cr` 里按 `r` 重启。
+
+多个 relay 没有优先级，手机选择最先探测成功的一个，直连仍然优先。当前 relay 故障后，手机会重新探测并切换通道；原 relay 恢复后不会主动切回。新增 relay 后要趁旧通道可用时完整连接一次，手机才知道新地址；仅后台重选通道不会同步地址。Mac 离线或 daemon 退出时，所有 relay 都无法访问 Mac。
 
 ### 参数
 
@@ -79,7 +97,7 @@ cd /opt/claude-remote-relay && sudo docker compose down -v
 sudo rm -rf /opt/claude-remote-relay
 ```
 
-然后在 Mac 上执行 `cr relay remove`。
+然后在 Mac 上执行 `cr relay remove <这台服务器的地址>`；确定要清除所有 relay 和设备身份时使用 `cr relay remove --all`。
 
 ## 关于 IP 证书
 
@@ -88,9 +106,9 @@ sudo rm -rf /opt/claude-remote-relay
 - 有效期约 6 天，Caddy 会提前自动续期。服务器连续几天连不上 Let's Encrypt，证书就会过期，手机和 Mac 会连不上，恢复网络后 Caddy 会自动补签。
 - 只能用 HTTP 方式验证，所以 80 端口要一直对公网开放，签发和每次续期都要用到。
 
-服务器换了公网 IP 时，用新 IP 重新执行一次安装命令，再在 Mac 上用新地址重新执行 `cr relay add`。
+服务器换了公网 IP 时，用新 IP 重新执行安装命令，再在 Mac 上执行新地址的 `cr relay add`，随后用 `cr relay remove <旧地址>` 删除旧项，避免手机继续向失效地址发送 token。
 
-以前用 sslip.io 域名安装的服务器，升级时会沿用原来的域名。想改用 IP 证书，加上 `--domain <公网 IP>` 重新执行一次安装命令，再在 Mac 上用新地址重新执行 `cr relay add`。
+以前用 sslip.io 域名安装的服务器，升级时会沿用原来的域名。想改用 IP 证书，加上 `--domain <公网 IP>` 重新执行安装命令，再按上述步骤添加新地址并移除旧地址。
 
 ## 国内未备案的服务器
 

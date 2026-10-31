@@ -139,6 +139,21 @@ export function toolView(name, input) {
           return { kind: 'todos', todos: i.todos.map((t) => ({ text: str(t?.content), status: str(t?.status) })) };
         }
         break;
+      case 'AskUserQuestion':
+        if (Array.isArray(i.questions) && i.questions.length > 0) {
+          return {
+            kind: 'questions',
+            questions: i.questions.map((q) => ({
+              header: str(q?.header),
+              question: str(q?.question),
+              multiSelect: !!q?.multiSelect,
+              options: Array.isArray(q?.options)
+                ? q.options.map((o) => (typeof o === 'string' ? o : str(o?.label))).filter(Boolean)
+                : [],
+            })),
+          };
+        }
+        break;
       default:
         break;
     }
@@ -164,6 +179,11 @@ export function toolHeadline(name, input) {
   if (v.kind === 'todos') {
     const done = v.todos.filter((t) => t.status === 'completed').length;
     return `${done}/${v.todos.length} 已完成`;
+  }
+  if (v.kind === 'questions') {
+    const first = v.questions[0];
+    if (!first) return null;
+    return first.header ? `${first.header} · ${first.question}` : first.question;
   }
   return null;
 }

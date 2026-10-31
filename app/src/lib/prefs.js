@@ -9,14 +9,19 @@ export {
 } from './prefs-store.js';
 
 /** 主题覆盖：RN 的 Appearance.setColorScheme 会让 useColorScheme 返回覆盖值，全局生效。 */
-export function applyAppearance(v = store.get('appearance')) {
+import { setThemeDark } from '../theme.js';
+
+export function applyAppearance(v = store.get('appearance'), { animate = false } = {}) {
+  if (v === 'light' || v === 'dark') {
+    setThemeDark(v === 'dark', { animate });
+  }
   try { Appearance.setColorScheme(v === 'light' || v === 'dark' ? v : 'unspecified'); }
   catch { /* 老版本 RN 无此 API */ }
 }
 
 const store = createPrefsStore({
   onChange(next, name) {
-    if (name === 'appearance') applyAppearance(next.appearance);
+    if (name === 'appearance') applyAppearance(next.appearance, { animate: true });
     bus.emit('prefs', next);
   },
 });
