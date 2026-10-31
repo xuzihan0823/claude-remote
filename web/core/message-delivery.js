@@ -20,9 +20,9 @@ export function isMessageEcho(message, pending) {
 export function reconcilePending(pending, messages) {
   const used = new Set();
   return pending.filter((item) => {
-    const candidates = messages.filter((m) => !used.has(m) && (m.seq > (item.floorSeq ?? 0)));
-    const echo = candidates.find((m) => m.uuid === item.clientMessageId && isMessageEcho(m, item))
-      ?? candidates.find((m) => isMessageEcho(m, item));
+    const candidates = messages.filter((m) => !used.has(m));
+    const exact = item.clientMessageId && candidates.find((m) => m.uuid === item.clientMessageId && isMessageEcho(m, item));
+    const echo = exact || candidates.find((m) => m.seq > (item.floorSeq ?? 0) && isMessageEcho(m, item));
     if (echo) used.add(echo);
     return !echo;
   });
