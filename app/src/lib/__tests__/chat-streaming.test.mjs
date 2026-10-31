@@ -437,7 +437,7 @@ test('actual NewChatComposer: sends effort on creation and stores it for the new
       useTheme: () => ({ colors: {}, dark: false }),
       useSafeAreaInsets: () => ({ bottom: 0, left: 0, right: 0 }),
       useModelCatalog: () => ({ models: [{ id: 'opus', alias: 'opus' }], loaded: true }),
-      usePref: () => '',
+      usePref: () => '', token: 'test-token',
       useEffortLevels: () => ({ options: { levels: ['low', 'high', 'max'], verified: true }, reload: () => {} }),
       modelSelection: () => ({ status: 'ok' }),
       effortLabel,
@@ -552,6 +552,15 @@ test('actual ChatScreen: lost response retains unknown state and reconnect confi
   page.render().onSendFailed({ status: 409 }, rejected, true);
   assert.equal(page.render().pending[0].state, 'failed');
   assert.equal(typeof page.render().pending[0].retry, 'function');
+});
+
+test('actual ChatScreen: old daemon response enables text matching for an echo that arrived first', () => {
+  const page = screen();
+  const context = page.render().onSending('问题', { clientMessageId: 'new-client' });
+  page.render().addMsgs([{ ...user, uuid: 'old-daemon-generated' }]);
+  assert.equal(page.render().pending.length, 1);
+  page.render().onSent('问题', 'A', { ...context, precise: false });
+  assert.deepEqual(page.render().pending, []);
 });
 
 test('actual ChatScreen: replayed response confirms delivery without reviving a completed run', () => {

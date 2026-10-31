@@ -7,7 +7,7 @@ import { usePref } from '../../lib/prefs.js';
 import { haptics } from '../../lib/haptics.js';
 import { toast } from '../../../../web/core/bus.js';
 import { setSessionMode } from '../../../../web/core/modes.js';
-import { fetchModels, modelSelection, setSessionModel } from '../../../../web/core/api.js';
+import { token, fetchModels, modelSelection, setSessionModel } from '../../../../web/core/api.js';
 import { effortLabel, effortUsable, setSessionEffort } from '../../../../web/core/effort.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useEffortLevels } from '../../lib/useEffortLevels.js';
@@ -76,7 +76,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
     setBusy(true);
     haptics.confirm();
     const key = JSON.stringify({ cwd, text, model, effort, mode, files: files.map((f) => f.uri) });
-    if (createRequest.current?.key !== key) createRequest.current = { key };
+    if (createRequest.current?.key !== key || createRequest.current?.token !== token) createRequest.current = { key, token };
     try {
       const { result, body } = await createSession({
         cwd,

@@ -23,9 +23,9 @@ import { tooLargeMessage, uploadAttachments, withAttachmentNote } from '../../li
 // 契约（不得更改）：props { sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped }
 // 可选 prop：onStatusConflict(status) -- 409 占用时回传最新 status 给父层（ChatScreen 未接时可空）。
 // 可选 prop：onRunMismatch(activeRunId, status) -- 停止请求过期时同步服务端当前运行。
-// 可选 prop：onSending(text) -- 点发送即触发（早于上传/POST），父层先显示待发送气泡；
-//           onSendFailed() -- 发送失败，父层撤掉该气泡（输入框文字会自动回填）。
-// onSent(text, runId, context) 在 POST 成功后触发，context 来自 onSending。
+// onSending(text, delivery) 返回上下文；失败保留气泡并提供原请求重试。
+// onSendFailed(error, context, posted) 区分明确失败和发送状态不明。
+// onSent(text, runId, context) 在受理后确认身份，并保留迟到响应保护。
 // 行为照抄 web/ui/screens/chat.js 的 composer 部分；视觉对齐 ios-ui-redesign 浮岛 24px 圆角。
 export function ChatComposer({
   sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped, onStatusConflict,
