@@ -32,7 +32,7 @@ import { haptics } from '../lib/haptics.js';
 const MVCP_READING = { minIndexForVisible: 0 };
 
 // 刚发出的气泡从输入框方向弹起；回显后由同尺寸的正式消息原位替换
-function PendingBubble({ item, canRetry }) {
+function PendingBubble({ item, canRetry, sessionId }) {
   const { colors } = useTheme();
   const { text, state } = item;
   const labels = { sending: '发送中', accepted: '已发送', failed: '发送失败', unconfirmed: '状态不明，请确认后重试' };
@@ -47,7 +47,7 @@ function PendingBubble({ item, canRetry }) {
   }));
   return (
     <Animated.View style={[{ transformOrigin: 'right bottom' }, style]}>
-      <MessageRow m={{ role: 'user', text }} sending={state === 'sending'} />
+      <MessageRow m={{ role: 'user', text }} sessionId={sessionId} sending={state === 'sending'} />
       <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>
         <Text accessibilityLiveRegion="polite" style={{ color: state === 'failed' ? colors.danger : colors.ink2, fontSize: 12 }}>{labels[state]}</Text>
         {(state === 'failed' || state === 'unconfirmed') && item.retry ? (
@@ -451,10 +451,10 @@ export function ChatScreen({ route }) {
   // 转圈只表示 POST 未返回；发出前不出打字点，保证「转圈 → 发出 → Claude 开始回复」的顺序
   const listHeader = (
     <View>
-      {visiblePending.map((item) => <PendingBubble key={item.id} item={item} canRetry={status === 'idle' && !isRunning && !pending.some((p) => p.state === 'sending')} />)}
+      {visiblePending.map((item) => <PendingBubble key={item.id} item={item} sessionId={sessionId} canRetry={status === 'idle' && !isRunning && !pending.some((p) => p.state === 'sending')} />)}
       {drafts.map((d) => (
         <View key={d.key} style={{ marginTop: 8, marginBottom: 20 }}>
-          <MarkdownView text={d.text} />
+          <MarkdownView text={d.text} sessionId={sessionId} />
         </View>
       ))}
       {isRunning && !pending.some((p) => p.state === 'sending') && !drafts.some((d) => !d.done) ? (
@@ -501,7 +501,7 @@ export function ChatScreen({ route }) {
           keyExtractor={(m) => msgKey(m)}
           renderItem={({ item }) => {
             const k = msgKey(item);
-            const row = <MessageRow m={item} live={liveKeys.current.has(k)} />;
+            const row = <MessageRow m={item} sessionId={sessionId} live={liveKeys.current.has(k)} />;
             return k === highlightKey
               ? <View style={{ backgroundColor: colors.glassTintAccent, borderRadius: 12, marginHorizontal: -8, paddingHorizontal: 8 }}>{row}</View>
               : row;
