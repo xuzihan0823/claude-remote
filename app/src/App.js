@@ -127,6 +127,21 @@ export default function App() {
     return d;
   }, []);
 
+  // 已配对时启动探测失败（Mac 休眠、网络未就绪）不退回连接页：进主界面，由 ws 重连和 reselect 自动恢复。
+  const onConnectFail = useCallback((e, opts) => {
+    const msg = connErrMsg(e);
+    if (opts?.startup && baseUrl && e.code !== 'unauthorized') {
+      setAuth('ok');
+      ws.stop();
+      ws.start();
+    } else if (authRef.current !== 'ok') {
+      setAuth('need');
+      setAuthErr(msg);
+    }
+    toast(msg, 'error');
+    return false;
+  }, []);
+
   const tryConnect = useCallback(async (base, tok, opts) => {
     setAuth((a) => (a === 'ok' ? 'ok' : 'checking'));
     setAuthErr('');
@@ -142,12 +157,9 @@ export default function App() {
       ws.start();
       return true;
     } catch (e) {
-      const msg = connErrMsg(e);
-      if (authRef.current !== 'ok') { setAuth('need'); setAuthErr(msg); }
-      toast(msg, 'error');
-      return false;
+      return onConnectFail(e, opts);
     }
-  }, [commitConn, rememberDevice]);
+  }, [commitConn, onConnectFail, rememberDevice]);
 
   const tryConnectBases = useCallback(async (bases, tok, opts) => {
     setAuth((a) => (a === 'ok' ? 'ok' : 'checking'));
@@ -164,12 +176,9 @@ export default function App() {
       ws.start();
       return true;
     } catch (e) {
-      const msg = connErrMsg(e);
-      if (authRef.current !== 'ok') { setAuth('need'); setAuthErr(msg); }
-      toast(msg, 'error');
-      return false;
+      return onConnectFail(e, opts);
     }
-  }, [commitConn, rememberDevice]);
+  }, [commitConn, onConnectFail, rememberDevice]);
 
   // 切到某台已配对设备（设置 → 设备）。成功后整个导航按新连接重挂载。
   const switchDevice = useCallback(async (id) => {
@@ -184,10 +193,11 @@ export default function App() {
   useEffect(() => {
     if (!token) return;
     const cur = getDevice(currentDeviceId());
-    if (cur && cur.token === token) { tryConnectBases(candidateBases(cur), token); return; }
+    const startup = { startup: true };
+    if (cur && cur.token === token) { tryConnectBases(candidateBases(cur), token, startup); return; }
     const bases = loadBases();
-    if (bases.length > 0) tryConnectBases(bases, token);
-    else tryConnect(baseUrl, token);
+    if (bases.length > 0) tryConnectBases(bases, token, startup);
+    else tryConnect(baseUrl, token, startup);
   }, []);
 
   // 对当前设备的候选地址重新探测，换到当前最优通道。只换 base、重启 ws，不重挂导航、不清缓存。

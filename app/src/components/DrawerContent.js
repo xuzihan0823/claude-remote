@@ -12,9 +12,7 @@ import { useProjects } from '../lib/projects-context.js';
 import { shortPath } from '../lib/projects.js';
 import { useProjectSessionGroups } from '../lib/use-project-session-groups.js';
 import { useSessionSearch } from '../lib/use-session-search.js';
-import { useConnActions } from '../lib/conn-context.js';
 import { useDevices } from '../lib/useDevices.js';
-import { showDeviceSwitcher } from '../lib/device-switcher.js';
 import { MATCH_LABEL } from '../../../web/core/search.js';
 
 /** 片段中高亮命中词（大小写不敏感）。 */
@@ -47,16 +45,9 @@ export function DrawerContent({ navigation, state }) {
   const go = (fn) => () => { fn(); navigation.closeDrawer(); };
   const goNew = go(() => { projects.prepareNewChat(); navigation.navigate('Main', { screen: 'Home', pop: true }); });
   const goSettings = go(() => navigation.navigate('Main', { screen: 'Settings' }));
-  // 当前设备名显示在设置胶囊里；有多台时左边多一个圆钮，点开系统菜单快速切换
-  const { switchDevice } = useConnActions();
+  // 当前设备名显示在设置胶囊里；添加和切换设备都在设置里
   const devices = useDevices();
   const curDevice = devices.list.find((d) => d.id === devices.current);
-  const openSwitcher = () => showDeviceSwitcher({
-    list: devices.list,
-    current: devices.current,
-    onPick: (id) => { navigation.closeDrawer(); switchDevice(id); },
-    onManage: go(() => navigation.navigate('Main', { screen: 'Settings', params: { screen: 'Devices', initial: false } })),
-  });
   const goChat = (sessionId, focusSeq) => go(() => navigation.navigate('Main', {
     screen: 'Chat',
     params: focusSeq == null ? { sessionId } : { sessionId, focusSeq, focusNonce: Date.now() },
@@ -303,27 +294,9 @@ export function DrawerContent({ navigation, state }) {
           gap: 10,
         }}
       >
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1, minWidth: 0 }}>
-        {devices.list.length > 1 ? (
-          <GlassSurface interactive variant="pill" style={{ borderRadius: 25 }}>
-            <Pressable
-              onPress={openSwitcher}
-              accessibilityRole="button"
-              testID="drawer-switch-device"
-              accessibilityLabel="切换设备"
-              style={({ pressed }) => ({
-                width: 50, height: 50, borderRadius: 25, alignItems: 'center', justifyContent: 'center',
-                backgroundColor: pressed ? colors.glassPressed : 'transparent',
-              })}
-            >
-              <Icon name="laptop" size={20} color={colors.ink} />
-            </Pressable>
-          </GlassSurface>
-        ) : null}
         <GlassSurface interactive variant="pill" style={{ flexShrink: 1, minWidth: 0, borderRadius: 25 }}>
           <Pressable
             onPress={goSettings}
-            onLongPress={devices.list.length ? openSwitcher : undefined}
             accessibilityRole="button"
             testID="drawer-settings"
             accessibilityLabel={curDevice ? `设置，当前设备 ${curDevice.name}` : '设置'}
@@ -345,7 +318,6 @@ export function DrawerContent({ navigation, state }) {
             <View style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: connDotColor }} />
           </Pressable>
         </GlassSurface>
-        </View>
 
         <Pressable
           onPress={goNew}
