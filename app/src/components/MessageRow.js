@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Image, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
 import Animated, {
   FadeIn,
@@ -8,7 +8,9 @@ import Animated, {
   useSharedValue,
   withSpring,
 } from 'react-native-reanimated';
-import { MarkdownView } from './markdown/MarkdownView.js';
+import { filePathsIn, MarkdownView } from './markdown/MarkdownView.js';
+import { FileCard } from './FileCard.js';
+import { FilePreview } from './FilePreview.js';
 import { Icon, toolIconName } from './Icon.js';
 import { Spark } from './Spark.js';
 import { fmtClock, toolSummary } from '../lib/format.js';
@@ -179,6 +181,41 @@ function UserAttachments({ paths }) {
   );
 }
 
+const VISIBLE_FILE_CARDS = 5;
+
+function AssistantMessage({ m, sessionId }) {
+  const { colors } = useTheme();
+  const [previewPath, setPreviewPath] = useState(null);
+  const [showAllFiles, setShowAllFiles] = useState(false);
+  const paths = useMemo(() => (sessionId ? filePathsIn(m.text) : []), [m.text, sessionId]);
+  const visible = showAllFiles ? paths : paths.slice(0, VISIBLE_FILE_CARDS);
+  return (
+    <View style={{ marginTop: 8, marginBottom: 20 }}>
+      <MarkdownView text={m.text} sessionId={sessionId} onOpenFile={sessionId ? setPreviewPath : undefined} />
+      {visible.length ? (
+        <View style={{ gap: 8, marginTop: 10 }}>
+          {visible.map((p) => <FileCard key={p} sessionId={sessionId} path={p} onOpen={setPreviewPath} />)}
+          {visible.length < paths.length ? (
+            <TouchableOpacity accessibilityRole="button" onPress={() => setShowAllFiles(true)}
+              style={{ minHeight: 44, alignItems: 'center', justifyContent: 'center' }}>
+              <Text style={{ color: colors.ink2, fontSize: 13 }}>还有 {paths.length - visible.length} 个文件</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+      ) : null}
+      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="分享回复"
+          onPress={() => Share.share({ message: m.text || '' }).catch(() => {})}
+          style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center', marginLeft: -10 }}>
+          <Icon name="share" size={20} color={colors.ink2} />
+        </TouchableOpacity>
+        {m.timestamp ? <Text style={{ color: colors.ink3, fontSize: 12 }}>{fmtClock(m.timestamp)}</Text> : null}
+      </View>
+      {previewPath ? <FilePreview sessionId={sessionId} path={previewPath} onClose={() => setPreviewPath(null)} /> : null}
+    </View>
+  );
+}
+
 export function MessageRow({ m, sessionId, sending = false, live = false }) {
   const { colors } = useTheme();
   const scale = usePref('fontScale');
@@ -247,17 +284,5 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
       </View>
     );
   }
-  return (
-    <View style={{ marginTop: 8, marginBottom: 20 }}>
-      <MarkdownView text={m.text} sessionId={sessionId} />
-      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel="分享回复"
-          onPress={() => Share.share({ message: m.text || '' }).catch(() => {})}
-          style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center', marginLeft: -10 }}>
-          <Icon name="share" size={20} color={colors.ink2} />
-        </TouchableOpacity>
-        {m.timestamp ? <Text style={{ color: colors.ink3, fontSize: 12 }}>{fmtClock(m.timestamp)}</Text> : null}
-      </View>
-    </View>
-  );
+  return <AssistantMessage m={m} sessionId={sessionId} />;
 }

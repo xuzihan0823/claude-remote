@@ -4,7 +4,7 @@
 import { useMemo, useState } from 'react';
 import { Dimensions, ScrollView, Text, View } from 'react-native';
 import { marked } from '../../../../web/vendor/marked.esm.min.js';
-import { installLinkify, wholeUrl } from '../../../../web/core/linkify.js';
+import { codeFilePath, collectFilePaths, installLinkify, localFilePath, wholeUrl } from '../../../../web/core/linkify.js';
 import { installMath } from '../../../../web/core/md-math.js';
 import { openLink, shareLink } from '../../lib/links.js';
 import { useTheme } from '../../theme.js';
@@ -75,16 +75,18 @@ function renderInline(tokens, ctx, keyPrefix) {
       case 'codespan': {
         // 反引号里整段是链接（Claude 常写 `http://localhost:3000`）也可点
         const codeHref = wholeUrl(tok.text);
+        const codePath = ctx.onOpenFile ? codeFilePath(tok.text) : null;
+        const tappable = Boolean(codeHref || codePath);
         out.push(
           <Text
             key={key}
-            onPress={codeHref ? () => openLink(codeHref) : undefined}
+            onPress={tappable ? () => (codePath ? ctx.onOpenFile(codePath) : openLink(codeHref)) : undefined}
             onLongPress={codeHref ? () => shareLink(codeHref) : undefined}
             style={{
               fontFamily: ctx.fonts.mono,
               fontSize: ctx.fs * 0.86,
               color: ctx.colors.code,
-              ...(codeHref ? { textDecorationLine: 'underline', color: ctx.colors.accent } : null),
+              ...(tappable ? { textDecorationLine: 'underline', color: ctx.colors.accent } : null),
             }}
           >
             {tok.text || ''}
@@ -100,6 +102,7 @@ function renderInline(tokens, ctx, keyPrefix) {
         break;
       case 'link': {
         const href = tok.href || '';
+        const linkPath = ctx.onOpenFile ? localFilePath(href) : null;
         const kids = tok.tokens
           ? renderInline(tok.tokens, ctx, `${key}-`)
           : tok.text || '';
@@ -107,7 +110,7 @@ function renderInline(tokens, ctx, keyPrefix) {
           <Text
             key={key}
             accessibilityRole="link"
-            onPress={() => openLink(href)}
+            onPress={() => (linkPath ? ctx.onOpenFile(linkPath) : openLink(href))}
             onLongPress={() => shareLink(href)}
             style={{ color: ctx.colors.accent, textDecorationLine: 'underline' }}
           >
@@ -454,17 +457,24 @@ function renderBlocks(tokens, ctx, keyPrefix = '') {
   return tokens.map((tok, i) => renderBlock(tok, ctx, `${keyPrefix}${i}`));
 }
 
-export function MarkdownView({ text, sessionId }) {
+// 必须带上 marked.defaults：只传 {gfm, breaks} 会丢掉 installLinkify / installMath 注册的扩展
+const lexMarkdown = (text) => marked.lexer(String(text ?? ''), { ...marked.defaults, gfm: true, breaks: true });
+
+/** 正文里出现的本机文件路径，用于在消息下方渲染文件卡片。 */
+export function filePathsIn(text) {
+  try { return collectFilePaths(marked, lexMarkdown(text)); } catch { return []; }
+}
+
+export function MarkdownView({ text, sessionId, onOpenFile }) {
   const { colors, fonts, radius } = useTheme();
   const scale = usePref('fontScale');
   const codeWrap = usePref('codeWrap');
-  const ctx = { colors, fonts, radius, scale, codeWrap, sessionId, fs: BASE_FS * scale, lh: Math.round(BASE_LH * scale) };
+  const ctx = { colors, fonts, radius, scale, codeWrap, sessionId, onOpenFile, fs: BASE_FS * scale, lh: Math.round(BASE_LH * scale) };
 
   // lexer 失败退回纯 <Text>；同一 text 稳定（useMemo 仅 memo token 树，渲染每帧用最新 ctx）
   const tokens = useMemo(() => {
     try {
-      // 必须带上 marked.defaults：只传 {gfm, breaks} 会丢掉 installLinkify / installMath 注册的扩展
-      return marked.lexer(String(text ?? ''), { ...marked.defaults, gfm: true, breaks: true });
+      return lexMarkdown(text);
     } catch {
       return null;
     }

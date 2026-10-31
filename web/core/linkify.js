@@ -56,6 +56,46 @@ export function wholeUrl(text) {
   return segs.length === 1 && segs[0].href ? segs[0].href : null;
 }
 
+const LINE_SUFFIX = /(?::\d+){1,2}$|#L\d+(?:-L?\d+)?$/;
+const HAS_EXTENSION = /\.[A-Za-z0-9]{1,10}$/;
+
+function decodePath(path) {
+  try { return decodeURIComponent(path); } catch { return path; }
+}
+
+/**
+ * 把链接地址识别成本机文件路径，不是文件时返回 null。
+ * 相对路径必须带扩展名，交给 daemon 按会话工作目录解析；末尾的 :行号 和 #L行号 会去掉。
+ */
+export function localFilePath(href) {
+  const s = String(href ?? '').trim().replace(/^<(.*)>$/, '$1');
+  if (!s || /[\0\r\n]/.test(s)) return null;
+  const fileUrl = /^file:\/\/(?:localhost)?(\/[^?#]*)/i.exec(s);
+  if (fileUrl) return decodePath(fileUrl[1]);
+  const path = decodePath(s.replace(LINE_SUFFIX, ''));
+  if (path.startsWith('//')) return null;
+  if (path.startsWith('/')) return path;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(path) || /^(?:www\.|~|#|\?)/i.test(path)) return null;
+  return HAS_EXTENSION.test(path) ? path.replace(/^(?:\.\/)+/, '') : null;
+}
+
+/** 反引号里只有整段是带扩展名的绝对路径才算文件，避免 `/api/sessions` 这类内容被当成链接。 */
+export function codeFilePath(text) {
+  const path = localFilePath(text);
+  return path?.startsWith('/') && HAS_EXTENSION.test(path) ? path : null;
+}
+
+/** 从 marked 的 token 树里取出文件路径，按出现顺序去重。代码块里的路径不算。 */
+export function collectFilePaths(marked, tokens) {
+  const paths = new Set();
+  marked.walkTokens(tokens, (tok) => {
+    const path = tok.type === 'link' || tok.type === 'image' ? localFilePath(tok.href)
+      : tok.type === 'codespan' ? codeFilePath(tok.text) : null;
+    if (path) paths.add(path);
+  });
+  return [...paths];
+}
+
 /** 给 marked 换上中文友好的 url 分词器（全局一次，两端各自调用）。 */
 let installed = false;
 export function installLinkify(marked) {

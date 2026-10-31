@@ -9,11 +9,13 @@
 // 匹配，见 05 报告对表第 4 条）。
 
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { homedir, hostname } from "node:os";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
@@ -23,6 +25,7 @@ import { readEffortOptions, type EffortOptions } from "./effort-levels.js";
 import type { DaemonConfig } from "./config.js";
 import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
+import { FileAccessError, fileMeta, fileTypeOf, parseRange, resolveWorkspaceFile, type SessionFile } from "./session-file-access.js";
 import { readSessionCwd, resolveSessionFile } from "./session-files.js";
 import { StreamBuffer } from "./run/stream-buffer.js";
 import { approvalLink, NotIdleError, sessionLink, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
@@ -318,6 +321,12 @@ export class DaemonServer {
     const uploadFileMatch = /^\/api\/uploads\/([^/]+)\/([^/]+)$/.exec(path);
     if (uploadFileMatch !== null && method === "GET") {
       await this.#serveUpload(res, decodeURIComponent(uploadFileMatch[1] ?? ""), decodeURIComponent(uploadFileMatch[2] ?? ""));
+      return;
+    }
+
+    const fileMatch = /^\/api\/sessions\/([^/]+)\/files\/(meta|content)$/.exec(path);
+    if (fileMatch !== null && method === "GET") {
+      await this.#handleSessionFile(req, res, url, decodeURIComponent(fileMatch[1] ?? ""), fileMatch[2] === "content");
       return;
     }
 
@@ -801,6 +810,65 @@ export class DaemonServer {
     const file = join(dir, `${Date.now()}-${safeName}`);
     await writeFile(file, Buffer.concat(chunks));
     this.#json(res, 200, { path: file, name: safeName, sizeBytes: size });
+  }
+
+  async #handleSessionFile(req: IncomingMessage, res: ServerResponse, url: URL, sessionId: string, wantContent: boolean): Promise<void> {
+    // 会话 ID 会拼进 JSONL 路径，而工作目录边界来自该文件：含分隔符的 ID 能指向上传目录里伪造的会话
+    if (/[/\\]/.test(sessionId)) {
+      this.#json(res, 404, { error: "session_not_found" });
+      return;
+    }
+    let sessionFile: string;
+    try {
+      sessionFile = await resolveSessionFile(this.#options.config.projectsDir, sessionId);
+    } catch (error) {
+      if (!isEnoent(error)) throw error;
+      this.#json(res, 404, { error: "session_not_found" });
+      return;
+    }
+    let file: SessionFile;
+    try {
+      file = await resolveWorkspaceFile(await readSessionCwd(sessionFile), url.searchParams.get("path"));
+    } catch (error) {
+      if (!(error instanceof FileAccessError)) throw error;
+      this.#json(res, error.status, { error: error.code });
+      return;
+    }
+    if (wantContent) await this.#streamSessionFile(req, res, file);
+    else this.#json(res, 200, fileMeta(file));
+  }
+
+  async #streamSessionFile(req: IncomingMessage, res: ServerResponse, file: SessionFile): Promise<void> {
+    const size = file.stats.size;
+    const range = parseRange(req.headers.range, size);
+    if (range === "unsatisfiable") {
+      res.setHeader("Content-Range", `bytes */${size}`);
+      this.#json(res, 416, { error: "range_not_satisfiable" });
+      return;
+    }
+    const length = range === null ? size : range.end - range.start + 1;
+    res.writeHead(range === null ? 200 : 206, {
+      "Content-Type": fileTypeOf(file.path).mime,
+      "Content-Length": length,
+      "Content-Disposition": "attachment",
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": "private, no-store",
+      "Accept-Ranges": "bytes",
+      ...(range === null ? {} : { "Content-Range": `bytes ${range.start}-${range.end}/${size}` }),
+    });
+    if (length === 0) {
+      res.end();
+      return;
+    }
+    const stream = createReadStream(file.path, { start: range?.start ?? 0, end: range?.end ?? size - 1 });
+    try {
+      await pipeline(stream, res);
+    } catch {
+      // 客户端断开或读取失败：pipeline 已销毁两端，响应头已发出，无法再回错误
+      return;
+    }
+    // 传输中文件被截断：断开连接，否则客户端会把半个文件当成完整文件
+    if (stream.bytesRead < length) res.destroy();
   }
 
   /** 回读已上传的图片，供手机在消息里显示。只认 uploadsDir/<subdir>/<name> 两级，且只给图片。 */

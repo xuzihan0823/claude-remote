@@ -290,6 +290,31 @@ test("大响应（1.5 MiB 会话正文）经流控完整到达", async () => {
   }
 });
 
+test("文件内容：超过上传上限的响应经 relay 完整到达，Range 透传", async () => {
+  const sessionId = "11111111-2222-4333-8444-666666666666";
+  const project = join(daemon.projectsDir, "large-file");
+  const workspace = await mkdtemp(join(tmpdir(), "claude-remote-relay-file-"));
+  const data = randomBytes(26 * 1024 * 1024);
+  await mkdir(project);
+  await writeFile(join(workspace, "big.bin"), data);
+  await writeFile(join(project, `${sessionId}.jsonl`), `${JSON.stringify({ type: "user", sessionId, cwd: workspace })}\n`);
+  const url = `${phoneBase}/api/sessions/${sessionId}/files/content?path=big.bin`;
+  try {
+    const whole = await request(url, { headers: bearer });
+    assert.equal(whole.status, 200);
+    assert.equal(whole.headers["content-disposition"], "attachment");
+    assert.equal(sha(whole.body), sha(data));
+
+    const partial = await request(url, { headers: { ...bearer, Range: "bytes=1048576-1048675" } });
+    assert.equal(partial.status, 206);
+    assert.equal(partial.headers["content-range"], `bytes 1048576-1048675/${data.length}`);
+    assert.equal(sha(partial.body), sha(data.subarray(1048576, 1048676)));
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("WS：经 relay 收发 ping/pong；token 错误时 daemon 的 401 原样返回", async () => {
   const ws = await wsConnect(`ws://127.0.0.1:${relay.port}/d/${ID}/ws?token=${encodeURIComponent(TOKEN)}`);
   const reply = new Promise<string>((resolve) => ws.once("message", (data) => resolve(String(data))));

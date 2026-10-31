@@ -126,6 +126,39 @@ App 发送前生成 UUID（Hermes 缺少 crypto.randomUUID 时有兜底），保
 
 `GET /api/sessions/:id/messages?limit=100&beforeSeq=42` 返回 `{ "messages": [], "firstSeq": null, "hasMore": false }`。limit 默认 100、范围 1–500；beforeSeq 为大于等于 1 的安全整数且不包含该行，非法值返回 400 `invalid_before_seq`。消息按 seq、blockIndex 升序；以 `(seq, blockIndex)` 去重，seq 是 JSONL 物理行号而非数组下标。字段包括 uuid、parentUuid、role、kind，以及按 kind 出现的 text、toolName、toolInput、toolUseId、isError、timestamp、rawType；assistant 消息可含 `apiMessageId`，用于将草稿对账限定到同一 API 消息，不能假设转录 blockIndex 等于 SDK 流下标。
 
+### 读取会话文件
+
+Agent 不主动发送文件。它在回复里写出路径，App 用 `web/core/linkify.js` 识别后显示文件卡片，用户点开时才下载到手机临时目录预览，关闭时删除。保存走系统分享面板。
+
+```text
+GET /api/sessions/:id/files/meta?path=<绝对或相对路径>
+→ 200 { "name", "path", "sizeBytes", "mtimeMs", "mime", "previewKind" }
+
+GET /api/sessions/:id/files/content?path=<绝对或相对路径>
+→ 200 或 206 文件内容，支持单段 Range
+```
+
+`previewKind` 由扩展名决定，取值为 `html`、`image`、`text`、`markdown`、`pdf`、`none`。相对路径按会话工作目录解析。内容响应固定带 `Content-Disposition: attachment`、`X-Content-Type-Options: nosniff`、`Cache-Control: private, no-store` 和 `Accept-Ranges: bytes`，用流式读取，客户端断开时销毁读取流；传输中文件被截断时断开连接，不把半个文件当作成功。
+
+| 状态码 | 错误 | 含义 |
+|---|---|---|
+| 400 | `invalid_path` | 路径为空或含空字符 |
+| 403 | `outside_workspace` | 不在工作目录内，或工作目录取不到 |
+| 403 | `sensitive_file` | 命中敏感文件规则 |
+| 404 | `session_not_found` / `file_not_found` | 会话或文件不存在；目录和其他非普通文件也按 `file_not_found` 返回 |
+| 416 | `range_not_satisfiable` | Range 超出文件范围，响应带 `Content-Range: bytes */<size>` |
+
+这组接口不经过模型，也不留下会话记录，所以比 Agent 的读文件能力更窄，校验集中在 `packages/daemon/src/session-file-access.ts`：
+
+- 工作目录来自 `readSessionCwd`，取不到时拒绝，不回退到 home。
+- 文件和工作目录都先 `realpath` 再比较，比较时带路径分隔符。工作目录外不存在的路径同样返回 403，不能用来探测文件是否存在。
+- 敏感规则为 `.env*`、`.git`、`.ssh`、`*.pem`、`*.key`、`id_rsa*`、`.npmrc`、`.netrc`，不区分大小写，对请求路径和真实路径的每一段都检查。
+- 会话 ID 含路径分隔符时直接 404。工作目录边界来自 JSONL，而 ID 会拼进 JSONL 路径，不拦截的话可以指向上传目录里伪造的会话文件，把工作目录改成根目录。新增信任 JSONL 内容的接口时要保留这条检查。
+
+App 把 HTML 当作不可信内容：不注入令牌，不提供 `onMessage`，关闭跨文件访问，用 `incognito`。导航规则在 `app/src/lib/file-preview.js`：文件自身和页内地址留在预览里，外部链接交给系统浏览器，其他本机文件和自定义协议一律拦截。iOS 只放行真实点击，Android 拿不到导航类型。令牌只放请求头，不放 URL。
+
+WebView 只在首次请求带请求头，所以目前只保证单文件 HTML，同目录资源会加载失败，视频音频也不能边传边播。解决办法是增加短期预览地址，长期令牌不能放进 URL。
+
 ### WS 订阅、运行事件与状态恢复
 
 客户端发送 `{ "type": "subscribe", "sessionId": "<uuid>" }`，取消用 `unsubscribe`。指定会话订阅成功后，服务器先发送当前权威快照，再发送尚存的流草稿；新会话尚未落盘时也提供状态快照。未知会话订阅静默忽略；同连接重复订阅不重发快照，需要重连或取消后重新订阅。

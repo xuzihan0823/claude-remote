@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { marked } from '../vendor/marked.esm.min.js';
-import { installLinkify, isSafeHref, resolveHref, splitLinks, trimUrl, wholeUrl } from './linkify.js';
+import { codeFilePath, collectFilePaths, installLinkify, isSafeHref, localFilePath, resolveHref, splitLinks, trimUrl, wholeUrl } from './linkify.js';
 
 const hrefs = (s) => splitLinks(s).filter((x) => x.href).map((x) => x.href);
 
@@ -50,4 +50,60 @@ test('isSafeHref', () => {
   assert.ok(isSafeHref('mailto:a@b.com'));
   assert.ok(!isSafeHref('javascript:alert(1)'));
   assert.ok(!isSafeHref('file:///etc/passwd'));
+});
+
+test('localFilePath：绝对路径、file:// 和相对路径', () => {
+  assert.equal(localFilePath('/Users/me/a.html'), '/Users/me/a.html');
+  assert.equal(localFilePath('/Users/me/Makefile'), '/Users/me/Makefile');
+  assert.equal(localFilePath('</Users/me/含 空格.html>'), '/Users/me/含 空格.html');
+  assert.equal(localFilePath('file:///Users/me/%E6%8A%A5%E5%91%8A%20a.html'), '/Users/me/报告 a.html');
+  assert.equal(localFilePath('file://localhost/a/b.txt#top'), '/a/b.txt');
+  assert.equal(localFilePath('/a/my%20file.html'), '/a/my file.html');
+  assert.equal(localFilePath('/a/100%.txt'), '/a/100%.txt');
+  assert.equal(localFilePath('src/app.js'), 'src/app.js');
+  assert.equal(localFilePath('./report.pdf'), 'report.pdf');
+  assert.equal(localFilePath('../other/x.md'), '../other/x.md');
+});
+
+test('localFilePath：去掉行号后缀', () => {
+  assert.equal(localFilePath('src/app.js:42'), 'src/app.js');
+  assert.equal(localFilePath('app.js:42:7'), 'app.js');
+  assert.equal(localFilePath('/a/app.js#L10-L20'), '/a/app.js');
+});
+
+test('localFilePath：网址、其他协议和没有扩展名的相对路径不算文件', () => {
+  for (const href of [
+    'https://example.com/a.html', 'http://localhost:3000/a.js', 'www.example.com/a.html', 'mailto:a@example.com',
+    'tel:10086', 'javascript:alert(1)', 'data:text/html,x', '//example.com/a.js', '#section', '?q=1',
+    'docs/readme', 'localhost:3000', '~/a.txt', '', null, undefined, 'a\nb.txt', 'a\0.txt',
+  ]) {
+    assert.equal(localFilePath(href), null, String(href));
+  }
+});
+
+test('codeFilePath：只认整段带扩展名的绝对路径', () => {
+  assert.equal(codeFilePath('/Users/me/pelican-bike.html'), '/Users/me/pelican-bike.html');
+  assert.equal(codeFilePath('/Users/me/含 空格.pdf'), '/Users/me/含 空格.pdf');
+  assert.equal(codeFilePath('/api/sessions'), null);
+  assert.equal(codeFilePath('src/app.js'), null);
+  assert.equal(codeFilePath('/foo/bar.baz()'), null);
+  assert.equal(codeFilePath('cat /etc/hosts.txt'), null);
+});
+
+test('collectFilePaths：Markdown 链接、尖括号、反引号和表格都能取到，代码块不算，结果去重', () => {
+  installLinkify(marked);
+  const md = [
+    '[页面](</tmp/含 空格.html>) 和 [外链](https://example.com/a.html)',
+    '生成了 `/tmp/a.pdf`，再看 `/api/sessions` 和 [同一个](/tmp/a.pdf)',
+    '',
+    '| 文件 |',
+    '| --- |',
+    '| [表格](src/table.md:3) |',
+    '',
+    '```',
+    '/tmp/in-code-block.html',
+    '```',
+  ].join('\n');
+  const tokens = marked.lexer(md, { ...marked.defaults, gfm: true, breaks: true });
+  assert.deepEqual(collectFilePaths(marked, tokens), ['/tmp/含 空格.html', '/tmp/a.pdf', 'src/table.md']);
 });
