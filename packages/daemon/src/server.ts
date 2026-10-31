@@ -9,11 +9,12 @@
 // 匹配，见 05 报告对表第 4 条）。
 
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { homedir, hostname } from "node:os";
-import { basename, join } from "node:path";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -301,6 +302,12 @@ export class DaemonServer {
       await this.#saveUpload(req, res, url, "new");
       return;
     }
+    const imageMatch = /^\/api\/sessions\/([^/]+)\/file$/.exec(path);
+    if (imageMatch !== null && method === "GET") {
+      await this.#serveSessionImage(res, url, decodeURIComponent(imageMatch[1] ?? ""));
+      return;
+    }
+
     const uploadMatch = /^\/api\/sessions\/([^/]+)\/upload$/.exec(path);
     if (uploadMatch !== null && method === "POST") {
       await this.#handleUpload(req, res, url, decodeURIComponent(uploadMatch[1] ?? ""));
@@ -656,6 +663,64 @@ export class DaemonServer {
       this.#activeRuns.delete(handle.runId);
       this.#streams.end(sessionId);
       if (this.#newSessions.has(sessionId)) void this.#activateNewSessionWatch(sessionId);
+    }
+  }
+
+  async #serveSessionImage(res: ServerResponse, url: URL, sessionId: string): Promise<void> {
+    let sessionFile: string;
+    try {
+      sessionFile = await resolveSessionFile(this.#options.config.projectsDir, sessionId);
+    } catch (error) {
+      if (!isEnoent(error)) throw error;
+      this.#json(res, 404, { error: "session_not_found" });
+      return;
+    }
+    const requested = url.searchParams.get("path");
+    if (!requested || requested.includes("\0")) {
+      this.#json(res, 400, { error: "invalid_path" });
+      return;
+    }
+    let target = requested;
+    if (target.startsWith("file:")) {
+      try { target = fileURLToPath(target); }
+      catch {
+        this.#json(res, 400, { error: "invalid_path" });
+        return;
+      }
+    } else if (target.startsWith("~/")) {
+      target = join(homedir(), target.slice(2));
+    } else if (!isAbsolute(target)) {
+      target = resolve((await readSessionCwd(sessionFile)) || homedir(), target);
+    }
+    try {
+      target = await realpath(target);
+      const types: Record<string, string> = { ...IMAGE_TYPES, bmp: "image/bmp", avif: "image/avif" };
+      const type = types[extname(target).slice(1).toLowerCase()];
+      if (type === undefined) {
+        this.#json(res, 415, { error: "unsupported_image" });
+        return;
+      }
+      const info = await stat(target);
+      if (!info.isFile()) {
+        this.#json(res, 404, { error: "not_found" });
+        return;
+      }
+      if (info.size > UPLOAD_LIMIT_BYTES) {
+        this.#json(res, 413, { error: "payload_too_large" });
+        return;
+      }
+      const data = await readFile(target);
+      if (data.length > UPLOAD_LIMIT_BYTES) {
+        this.#json(res, 413, { error: "payload_too_large" });
+        return;
+      }
+      res.writeHead(200, { "Content-Type": type, "Content-Length": data.length,
+        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" });
+      res.end(data);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR" && code !== "EACCES" && code !== "ELOOP") throw error;
+      this.#json(res, 404, { error: "not_found" });
     }
   }
 
