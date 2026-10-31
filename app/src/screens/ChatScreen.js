@@ -34,7 +34,7 @@ const isEcho = (m, text) => m.role === 'user' && m.kind === 'text' && m.text?.tr
 const pendingText = (p) => p.match ?? p.text;
 
 // 刚发出的气泡从输入框方向弹起；回显后由同尺寸的正式消息原位替换
-function PendingBubble({ text, sending }) {
+function PendingBubble({ text, sending, sessionId }) {
   const reduceMotion = useReducedMotion();
   const p = useSharedValue(reduceMotion ? 1 : 0);
   useEffect(() => {
@@ -46,7 +46,7 @@ function PendingBubble({ text, sending }) {
   }));
   return (
     <Animated.View style={[{ transformOrigin: 'right bottom' }, style]}>
-      <MessageRow m={{ role: 'user', text }} sending={sending} />
+      <MessageRow m={{ role: 'user', text }} sessionId={sessionId} sending={sending} />
     </Animated.View>
   );
 }
@@ -442,10 +442,10 @@ export function ChatScreen({ route }) {
   // 转圈只表示 POST 未返回；发出前不出打字点，保证「转圈 → 发出 → Claude 开始回复」的顺序
   const listHeader = (
     <View>
-      {showPending ? <PendingBubble key={pending.id} text={pending.text} sending={!pending.sent} /> : null}
+      {showPending ? <PendingBubble key={pending.id} text={pending.text} sending={!pending.sent} sessionId={sessionId} /> : null}
       {drafts.map((d) => (
         <View key={d.key} style={{ marginTop: 8, marginBottom: 20 }}>
-          <MarkdownView text={d.text} />
+          <MarkdownView text={d.text} sessionId={sessionId} />
         </View>
       ))}
       {isRunning && !(showPending && !pending.sent) && !drafts.some((d) => !d.done) ? (
@@ -492,7 +492,7 @@ export function ChatScreen({ route }) {
           keyExtractor={(m) => msgKey(m)}
           renderItem={({ item }) => {
             const k = msgKey(item);
-            const row = <MessageRow m={item} live={liveKeys.current.has(k)} />;
+            const row = <MessageRow m={item} sessionId={sessionId} live={liveKeys.current.has(k)} />;
             return k === highlightKey
               ? <View style={{ backgroundColor: colors.glassTintAccent, borderRadius: 12, marginHorizontal: -8, paddingHorizontal: 8 }}>{row}</View>
               : row;
