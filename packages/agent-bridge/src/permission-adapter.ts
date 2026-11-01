@@ -17,6 +17,7 @@ export interface PermissionBroker {
 
 export interface PermissionAdapterOptions {
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export function createPermissionAdapter(
@@ -27,12 +28,13 @@ export function createPermissionAdapter(
   const timeoutMs = options.timeoutMs ?? 5 * 60_000;
   return async (toolName, input, sdkOptions): Promise<PermissionResult> => {
     const controller = new AbortController();
-    const abort = (): void => controller.abort(sdkOptions.signal.reason);
-    sdkOptions.signal.addEventListener("abort", abort, { once: true });
+    const signal = options.signal ? AbortSignal.any([sdkOptions.signal, options.signal]) : sdkOptions.signal;
+    const abort = (): void => controller.abort(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(() => controller.abort(new Error("permission decision timed out")), timeoutMs);
     timer.unref();
     try {
-      if (sdkOptions.signal.aborted) abort();
+      if (signal.aborted) abort();
       const decision = await Promise.race([
         broker.request({
           requestId: sdkOptions.requestId,
@@ -49,6 +51,7 @@ export function createPermissionAdapter(
           else controller.signal.addEventListener("abort", rejectOnAbort, { once: true });
         }),
       ]);
+      if (controller.signal.aborted) return { behavior: "deny", message: "Permission denied: request cancelled" };
       if (decision.type === "allow_once") return { behavior: "allow", updatedInput: input };
       if (decision.type === "answer" && toolName === "AskUserQuestion") {
         return { behavior: "allow", updatedInput: { ...input, answers: decision.answers } };
@@ -58,7 +61,7 @@ export function createPermissionAdapter(
       return { behavior: "deny", message: "Permission denied: no confirmed Gateway decision" };
     } finally {
       clearTimeout(timer);
-      sdkOptions.signal.removeEventListener("abort", abort);
+      signal.removeEventListener("abort", abort);
     }
   };
 }

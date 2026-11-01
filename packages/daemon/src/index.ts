@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import process from "node:process";
 
+import { configuredClaudeExecutable } from "@claude-remote/agent-bridge";
 import { InteractionManager, InteractionStore } from "@claude-remote/interactions";
 import QRCode from "qrcode";
 
@@ -29,7 +30,9 @@ const pkg = require("../package.json") as { name: string; version: string };
 
 /** 启动时异步探测 claude CLI 版本；失败保持 "unknown"（health 端点用）。 */
 function probeClaudeCliVersion(onResult: (version: string) => void): void {
-  execFile(process.env.CLAUDE_BIN?.trim() || "claude", ["--version"], { timeout: 10_000 }, (error, stdout) => {
+  const executable = configuredClaudeExecutable();
+  if (executable === undefined) return;
+  execFile(executable, ["--version"], { timeout: 10_000 }, (error, stdout) => {
     if (error !== null) return;
     const version = stdout.trim();
     if (version !== "") onResult(version);

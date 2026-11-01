@@ -1,10 +1,14 @@
-import { query, type CanUseTool, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type CanUseTool, type PermissionMode, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
 export type QueryFactory = typeof query;
 
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type EffortLevel = typeof EFFORT_LEVELS[number];
+export type ExternalPermissionMode = Exclude<PermissionMode, "dontAsk">;
 
+export function configuredClaudeExecutable(): string | undefined {
+  return process.env.CLAUDE_BIN?.trim() || undefined;
+}
 export interface StartQueryOptions {
   cwd: string;
   prompt: string;
@@ -17,7 +21,7 @@ export interface StartQueryOptions {
   /** Explicit session id for a new session. Mutually exclusive with resume. */
   sessionId?: string;
   /** 权限模式覆盖；省略时由 SDK 走 "default"。 */
-  permissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions";
+  permissionMode?: ExternalPermissionMode;
   signal: AbortSignal;
 }
 
@@ -66,7 +70,7 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
   const sdkOptions = {
     cwd: options.cwd,
     canUseTool: options.canUseTool,
-    permissionMode: (options.permissionMode ?? "default") as "default" | "acceptEdits" | "plan" | "bypassPermissions",
+    permissionMode: options.permissionMode ?? "default",
     includePartialMessages: true,
     persistSession: true,
     // SDK options.env replaces the subprocess env entirely, so we must spread
@@ -75,7 +79,7 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
     // sessions whose entrypoint ∈ {sdk-cli, sdk-ts, sdk-py}).
     env: { ...withoutHostAuth(process.env), CLAUDE_CODE_ENTRYPOINT: "claude-remote" } as Record<string, string>,
     // CLAUDE_BIN：GUI 壳 app 的子进程没有 shell PATH，由壳注入显式 claude 路径（docs/mac-app-plan.md §2.2）
-    ...(process.env.CLAUDE_BIN ? { pathToClaudeCodeExecutable: process.env.CLAUDE_BIN } : {}),
+    ...(configuredClaudeExecutable() ? { pathToClaudeCodeExecutable: configuredClaudeExecutable()! } : {}),
     ...(options.resume === undefined ? {} : { resume: options.resume }),
     ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
     ...(options.model === undefined ? {} : { model: options.model }),

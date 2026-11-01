@@ -1,5 +1,8 @@
 export type WorkerEvent =
   | { type: "session"; sessionId: string }
+  | { type: "permission_mode"; effectiveMode: string; requestedMode?: string }
+  | { type: "permission_denied"; eventId: string; toolUseId: string; toolName: string; agentId?: string; decisionReasonType?: string; decisionReason?: string; message: string }
+  | { type: "notice"; eventId: string; message: string; level: "info" | "warning" }
   | { type: "assistant_delta"; text: string; messageId: string; index?: number }
   /** 流式：一条 API 消息开始（apiMessageId = message.id，与转录里 assistant 行的 message.id 相同）。 */
   | { type: "assistant_stream_start"; apiMessageId: string }

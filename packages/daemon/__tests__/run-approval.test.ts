@@ -388,3 +388,49 @@ test("全链路：TurnRunner 轮次停在审批卡上，decide allow 后跑完",
     app.close();
   }
 });
+
+test("cancelled approval and question resolve denied and clear pending cards immediately", async () => {
+  for (const question of [false, true]) {
+    const app = harness();
+    try {
+      const controller = new AbortController();
+      const pending = app.bridge.request(approvalRequest(question ? { kind: "question", toolName: "AskUserQuestion", input: { questions: [q1] } } : {}), controller.signal);
+      await tick();
+      const card = app.cards()[0]!;
+      controller.abort(new Error("run stopped"));
+      assert.equal((await pending).type, "deny");
+      assert.deepEqual(app.bridge.pending(), []);
+      assert.equal(app.manager.get(card.interactionId)?.status, "denied");
+      assert.deepEqual(app.resolved(), [{ type: "approval.resolved", interactionId: card.interactionId, status: "denied" }]);
+      assert.deepEqual(app.bridge.decide(card.interactionId, { type: "allow_once" }), { status: "already_resolved" });
+    } finally { app.close(); }
+  }
+});
+
+test("auto run abort cancels pending approval even when SDK callback signal stays live", async () => {
+  const app = harness();
+  let behavior: string | undefined;
+  const factory = ((params: QueryParams): SdkQuery => {
+    const generator = (async function* () {
+      const result = await params.options!.canUseTool!("Bash", { command: "printf harmless" }, {
+        signal: new AbortController().signal, requestId: "request", toolUseID: "tool",
+      } as ToolOptions);
+      assert.ok(result);
+      behavior = result.behavior;
+      yield { type: "result", subtype: "success", is_error: false, result: "done", uuid: "result", session_id: "auto-cancel" } as unknown as AnySdkMessage;
+    })();
+    Object.assign(generator, { interrupt: async () => {}, close: () => {} });
+    return generator as unknown as SdkQuery;
+  }) as QueryFactory;
+  try {
+    const runner = new TurnRunner({ gate: { isIdle: () => true, beginRun() {}, endRun() {} }, permissions: app.bridge, queryFactory: factory });
+    const handle = runner.startTurn({ sessionId: "auto-cancel", cwd: "/tmp", text: "go", permissionMode: "auto" });
+    await tick();
+    assert.equal(app.bridge.pending().length, 1);
+    runner.abort(handle.runId);
+    assert.deepEqual(await handle.completion, { state: "error", error: "aborted" });
+    assert.equal(behavior, "deny");
+    assert.deepEqual(app.bridge.pending(), []);
+    assert.equal(app.resolved()[0]?.status, "denied");
+  } finally { app.close(); }
+});

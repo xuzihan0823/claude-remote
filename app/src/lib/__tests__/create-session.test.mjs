@@ -90,11 +90,13 @@ test('creation retry reuses UUID and prepared body after a lost response without
     return Response.json({ sessionId: 'original', runId: 'run', clientMessageId: bodies[0].clientMessageId });
   };
   const request = {};
-  const input = { cwd: '/workspace', text: 'original text', mode: 'default', files: [{ uri: 'file:///fixture', name: 'doc.txt' }], request };
+  const input = { cwd: '/workspace', text: 'original text', mode: 'auto', files: [{ uri: 'file:///fixture', name: 'doc.txt' }], request };
   await assert.rejects(createSession(input), { code: 'network_error' });
+  input.mode = 'plan';
   const { result } = await createSession(input);
   assert.equal(result.sessionId, 'original');
   assert.equal(uploads, 1);
   assert.deepEqual(bodies[0], bodies[1]);
+  assert.equal(bodies[1].permissionMode, 'auto');
   assert.match(bodies[0].clientMessageId, /^[a-f0-9-]{36}$/);
 });

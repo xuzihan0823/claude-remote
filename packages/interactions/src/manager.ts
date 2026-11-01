@@ -21,6 +21,7 @@ export class InvalidInteractionAnswerError extends Error {}
 
 interface Waiter {
   resolve: (decision: Decision) => void;
+  cleanup: () => void;
 }
 
 export interface InteractionManagerOptions {
@@ -106,16 +107,18 @@ export class InteractionManager {
     if (record === undefined) return Promise.reject(new InteractionNotFoundError("interaction not found"));
     if (record.decision !== null) return Promise.resolve(record.decision);
 
-    return new Promise<Decision>((resolve, reject) => {
-      const waiter: Waiter = { resolve };
+    return new Promise<Decision>((resolve) => {
+      const waiter: Waiter = { resolve, cleanup: () => signal?.removeEventListener("abort", abort) };
       const waiters = this.#waiters.get(interactionId) ?? new Set<Waiter>();
       waiters.add(waiter);
       this.#waiters.set(interactionId, waiters);
 
       const abort = (): void => {
-        waiters.delete(waiter);
-        if (waiters.size === 0) this.#waiters.delete(interactionId);
-        reject(signal?.reason ?? new DOMException("The operation was aborted", "AbortError"));
+        signal?.removeEventListener("abort", abort);
+        const decision: Decision = { type: "deny", message: "Interaction cancelled" };
+        this.store.resolve({ interactionId, userId: record.userId, status: "denied", decision,
+          resolvedAt: this.#now(), auditAction: "auto_deny_cancelled" });
+        this.#finish(interactionId, decision);
       };
       if (signal?.aborted) {
         abort();
@@ -224,6 +227,9 @@ export class InteractionManager {
 
     const waiters = this.#waiters.get(interactionId);
     this.#waiters.delete(interactionId);
-    for (const waiter of waiters ?? []) waiter.resolve(decision);
+    for (const waiter of waiters ?? []) {
+      waiter.cleanup();
+      waiter.resolve(decision);
+    }
   }
 }

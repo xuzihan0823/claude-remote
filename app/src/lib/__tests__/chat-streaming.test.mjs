@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys } from '../../../../web/core/stream-drafts.js';
 import { newClientMessageId, reconcilePending, sendFailureState } from '../../../../web/core/message-delivery.js';
+import { emptyPermissionState, reducePermissionState } from '../../../../web/core/permission-state.js';
 
 const storageValues = new Map();
 if (!globalThis.localStorage) {
@@ -83,13 +84,14 @@ function mount(source, start, end, exposed, initialProps, dependencies) {
 
 function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: false }), dependencies = {}) {
   const instance = mount(screenSource, 'export function ChatScreen({ route }) {', '  const kbOffset =',
-    'pending, onSendFailed, drafts, store, runActive, activeRunId, status, addMsgs, onSending, onSent, loadErr, initLoading, firstSeq, hasMore', {}, {
+    'pending, onSendFailed, drafts, store, runActive, activeRunId, status, addMsgs, onSending, onSent, loadErr, initLoading, firstSeq, hasMore, permissionState, mode, setMode', {}, {
       route: { params: { sessionId: 'session' } },
       useNavigation: () => ({}), useTheme: () => ({ colors: {} }), useSafeAreaInsets: () => ({}),
       sessionCache: new Map(), pendingSessionMessages: new Map(), getSessionMode: () => 'default',
       api, fetchSessions: async () => {}, ws: { subscribe() {}, unsubscribe() {} },
       msgKey: (m) => `${m.seq}:${m.blockIndex || 0}`, cmpMsg: (a, b) => a.seq - b.seq || (a.blockIndex || 0) - (b.blockIndex || 0),
       applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys,
+      emptyPermissionState, reducePermissionState,
       toast() {}, setSessionMode() {}, PERMISSION_MODES: ['default'],
       haptics: { success() {} },
       newClientMessageId, reconcilePending, sendFailureState,
@@ -584,7 +586,7 @@ test('actual ChatComposer: retry reuses original UUID, text and uploaded attachm
     uploadAttachments: async () => { uploads++; return ['/uploaded/picture.png']; },
     withAttachmentNote: (text, files) => `${text}\n${files.join('\n')}`,
   });
-  instance.render({ ...initial, status: 'idle', isRunning: false, activeRunId: null });
+  instance.render({ ...initial, mode: 'auto', status: 'idle', isRunning: false, activeRunId: null });
   instance.render().setDraft('原文');
   instance.render().setFiles([{ uri: 'file:///fixture' }]);
   await instance.render().doSend();
@@ -594,5 +596,31 @@ test('actual ChatComposer: retry reuses original UUID, text and uploaded attachm
   await retry();
   assert.equal(uploads, 1);
   assert.deepEqual(bodies[0], bodies[1]);
+  assert.equal(bodies[1].permissionMode, 'auto');
   assert.equal(instance.render().draft, '新的草稿');
+});
+
+test('actual ChatScreen: SDK downgrade and reconnect do not overwrite next-turn intent; stale facts stay ignored', () => {
+  const writes = [];
+  const page = screen(undefined, { getSessionMode: () => 'auto', setSessionMode: (...args) => writes.push(args) });
+  page.emit('ws:run', { sessionId: 'session', state: 'started', runId: 'A', permissionMode: 'auto' });
+  assert.equal(page.render().permissionState.effectiveMode, null);
+  page.render().setMode('plan');
+  page.emit('ws:permission-mode', { sessionId: 'session', runId: 'A', requestedMode: 'auto', effectiveMode: 'default' });
+  assert.equal(page.render().mode, 'plan');
+  assert.equal(page.render().permissionState.effectiveMode, 'default');
+  page.emit('ws:permission-denied', { sessionId: 'session', runId: 'A', eventId: 'denied', toolUseId: 'tu', message: 'Denied' });
+  page.emit('ws:permission-denied', { sessionId: 'session', runId: 'A', eventId: 'denied', toolUseId: 'tu', message: 'Denied' });
+  assert.equal(page.render().permissionState.denials.length, 1);
+  page.emit('ws:session-state', { sessionId: 'session', status: 'daemon-driving', activeRunId: 'A', requestedPermissionMode: 'auto', effectivePermissionMode: 'default' });
+  assert.equal(page.render().permissionState.denials.length, 1);
+  page.emit('ws:run', { sessionId: 'session', state: 'started', runId: 'B', permissionMode: 'auto' });
+  page.emit('ws:permission-mode', { sessionId: 'session', runId: 'A', effectiveMode: 'bypassPermissions' });
+  page.emit('ws:run', { sessionId: 'session', runId: 'A', state: 'started', permissionMode: 'bypassPermissions' });
+  page.emit('ws:agent-notice', { sessionId: 'other', runId: 'B', eventId: 'notice', message: 'Wrong session' });
+  assert.equal(page.render().activeRunId, 'B');
+  assert.equal(page.render().permissionState.effectiveMode, null);
+  assert.equal(page.render().permissionState.notices.length, 0);
+  assert.equal(page.render().mode, 'plan');
+  assert.deepEqual(writes, []);
 });

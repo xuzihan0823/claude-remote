@@ -82,7 +82,7 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 `model` 和 `permissionMode` 为本轮可选覆盖，新建与续聊使用相同校验：
 
 - `model` 省略时不向 SDK 注入模型，遵循当前项目配置；不能用空字符串或 null 表示默认。非字符串/空白返回 400 `invalid_model`，不在目录中的具体 ID 返回 400 `unknown_model`。接受目录中的完整 ID 或 alias，以及内置 `fable`、`opus`、`sonnet`、`haiku`；字符串会去除两端空白。
-- `permissionMode` 只接受 `default`、`acceptEdits`、`plan`、`bypassPermissions`，省略时 SDK 使用 `default`，非法值返回 400 `invalid_permission_mode`。覆盖不写回 Mac 设置，也不修改已经开始的轮次。
+- `permissionMode` 只接受 `default`、`acceptEdits`、`plan`、`auto`、`bypassPermissions`，不开放 `dontAsk`。省略时 SDK 使用 `default`，非法值返回 400 `invalid_permission_mode`。覆盖不写回 Mac 设置，也不修改已经开始的轮次。
 - `effort` 为本轮思考程度覆盖，仅接受 `low`、`medium`、`high`、`xhigh`、`max`；省略时不注入 SDK，跟随本机配置，不回写设置文件。服务端只校验取值，非法值返回 400 `invalid_effort`，不判断模型是否支持。
 
 成功返回 `202 { "sessionId": "<uuid>", "runId": "<uuid>" }`，表示已受理，不保证推理成功或 JSONL 已落盘。新会话可立即订阅取得运行状态；消息接口在落盘前可能返回 404 `session_not_found`，客户端应重试。后台发现文件后发送 `resync` 以触发正文重拉。运行互斥冲突返回 `409 { "error": "not_idle", "status": "daemon-driving" }`（status 为当时真实状态）。
@@ -162,13 +162,27 @@ WebView 只在首次请求带请求头，所以目前只保证单文件 HTML，�
 
 ### WS 订阅、运行事件与状态恢复
 
-客户端发送 `{ "type": "subscribe", "sessionId": "<uuid>" }`，取消用 `unsubscribe`。指定会话订阅成功后，服务器先发送当前权威快照，再发送尚存的流草稿；新会话尚未落盘时也提供状态快照。未知会话订阅静默忽略；同连接重复订阅不重发快照，需要重连或取消后重新订阅。
+客户端发送 `{ "type": "subscribe", "sessionId": "<uuid>" }`，取消用 `unsubscribe`。指定会话订阅成功后，服务器先发送当前权威快照，再补发活跃 run 的拒绝/提示和尚存的流草稿；新会话尚未落盘时也提供状态快照。未知会话订阅静默忽略；同连接重复订阅不重发快照，需要重连或取消后重新订阅。
 
 ```json
-{ "type": "session-state", "sessionId": "<uuid>", "status": "daemon-driving", "activeRunId": "<uuid>" }
+{ "type": "session-state", "sessionId": "<uuid>", "status": "daemon-driving", "activeRunId": "<uuid>", "requestedPermissionMode": "auto", "effectivePermissionMode": "auto" }
 ```
 
 无活跃 daemon run 时 activeRunId 为 null，status 可以是 idle 或 terminal-driving。快照不伪造 `run.started`；客户端统一更新 status、运行标记和身份，无活跃运行时清理旧草稿及计时器。状态恢复不依赖前 200 条会话列表，也不依赖本地已有消息；HTTP 列表仅刷新元信息，不得覆盖后来收到的运行状态。重连补拉须使旧连接、旧会话的异步结果失效。
+
+`requestedPermissionMode` 是本轮请求值，省略 HTTP 参数时为 `default`；`effectivePermissionMode` 仅在 SDK 的 `system/init` 或 `system/status` 报告后出现。无活跃 run 时两者缺省；终端接管后不宣称知道终端模式。SDK 未确认时手机显示“自动审核，正在确认”；SDK 从 auto 回报 default 时显示“本轮已转为标准审批”，原因未知时仅说明 CLI 未启用或已退出自动审核。未知模式保留原值，不伪造成 default。
+
+```json
+{ "type": "permission-mode", "sessionId": "<uuid>", "runId": "<uuid>", "requestedMode": "auto", "effectiveMode": "default", "source": "sdk" }
+{ "type": "permission-denied", "sessionId": "<uuid>", "runId": "<uuid>", "eventId": "<event-id>", "toolUseId": "<tool-id>", "toolName": "Bash", "agentId": "<agent-id>", "decisionReasonType": "classifier", "decisionReason": "需要明确授权", "message": "操作被拒绝" }
+{ "type": "agent-notice", "sessionId": "<uuid>", "runId": "<uuid>", "eventId": "<event-id>", "level": "warning", "message": "CLI 返回的用户提示" }
+```
+
+拒绝中的 `agentId`、`decisionReasonType`、`decisionReason` 可选。只有明确面向用户的 `system/informational` 消息转为提示，warning 保留等级，其余公开提示等级映射为 info；不转发 thinking token 或调试日志。提示只在已鉴权会话中传输，不写公共日志。拒绝不是待审批任务，也不直接导致整轮失败；仍由 SDK result/异常决定终态。
+
+SDK 对自动拒绝返回错误工具结果，但结构化原因未保证写入主链转录，因此 Runner 只在活跃 run 内按事件 ID 去重并缓存最近 100 条拒绝/提示，订阅时紧随快照补发，结束后删除。手机按工具调用 ID 合并到已有结果，没有结果时附到工具调用；后续结果到达时迁移，避免重复拒绝卡。子代理身份独立，不按同名工具附到主链。历史恢复以正式工具错误为基础，不建额外长期库。
+
+以上事件均绑定 sessionId/runId，旧轮次事件不能覆盖新轮次。本轮实际模式不回写下一轮选择或默认设置，重试保留原正文、clientMessageId 和权限参数。原生分类器批准/拒绝不保证进入 `canUseTool`；明确 ask、AskUserQuestion 和 CLI 升级请求继续使用原审批卡，未确认/超时/取消仍拒绝。
 
 ```json
 { "type": "run", "sessionId": "<uuid>", "runId": "<uuid>", "state": "started", "permissionMode": "plan" }
@@ -184,6 +198,14 @@ run.state 为 started/done/error；`error` 和 `permissionMode` 可选，permiss
 流帧为 `{ "type": "stream", "sessionId": "<uuid>", "key": "<apiMessageId>:<index>", "offset": 0, "text": "回答" }`，block 结束时带 `done: true`；offset 是 JavaScript 字符串偏移，按偏移合并可重复投递。订阅草稿快照从 offset 0 开始，终止清理为 `{ "type": "stream", "sessionId": "<uuid>", "clear": true }`。草稿仅供即时显示，正式正文以消息接口和 message 帧为准，二者需对账。
 
 客户端 `{ "type": "ping" }` 收到 `{ "type": "pong" }`，与订阅无关。会话快照及上述 HTTP/WS 行为由 `server.test.ts` 集成测试覆盖；App 恢复顺序由 `app/src/lib/__tests__/chat-streaming.test.mjs` 覆盖。
+
+### Auto 执行环境与兼容配置
+
+auto 由 Claude Code 原生分类器审核，应用不新增审核模型服务，也不推断分类器模型。保持已有模型映射和原生服务端审核/回退，不自动关闭服务端审核、不自动切 Bypass。
+
+Bridge 与启动版本探测复用显式 `CLAUDE_BIN`（去掉首尾空白）。未配置时 Bridge 使用 SDK 默认程序，health 中版本报告 `unknown`，不把 PATH 上的版本冒充实际版本。旧 CLI 不支持 auto 时沿用 SDK 错误反馈，不自动更新或安装。
+
+管理员可在 Daemon 本地环境配置文件中设置 `CLAUDE_BIN=<CLAUDE_BIN>`，并按该 CLI 的版本支持情况选择 `CLAUDE_CODE_AUTO_MODE_SERVER=0`；可选 `CLAUDE_CODE_AUTO_MODE_MODEL=<CLASSIFIER_MODEL_ID>` 需确认模型可调用且被 CLI 接受，要求支持该变量的版本。重启后继承到子进程，不新增 HTTP 或手机凭据参数，不改全局 Claude 设置。关闭服务端审核仍会向网关/上游请求独立审核，可能增加请求数、费用和延迟，且影响范围由 CLI 决定，可能包含规划模式等场景。
 
 ## Markdown 公式与图片
 

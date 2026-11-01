@@ -1,4 +1,4 @@
-export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'];
 export const MODE_KEY = 'session_mode';
 
 function validMode(mode) {

@@ -47,17 +47,17 @@ function estimateMenuHeight({ items, title, header, large, maxH, expandedKey }) 
   if (expIdx >= 0) {
     const expItem = items[expIdx];
     const aboveH = items.slice(0, expIdx).reduce((sum, item) => (
-      item.type === 'section' ? sum + 32 : sum + (item.detail || item.sub ? 54 : 48)
+      item.type === 'section' ? sum + 32 : sum + (item.detail || item.sub ? 54 + ((item.detailLines || 1) - 1) * 16 : 48)
     ), 0);
     const subH = (expItem.subItems || []).reduce((sum, sub) => (
-      sum + (sub.detail || sub.sub ? 52 : 46)
+      sum + (sub.detail || sub.sub ? 52 + ((sub.detailLines || 1) - 1) * 16 : 46)
     ), 0);
     return Math.min(Math.max(padV + headerH + aboveH + 52 + subH + 14, 56), maxH);
   }
   const rowsH = (items || []).reduce((sum, item) => {
     if (item.type === 'section') return sum + 32;
     if (large) return sum + 60;
-    return sum + (item.detail || item.sub ? 54 : 48);
+    return sum + (item.detail || item.sub ? 54 + ((item.detailLines || 1) - 1) * 16 : 48);
   }, 0);
   return Math.min(Math.max(padV + headerH + rowsH, 56), maxH);
 }
@@ -540,7 +540,7 @@ export function GlassMenu({
             </View>
             {subText ? (
               <Text
-                numberOfLines={1}
+                numberOfLines={item.detailLines || 1}
                 ellipsizeMode="middle"
                 style={{
                   color: item.detailTone === 'danger' ? colors.danger : colors.ink2,

@@ -1,8 +1,9 @@
-export const MODE_LABELS = { default: '标准', acceptEdits: '自动编辑', plan: '规划', bypassPermissions: 'Bypass' };
+export const MODE_LABELS = { default: '标准', acceptEdits: '自动编辑', plan: '规划', auto: '自动审核', bypassPermissions: 'Bypass' };
 export const MODE_SUBS = {
   default: '每个操作都要你审批（默认）',
   acceptEdits: '文件修改自动同意，命令仍需审批',
   plan: '只读，先出方案不动手',
+  auto: '由模型审核操作，必要时仍需确认',
   bypassPermissions: '全自动，不再请求任何审批，危险',
 };
 export const REPO_URL = 'https://github.com/xuzihan0823/claude-remote';

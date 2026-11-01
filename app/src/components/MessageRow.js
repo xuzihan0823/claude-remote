@@ -15,6 +15,7 @@ import { Icon, toolIconName } from './Icon.js';
 import { Spark } from './Spark.js';
 import { fmtClock, toolSummary } from '../lib/format.js';
 import { toolHeadline } from '../lib/tool-view.js';
+import { denialText, deniedToolResultText } from '../../../web/core/permission-state.js';
 import { ToolInputView } from './ToolInputView.js';
 import { useTheme } from '../theme.js';
 import { LinkText } from './LinkText.js';
@@ -222,6 +223,17 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
   const showThinking = usePref('showThinking');
   const toolsExpanded = usePref('toolsExpanded');
 
+  const denial = m.permissionDenial;
+  if (m.kind === 'notice') {
+    return <Block icon={<Icon name="info" size={15} color={m.level === 'warning' ? colors.danger : colors.ink2} />} title="会话提示" defaultOpen>
+      <Text selectable style={{ color: colors.ink, fontSize: 14, lineHeight: 21 }}>{m.text}</Text>
+    </Block>;
+  }
+  if (m.kind === 'permission_denied') {
+    return <Block icon={<Icon name="close" size={15} color={colors.danger} />} title={`${denial.agentId ? '子代理 · ' : ''}${denial.toolName || '工具'}已拒绝`} err defaultOpen>
+      <Text selectable style={{ color: colors.danger, fontSize: 14, lineHeight: 21 }}>{denialText(denial)}</Text>
+    </Block>;
+  }
   if (m.kind === 'meta') {
     return (
       <Text style={{ textAlign: 'center', color: colors.ink3, fontSize: 12, marginVertical: 6 }}>
@@ -241,12 +253,14 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
     return (
       <Block
         icon={<Icon name={toolIconName(m.toolName)} size={15} color={colors.accentDeep} />}
-        title={m.toolName || '工具'}
+        title={denial ? `${m.toolName || '工具'}已拒绝` : m.toolName || '工具'}
         sub={toolHeadline(m.toolName, m.toolInput) || toolSummary(m)}
         defaultOpen={toolsExpanded}
         live={live}
+        err={!!denial}
       >
         <ToolInputView name={m.toolName} input={m.toolInput} />
+        {denial ? <Text selectable style={{ color: colors.danger, fontSize: 14, lineHeight: 21, marginTop: 8 }}>{denialText(denial)}</Text> : null}
       </Block>
     );
   }
@@ -254,14 +268,14 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
     const chars = (m.text || '').length;
     return (
       <Block
-        icon={<Icon name={m.isError ? 'close' : 'check'} size={15} color={m.isError ? colors.danger : colors.ok} strokeWidth={2.1} />}
-        title={m.isError ? '工具出错' : '工具结果'}
-        sub={`${chars} 字符`}
-        err={m.isError}
+        icon={<Icon name={m.isError || denial ? 'close' : 'check'} size={15} color={m.isError || denial ? colors.danger : colors.ok} strokeWidth={2.1} />}
+        title={denial ? '操作已拒绝' : m.isError ? '工具出错' : '工具结果'}
+        sub={denial ? denial.toolName : `${chars} 字符`}
+        err={m.isError || !!denial}
         defaultOpen={toolsExpanded}
         live={live}
       >
-        <MonoBody text={m.text || ''} err={m.isError} />
+        <MonoBody text={denial ? deniedToolResultText(denial, m.text) : m.text || ''} err={m.isError || !!denial} />
       </Block>
     );
   }
