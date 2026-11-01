@@ -313,3 +313,31 @@ test("result is_error（模型不可用/鉴权失败）：run 以 error 收尾�
   assert.deepEqual(events.at(-1), { type: "run", runId: handle.runId, sessionId: "s", state: "error", error: "API Error: 404 model not found" });
   assert.deepEqual(ended, ["s"]);
 });
+
+test("active auto state remains unconfirmed until SDK reports it; diagnostics are bounded and cleared", async () => {
+  const release = deferred();
+  const ready = deferred();
+  let approvals = 0;
+  const { factory, state } = fakeFactory(async function* () {
+    yield sdkMessage({ type: "system", subtype: "init", session_id: "other", permissionMode: "bypassPermissions" });
+    yield sdkMessage({ type: "system", subtype: "status", session_id: "auto-session" });
+    yield sdkMessage({ type: "system", subtype: "init", session_id: "auto-session", permissionMode: "auto" });
+    yield sdkMessage({ type: "system", subtype: "status", session_id: "auto-session", permissionMode: "future-mode" });
+    for (let i = 0; i < 105; i++) yield sdkMessage({ type: "system", subtype: "permission_denied", session_id: "auto-session", uuid: `deny-${i}`, tool_use_id: `tu-${i}`, tool_name: "Bash", message: "Denied" });
+    ready.resolve();
+    await release.promise;
+    yield resultMessage("continued after denial", "result", "auto-session");
+  });
+  const runner = new TurnRunner({ gate: stubGate().gate, permissions: { request: async () => { approvals++; return { type: "deny" }; } }, queryFactory: factory });
+  const handle = runner.startTurn({ sessionId: "auto-session", cwd: "/tmp", text: "go", permissionMode: "auto" });
+  assert.deepEqual(runner.activeState("auto-session"), { activeRunId: handle.runId, requestedPermissionMode: "auto" });
+  await ready.promise;
+  assert.equal(state.params?.options?.permissionMode, "auto");
+  assert.deepEqual(runner.activeState("auto-session"), { activeRunId: handle.runId, requestedPermissionMode: "auto", effectivePermissionMode: "future-mode" });
+  assert.equal(runner.activeDiagnostics("auto-session").length, 100);
+  assert.equal(approvals, 0);
+  release.resolve();
+  assert.deepEqual(await handle.completion, { state: "done" });
+  assert.equal(runner.activeState("auto-session"), undefined);
+  assert.deepEqual(runner.activeDiagnostics("auto-session"), []);
+});

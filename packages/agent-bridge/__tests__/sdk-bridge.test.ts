@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { QueryFactory } from "../src/sdk-bridge.js";
-import { startSdkQuery, type EffortLevel } from "../src/sdk-bridge.js";
+import { configuredClaudeExecutable, startSdkQuery, type EffortLevel, type ExternalPermissionMode } from "../src/sdk-bridge.js";
 
 type QueryParams = Parameters<QueryFactory>[0];
 type SdkQuery = ReturnType<QueryFactory>;
@@ -20,7 +20,7 @@ function fakeQuery(): { factory: QueryFactory; params: () => QueryParams | undef
   return { factory, params: () => captured };
 }
 
-function options(factory: QueryFactory, extra: { resume?: string; sessionId?: string; model?: string; effort?: EffortLevel; permissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions" } = {}) {
+function options(factory: QueryFactory, extra: { resume?: string; sessionId?: string; model?: string; effort?: EffortLevel; permissionMode?: ExternalPermissionMode } = {}) {
   const handle = startSdkQuery({
     cwd: "/tmp/project",
     prompt: "hello",
@@ -144,5 +144,27 @@ test("effort override reaches SDK and default stays omitted", () => {
     assert.equal(fake.params()?.options?.effort, effort);
     assert.equal(Object.hasOwn(fake.params()?.options ?? {}, "effort"), effort !== undefined);
     handle.close();
+  }
+});
+
+test("auto and explicit classifier env reach SDK without policy rewrites", () => {
+  const keys = ["CLAUDE_CODE_AUTO_MODE_SERVER", "CLAUDE_CODE_AUTO_MODE_MODEL", "CLAUDE_BIN"];
+  const previous = keys.map((key) => process.env[key]);
+  try {
+    process.env.CLAUDE_CODE_AUTO_MODE_SERVER = "0";
+    process.env.CLAUDE_CODE_AUTO_MODE_MODEL = "example-classifier";
+    process.env.CLAUDE_BIN = "  /opt/bin/claude  ";
+    const fake = fakeQuery();
+    const handle = options(fake.factory, { permissionMode: "auto" });
+    assert.equal(fake.params()?.options?.permissionMode, "auto");
+    assert.equal(fake.params()?.options?.env?.CLAUDE_CODE_AUTO_MODE_SERVER, "0");
+    assert.equal(fake.params()?.options?.env?.CLAUDE_CODE_AUTO_MODE_MODEL, "example-classifier");
+    assert.equal(fake.params()?.options?.pathToClaudeCodeExecutable, configuredClaudeExecutable());
+    assert.equal(configuredClaudeExecutable(), "/opt/bin/claude");
+    handle.close();
+    process.env.CLAUDE_BIN = " ";
+    assert.equal(configuredClaudeExecutable(), undefined);
+  } finally {
+    keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; });
   }
 });

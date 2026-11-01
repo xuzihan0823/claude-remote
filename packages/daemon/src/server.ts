@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
-import { EFFORT_LEVELS, type EffortLevel } from "@claude-remote/agent-bridge";
+import { EFFORT_LEVELS, type EffortLevel, type ExternalPermissionMode, type WorkerEvent } from "@claude-remote/agent-bridge";
 import { readEffortOptions, type EffortOptions } from "./effort-levels.js";
 import type { DaemonConfig } from "./config.js";
 import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo } from "./pair.js";
@@ -47,8 +47,8 @@ const MESSAGES_LIMIT_DEFAULT = 100;
 const MESSAGES_LIMIT_MAX = 500;
 const WS_HEARTBEAT_MS = 30_000;
 
-const VALID_PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "bypassPermissions"]);
-type PermissionMode = "default" | "acceptEdits" | "plan" | "bypassPermissions";
+const VALID_PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "auto", "bypassPermissions"]);
+type PermissionMode = ExternalPermissionMode;
 
 export interface DaemonServerOptions {
   config: DaemonConfig;
@@ -673,8 +673,12 @@ export class DaemonServer {
   async #pumpRun(sessionId: string, text: string, handle: TurnHandle): Promise<void> {
     try {
       for await (const event of handle.events) {
+        const currentRunId = this.#options.runner.activeRunId(sessionId);
+        if (currentRunId !== undefined && currentRunId !== event.runId) continue;
         if (event.type === "worker") {
           const worker = event.event;
+          const diagnostic = this.#diagnosticFrame(sessionId, event.runId, worker);
+          if (diagnostic) this.#broadcastToSubscribers(sessionId, diagnostic);
           if (this.#newSessions.has(sessionId) && worker.type === "session") {
             void this.#activateNewSessionWatch(sessionId);
           } else if (worker.type === "assistant_stream_start") {
@@ -709,7 +713,7 @@ export class DaemonServer {
       console.error(`run event pump failed (session ${sessionId}):`, error);
     } finally {
       this.#activeRuns.delete(handle.runId);
-      this.#streams.end(sessionId);
+      if (!this.#options.runner.activeRunId(sessionId)) this.#streams.end(sessionId);
       if (this.#newSessions.has(sessionId)) void this.#activateNewSessionWatch(sessionId);
     }
   }
@@ -1026,6 +1030,18 @@ export class DaemonServer {
     }
   }
 
+  #diagnosticFrame(sessionId: string, runId: string, event: WorkerEvent): Record<string, unknown> | undefined {
+    if (event.type === "permission_mode") return {
+      type: "permission-mode", sessionId, runId, requestedMode: event.requestedMode,
+      effectiveMode: event.effectiveMode, source: "sdk",
+    };
+    if (event.type === "permission_denied" || event.type === "notice") {
+      const { type, ...details } = event;
+      return { ...details, type: type === "permission_denied" ? "permission-denied" : "agent-notice", sessionId, runId };
+    }
+    return undefined;
+  }
+
   #sendSessionState(ws: WebSocket, sessionId: string): void {
     if (ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({
@@ -1033,7 +1049,13 @@ export class DaemonServer {
       sessionId,
       status: this.#options.tracker.getStatus(sessionId),
       activeRunId: this.#options.runner.activeRunId(sessionId) ?? null,
+      ...this.#options.runner.activeState(sessionId),
     }));
+    for (const event of this.#options.runner.activeDiagnostics(sessionId)) {
+      if (event.type !== "worker") continue;
+      const frame = this.#diagnosticFrame(sessionId, event.runId, event.event);
+      if (frame) ws.send(JSON.stringify(frame));
+    }
   }
 
   async #acquireWatch(sessionId: string): Promise<void> {

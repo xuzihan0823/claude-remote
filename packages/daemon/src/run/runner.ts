@@ -17,6 +17,7 @@ import {
   type QueryFactory,
   type SdkQueryHandle,
   type EffortLevel,
+  type ExternalPermissionMode,
   type WorkerEvent,
 } from "@claude-remote/agent-bridge";
 
@@ -51,7 +52,7 @@ export interface StartTurnOptions {
   /** Start a new persisted SDK session with sessionId instead of resuming it. */
   newSession?: boolean;
   /** 权限模式覆盖；省略时由 SDK 走 "default"。 */
-  permissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions";
+  permissionMode?: ExternalPermissionMode;
 }
 
 export interface TurnHandle {
@@ -110,6 +111,9 @@ class EventQueue<T extends object> implements AsyncIterable<T> {
 
 interface ActiveRun {
   sessionId: string;
+  requestedPermissionMode: ExternalPermissionMode;
+  effectivePermissionMode?: string;
+  diagnostics: Array<Extract<WorkerEvent, { type: "permission_denied" | "notice" }>>;
   controller: AbortController;
   aborted: boolean;
   /** abort 宽限期满后调用：强制结束 #consume 的消息循环。 */
@@ -187,7 +191,8 @@ export class TurnRunner {
     const forceStopped = new Promise<typeof FORCE_STOPPED>((resolve) => {
       forceStop = () => resolve(FORCE_STOPPED);
     });
-    const run: ActiveRun = { sessionId, controller, aborted: false, forceStop, forceTimer: undefined };
+    const run: ActiveRun = { sessionId, controller, aborted: false, forceStop, forceTimer: undefined,
+      requestedPermissionMode: permissionMode ?? "default", diagnostics: [] };
     this.#runs.set(runId, run);
     this.#sessionRuns.set(sessionId, runId);
 
@@ -216,6 +221,20 @@ export class TurnRunner {
     return this.#sessionRuns.get(sessionId);
   }
 
+  activeState(sessionId: string): { activeRunId: string; requestedPermissionMode: string; effectivePermissionMode?: string } | undefined {
+    const activeRunId = this.#sessionRuns.get(sessionId);
+    const run = activeRunId === undefined ? undefined : this.#runs.get(activeRunId);
+    if (activeRunId === undefined || run === undefined) return undefined;
+    return { activeRunId, requestedPermissionMode: run.requestedPermissionMode,
+      ...(run.effectivePermissionMode === undefined ? {} : { effectivePermissionMode: run.effectivePermissionMode }) };
+  }
+
+  activeDiagnostics(sessionId: string): RunEvent[] {
+    const runId = this.#sessionRuns.get(sessionId);
+    const run = runId === undefined ? undefined : this.#runs.get(runId);
+    return run === undefined || runId === undefined ? [] : run.diagnostics.map((event) => ({ type: "worker", sessionId, runId, event }));
+  }
+
   async #consume(
     runId: string,
     run: ActiveRun,
@@ -235,7 +254,18 @@ export class TurnRunner {
       for (;;) {
         const next = await Promise.race([iterator.next(), forceStopped]);
         if (next === FORCE_STOPPED || next.done === true) break;
-        for (const event of adaptSdkMessage(next.value)) {
+        if ("session_id" in next.value && next.value.session_id !== sessionId) continue;
+        for (let event of adaptSdkMessage(next.value)) {
+          if (event.type === "session" && event.sessionId !== sessionId) continue;
+          if (event.type === "permission_mode") {
+            run.effectivePermissionMode = event.effectiveMode;
+            event = { ...event, requestedMode: run.requestedPermissionMode };
+          } else if (event.type === "permission_denied" || event.type === "notice") {
+            const eventId = event.eventId;
+            if (run.diagnostics.some((item) => item.eventId === eventId)) continue;
+            run.diagnostics.push(event);
+            if (run.diagnostics.length > 100) run.diagnostics.shift();
+          }
           queue.push({ type: "worker", runId, sessionId, event });
           if (event.type === "result") {
             sawResult = true;

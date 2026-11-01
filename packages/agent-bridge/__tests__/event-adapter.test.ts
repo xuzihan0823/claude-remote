@@ -30,3 +30,19 @@ test("stream events: message_start / block index / block_stop; subagent streams 
   const sub = adaptSdkMessage(sdk({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "y" } }, uuid: "e4", session_id: "s", parent_tool_use_id: "tu1" }));
   assert.equal(sub.length, 1);
 });
+
+test("SDK mode facts preserve unknown values and ignore missing or subagent state", () => {
+  for (const subtype of ["init", "status"]) {
+    assert.deepEqual(adaptSdkMessage(sdk({ type: "system", subtype, permissionMode: "auto" })), [{ type: "permission_mode", effectiveMode: "auto" }]);
+    assert.deepEqual(adaptSdkMessage(sdk({ type: "system", subtype, permissionMode: "future-mode" })), [{ type: "permission_mode", effectiveMode: "future-mode" }]);
+    assert.deepEqual(adaptSdkMessage(sdk({ type: "system", subtype })), []);
+    assert.deepEqual(adaptSdkMessage(sdk({ type: "system", subtype, permissionMode: "default", agent_id: "child" })), []);
+  }
+});
+
+test("auto denial retains tool and agent identity; user notices exclude internal events", () => {
+  const denial = { type: "system", subtype: "permission_denied", uuid: "deny-1", tool_use_id: "tool-1", tool_name: "Bash", agent_id: "child", decision_reason_type: "classifier", decision_reason: "Needs explicit authorization", message: "Denied" };
+  assert.deepEqual(adaptSdkMessage(sdk(denial)), [{ type: "permission_denied", eventId: "deny-1", toolUseId: "tool-1", toolName: "Bash", agentId: "child", decisionReasonType: "classifier", decisionReason: "Needs explicit authorization", message: "Denied" }]);
+  assert.deepEqual(adaptSdkMessage(sdk({ type: "system", subtype: "informational", uuid: "notice-1", content: "Review may incur usage", level: "warning" })), [{ type: "notice", eventId: "notice-1", message: "Review may incur usage", level: "warning" }]);
+  assert.deepEqual(adaptSdkMessage(sdk({ type: "system", subtype: "thinking_tokens", content: "internal", uuid: "internal" })), []);
+});

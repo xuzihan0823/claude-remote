@@ -25,6 +25,26 @@ export function adaptSdkMessage(message: SDKMessage): WorkerEvent[] {
   const sessionId = typeof source.session_id === "string" ? source.session_id : undefined;
   const events: WorkerEvent[] = sessionId === undefined ? [] : [{ type: "session", sessionId }];
 
+  if (message.type === "system") {
+    if ((source.subtype === "init" || source.subtype === "status") && !source.agent_id && !source.parent_tool_use_id
+      && typeof source.permissionMode === "string" && source.permissionMode !== "") {
+      events.push({ type: "permission_mode", effectiveMode: source.permissionMode });
+    } else if (source.subtype === "permission_denied" && typeof source.uuid === "string"
+      && typeof source.tool_use_id === "string" && typeof source.tool_name === "string" && typeof source.message === "string") {
+      events.push({
+        type: "permission_denied", eventId: source.uuid, toolUseId: source.tool_use_id,
+        toolName: source.tool_name, message: source.message,
+        ...(typeof source.agent_id === "string" ? { agentId: source.agent_id } : {}),
+        ...(typeof source.decision_reason_type === "string" ? { decisionReasonType: source.decision_reason_type } : {}),
+        ...(typeof source.decision_reason === "string" ? { decisionReason: source.decision_reason } : {}),
+      });
+    } else if (source.subtype === "informational" && typeof source.uuid === "string"
+      && typeof source.content === "string" && ["info", "notice", "suggestion", "warning"].includes(String(source.level))) {
+      events.push({ type: "notice", eventId: source.uuid, message: source.content, level: source.level === "warning" ? "warning" : "info" });
+    }
+    return events;
+  }
+
   if (message.type === "stream_event") {
     // 子代理（Task）的流不在主链上，手机端只流式显示主会话
     if (source.parent_tool_use_id) return events;

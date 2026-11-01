@@ -60,6 +60,7 @@ interface FakeSdk {
   finish: () => void;
   interrupts: number;
   delayAbort: boolean;
+  systemMessages?: Array<Record<string, unknown>>;
 }
 
 function fakeSdk(): FakeSdk {
@@ -73,13 +74,15 @@ function fakeSdk(): FakeSdk {
     });
     holder.finish = release;
     const generator = (async function* () {
-      const ev = (event: unknown) => ({ type: "stream_event", uuid: "e", session_id: SESSION_ID, parent_tool_use_id: null, event }) as never;
+      const sessionId = (params.options as { sessionId?: string; resume?: string }).sessionId ?? params.options?.resume ?? SESSION_ID;
+      for (const message of holder.systemMessages ?? []) yield { type: "system", session_id: sessionId, ...message } as never;
+      const ev = (event: unknown) => ({ type: "stream_event", uuid: "e", session_id: sessionId, parent_tool_use_id: null, event }) as never;
       yield ev({ type: "message_start", message: { id: "msg_t" } });
       yield ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "done " } });
       yield ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "text" } });
       yield ev({ type: "content_block_stop", index: 0 });
       yield {
-        type: "assistant", uuid: "sdk-a1", session_id: SESSION_ID,
+        type: "assistant", uuid: "sdk-a1", session_id: sessionId,
         message: { content: [{ type: "text", text: "done text" }] },
       } as never;
       await gatePromise;
@@ -1049,7 +1052,7 @@ test("WS 重连：运行中先发身份再发草稿，断线期间完成/中止�
     await active.open();
     active.send({ type: "subscribe", sessionId: SESSION_ID });
     await active.waitFor((f) => f.type === "stream");
-    assert.deepEqual(active.frames[0], { type: "session-state", sessionId: SESSION_ID, status: "daemon-driving", activeRunId: runId });
+    assert.deepEqual(active.frames[0], { type: "session-state", sessionId: SESSION_ID, status: "daemon-driving", activeRunId: runId, requestedPermissionMode: "plan" });
     assert.equal(active.frames.some((f) => f.type === "run" && f.state === "started"), false);
     active.close();
     if (abort) await fetch(`${local.base}/api/sessions/${SESSION_ID}/abort`, authed({ method: "POST", body: JSON.stringify({ runId }) }));
@@ -1186,4 +1189,63 @@ test("GET session file：鉴权、真实路径类型、大小限制及缺失文�
   } finally {
     await h.dispose();
   }
+});
+
+test("auto passes new/resumed HTTP validation while dontAsk and invalid modes remain rejected", async (t) => {
+  for (const path of ["/api/sessions", `/api/sessions/${SESSION_ID}/messages`]) {
+    const h = await startHarness();
+    t.after(() => h.dispose());
+    const send = (permissionMode: unknown) => fetch(`${h.base}${path}`, authed({ method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, text: "auto test", permissionMode }) }));
+    for (const bad of [null, "dontAsk", "bad", 3]) {
+      const res = await send(bad);
+      assert.equal(res.status, 400);
+      assert.equal((await res.json() as { error: string }).error, "invalid_permission_mode");
+    }
+    const accepted = await send("auto");
+    assert.equal(accepted.status, 202);
+    assert.equal(h.sdk.params?.options?.permissionMode, "auto");
+    assert.equal((await (await fetch(`${h.base}/api/interactions/pending`, authed())).json() as { interactions: unknown[] }).interactions.length, 0);
+    h.sdk.finish();
+  }
+});
+
+test("auto downgrade and structured denial recover after snapshot without creating approval", async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  h.sdk.systemMessages = [
+    { subtype: "init", permissionMode: "auto", uuid: "init" },
+    { subtype: "status", permissionMode: "default", uuid: "status" },
+    { subtype: "permission_denied", uuid: "deny", tool_use_id: "tu", tool_name: "Bash", agent_id: "child", decision_reason_type: "classifier", decision_reason: "Needs authorization", message: "Denied" },
+    { subtype: "permission_denied", uuid: "deny", tool_use_id: "tu", tool_name: "Bash", message: "Denied" },
+    { subtype: "informational", uuid: "notice", content: "Review may incur usage", level: "warning" },
+  ];
+  const observer = new FrameSink(h.wsUrl());
+  t.after(() => observer.close());
+  await observer.open();
+  observer.send({ type: "subscribe", sessionId: SESSION_ID });
+  await observer.waitFor((f) => f.type === "session-state");
+  const res = await fetch(`${h.base}/api/sessions/${SESSION_ID}/messages`, authed({ method: "POST", body: JSON.stringify({ text: "test", permissionMode: "auto" }) }));
+  assert.equal(res.status, 202);
+  const { runId } = await res.json() as { runId: string };
+  assert.deepEqual(await observer.waitFor((f) => f.type === "permission-mode" && f.effectiveMode === "default"), { type: "permission-mode", sessionId: SESSION_ID, runId, requestedMode: "auto", effectiveMode: "default", source: "sdk" });
+  await observer.waitFor((f) => f.type === "agent-notice");
+  assert.equal(observer.frames.filter((f) => f.type === "permission-denied").length, 1);
+  const recovered = new FrameSink(h.wsUrl());
+  t.after(() => recovered.close());
+  await recovered.open();
+  recovered.send({ type: "subscribe", sessionId: SESSION_ID });
+  const denial = await recovered.waitFor((f) => f.type === "permission-denied");
+  assert.deepEqual(recovered.frames[0], { type: "session-state", sessionId: SESSION_ID, status: "daemon-driving", activeRunId: runId, requestedPermissionMode: "auto", effectivePermissionMode: "default" });
+  assert.equal(denial.agentId, "child");
+  assert.equal(denial.decisionReason, "Needs authorization");
+  assert.equal(denial.runId, runId);
+  assert.equal(observer.frames.some((f) => f.type === "approval"), false);
+  h.sdk.finish();
+  await observer.waitFor((f) => f.type === "run" && f.state === "done");
+  const idle = new FrameSink(h.wsUrl());
+  t.after(() => idle.close());
+  await idle.open();
+  idle.send({ type: "subscribe", sessionId: SESSION_ID });
+  assert.deepEqual(await idle.waitFor((f) => f.type === "session-state"), { type: "session-state", sessionId: SESSION_ID, status: "idle", activeRunId: null });
+  assert.equal(idle.frames.some((f) => f.type === "permission-denied" || f.type === "agent-notice"), false);
 });
