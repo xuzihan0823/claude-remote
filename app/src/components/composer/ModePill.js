@@ -1,7 +1,7 @@
 import { Text, TouchableOpacity } from 'react-native';
 import { useTheme } from '../../theme.js';
 
-const MODE_LABELS = { default: '标准', acceptEdits: '自动编辑', plan: '规划', bypassPermissions: 'Bypass' };
+const MODE_LABELS = { default: '标准', acceptEdits: '自动编辑', plan: '规划', auto: '自动审核', bypassPermissions: 'Bypass' };
 
 // 模式 pill：非 default 时 accent 边高亮。点击 onOpen 打开 sheet。
 // 对应 web/ui/components/mode-sheet.js 的 ModePill。

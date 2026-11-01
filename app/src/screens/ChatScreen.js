@@ -6,7 +6,8 @@ import { KeyboardChatScrollView, KeyboardStickyView } from 'react-native-keyboar
 import { useNavigation } from '@react-navigation/native';
 import { api, fetchSessions, pendingSessionMessages, sessionCache } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
-import { PERMISSION_MODES, getSessionMode, setSessionMode } from '../../../web/core/modes.js';
+import { getSessionMode, setSessionMode } from '../../../web/core/modes.js';
+import { emptyPermissionState, reducePermissionState, permissionStatusText, mergePermissionDenials } from '../../../web/core/permission-state.js';
 import { ws } from '../../../web/core/ws.js';
 import { applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys } from '../../../web/core/stream-drafts.js';
 import { findFocusIndex, loadUntilSeq } from '../../../web/core/search.js';
@@ -81,6 +82,13 @@ export function ChatScreen({ route }) {
   const [mode, setMode] = useState(() => getSessionMode(sessionId));
   const [activeRunId, setActiveRunId] = useState(null);
   const activeRunIdRef = useRef(null);
+  const [permissionState, setPermissionState] = useState(emptyPermissionState);
+  const permissionStateRef = useRef(permissionState);
+  const updatePermissionState = useCallback((event) => {
+    const next = reducePermissionState(permissionStateRef.current, event);
+    permissionStateRef.current = next;
+    setPermissionState(next);
+  }, []);
   const [showJump, setShowJump] = useState(false);
   const [readingHistory, setReadingHistory] = useState(false);
   const listRef = useRef(null);
@@ -103,11 +111,12 @@ export function ChatScreen({ route }) {
   const liveKeys = useRef(new Set());
   const applyRunState = useCallback((nextStatus, runId = null) => {
     if (nextStatus !== 'daemon-driving' || runId) stateRevision.current += 1;
+    updatePermissionState({ type: 'identity', runId });
     activeRunIdRef.current = runId;
     setActiveRunId(runId);
     setRunActive(!!runId || nextStatus === 'daemon-driving');
     setStatus(nextStatus);
-  }, []);
+  }, [updatePermissionState]);
   const updateDrafts = useCallback((update) => {
     const next = typeof update === 'function' ? update(draftsRef.current) : update;
     if (next === draftsRef.current) return;
@@ -142,6 +151,9 @@ export function ChatScreen({ route }) {
     clearTimeout(clearTimer.current);
     pendingBatch.current = null;
     runFloorSeq.current = 0;
+    permissionStateRef.current = emptyPermissionState();
+    setPermissionState(permissionStateRef.current);
+    setMode(getSessionMode(sessionId));
     completedRuns.current.clear();
     applyRunState(sessionCache.get(sessionId)?.status || null);
     liveKeys.current.clear();
@@ -223,14 +235,25 @@ export function ChatScreen({ route }) {
   useEffect(() => () => clearTimeout(clearTimer.current), []);
   useBus('ws:session-state', (e) => {
     if (e.sessionId !== sessionId) return;
+    if (e.activeRunId && permissionStateRef.current.endedRuns.includes(e.activeRunId)) return;
     const previousRunId = activeRunIdRef.current;
     applyRunState(e.status, e.activeRunId || null);
+    updatePermissionState({ ...e, type: 'session-state' });
     if (!e.activeRunId || (previousRunId && previousRunId !== e.activeRunId)) {
       clearTimeout(clearTimer.current);
       updateDrafts([]);
       runFloorSeq.current = 0;
     }
   }, [sessionId, updateDrafts, applyRunState]);
+  useBus('ws:permission-mode', (e) => {
+    if (e.sessionId === sessionId) updatePermissionState({ ...e, type: 'permission-mode' });
+  }, [sessionId, updatePermissionState]);
+  useBus('ws:permission-denied', (e) => {
+    if (e.sessionId === sessionId) updatePermissionState({ ...e, type: 'permission-denied' });
+  }, [sessionId, updatePermissionState]);
+  useBus('ws:agent-notice', (e) => {
+    if (e.sessionId === sessionId) updatePermissionState({ ...e, type: 'agent-notice' });
+  }, [sessionId, updatePermissionState]);
   useBus('ws:status', (e) => {
     if (e.sessionId !== sessionId) return;
     applyRunState(e.status, e.status === 'daemon-driving' ? activeRunIdRef.current : null);
@@ -238,16 +261,13 @@ export function ChatScreen({ route }) {
   useBus('ws:run', (e) => {
     if (e.sessionId !== sessionId) return;
     if (e.state === 'started') {
+      if (permissionStateRef.current.endedRuns.includes(e.runId)) return;
       applyRunState('daemon-driving', e.runId || null);
       clearTimeout(clearTimer.current);
       updateDrafts([]);
       const sorted = store.current.sorted;
       runFloorSeq.current = (sorted.length ? (sorted[sorted.length - 1].seq || 0) : 0) + 1;
-      // 本轮显式指定过模式才随帧带 permissionMode；缺席≠default，不据此降级本地记忆
-      if (e.permissionMode && PERMISSION_MODES.includes(e.permissionMode)) {
-        setMode(e.permissionMode);
-        setSessionMode(sessionId, e.permissionMode);
-      }
+      updatePermissionState({ ...e, type: 'run' });
     } else {
       // 上一轮终态可能迟到：只能结束它自己，不能清掉已开始的新一轮
       if (e.runId && activeRunIdRef.current && e.runId !== activeRunIdRef.current) return;
@@ -418,7 +438,8 @@ export function ChatScreen({ route }) {
   }, []);
 
   // inverted 数据：最新在前
-  const msgsDesc = useMemo(() => [...store.current.sorted].reverse(), [version]);
+  const permissionMessages = useMemo(() => mergePermissionDenials(store.current.sorted, permissionState.denials), [version, permissionState.denials]);
+  const msgsDesc = useMemo(() => [...permissionMessages.messages].reverse(), [permissionMessages]);
 
   // msgsDesc 更新后再滚动（inverted：index 0 = 最新）
   useEffect(() => {
@@ -451,6 +472,12 @@ export function ChatScreen({ route }) {
   // 转圈只表示 POST 未返回；发出前不出打字点，保证「转圈 → 发出 → Claude 开始回复」的顺序
   const listHeader = (
     <View>
+      {permissionMessages.unmatched.map((denial) => (
+        <MessageRow key={denial.eventId} m={{ kind: 'permission_denied', permissionDenial: denial }} sessionId={sessionId} />
+      ))}
+      {permissionState.notices.map((notice) => (
+        <MessageRow key={notice.eventId} m={{ kind: 'notice', text: notice.message, level: notice.level }} sessionId={sessionId} />
+      ))}
       {visiblePending.map((item) => <PendingBubble key={item.id} item={item} sessionId={sessionId} canRetry={status === 'idle' && !isRunning && !pending.some((p) => p.state === 'sending')} />)}
       {drafts.map((d) => (
         <View key={d.key} style={{ marginTop: 8, marginBottom: 20 }}>
@@ -489,7 +516,9 @@ export function ChatScreen({ route }) {
         mode={mode}
         onModeChange={(m) => { setMode(m); setSessionMode(sessionId, m); }}
         showModeSelector
-        subtitle={mode === 'bypassPermissions' ? <Text style={{ color: colors.danger, fontSize: 11, marginTop: 4 }}>Bypass</Text> : null}
+        subtitle={permissionStatusText(permissionState)
+          ? <Text accessibilityLiveRegion="polite" style={{ color: permissionState.requestedMode === 'auto' && permissionState.effectiveMode === 'default' ? colors.danger : colors.ink2, fontSize: 12, marginTop: 4 }}>{permissionStatusText(permissionState)}</Text>
+          : mode === 'bypassPermissions' ? <Text style={{ color: colors.danger, fontSize: 11, marginTop: 4 }}>Bypass</Text> : null}
       />
 
       <View style={{ flex: 1 }}>

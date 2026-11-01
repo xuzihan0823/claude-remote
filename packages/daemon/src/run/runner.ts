@@ -165,7 +165,7 @@ export class TurnRunner {
       const canUseTool = createPermissionAdapter(
         this.#permissions,
         { sessionKey: sessionId, userId: this.#userId },
-        this.#permissionTimeoutMs === undefined ? {} : { timeoutMs: this.#permissionTimeoutMs },
+        { signal: controller.signal, ...(this.#permissionTimeoutMs === undefined ? {} : { timeoutMs: this.#permissionTimeoutMs }) },
       );
       sdk = startSdkQuery(
         {
@@ -292,6 +292,7 @@ export class TurnRunner {
         // 清理失败不得影响 settle
       }
       this.#runs.delete(runId);
+      run.controller.abort(new Error("run ended"));
       if (this.#sessionRuns.get(sessionId) === runId) this.#sessionRuns.delete(sessionId);
       this.#safeEndRun(sessionId);
     }

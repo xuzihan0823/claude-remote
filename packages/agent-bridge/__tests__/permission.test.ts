@@ -24,3 +24,12 @@ test("timeout and abort fail closed", async () => {
   const controller = new AbortController(); controller.abort();
   assert.equal((await callback("Bash", {}, options(controller.signal)))?.behavior, "deny");
 });
+
+test("run cancellation wins over a broker allow returned after cancellation", async () => {
+  const controller = new AbortController();
+  const callback = createPermissionAdapter({ request: async () => {
+    controller.abort();
+    return { type: "allow_once" };
+  } }, { sessionKey: "s", userId: "u" }, { signal: controller.signal });
+  assert.equal((await callback("Bash", {}, options()))?.behavior, "deny");
+});
