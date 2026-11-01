@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 
 import { fileTypeOf, parseRange, resolveWorkspaceFile } from "../src/session-file-access.js";
+import { sessionWroteFile } from "../src/session-files.js";
 
 let root: string;
 let workspace: string;
@@ -104,6 +105,127 @@ test("文件名只是包含敏感词时不误伤", async () => {
   await resolveWorkspaceFile(workspace, "env.txt");
   await resolveWorkspaceFile(workspace, "monkey.ts");
   await resolveWorkspaceFile(workspace, ".gitignore");
+});
+
+function toolUse(id: string, path: string, name = "Write", key = "file_path"): string {
+  return JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id, name, input: { [key]: path } }] },
+  });
+}
+
+function toolResult(id: string, isError = false): string {
+  return JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: id, is_error: isError, content: "x" }] },
+  });
+}
+
+/** 建一个工作目录外的目录和会话记录，返回校验函数。 */
+async function writtenFixture(name: string, ...lines: string[]) {
+  const dir = join(root, name);
+  await mkdir(dir);
+  const transcript = join(dir, "session.jsonl");
+  await writeFile(transcript, `${lines.join("\n")}\n`);
+  return { dir, transcript, wrote: (path: string) => sessionWroteFile(transcript, path) };
+}
+
+test("会话成功写过的目录外文件可读，同目录没写过的仍拒绝", async () => {
+  const desktop = join(root, "desktop");
+  await mkdir(desktop);
+  await writeFile(join(desktop, "written.html"), "x");
+  await writeFile(join(desktop, "edited.md"), "x");
+  await writeFile(join(desktop, "note.ipynb"), "x");
+  await writeFile(join(desktop, "other.html"), "x");
+  const { wrote } = await writtenFixture("plain",
+    toolUse("a", join(desktop, "written.html")), toolResult("a"),
+    toolUse("b", join(desktop, "edited.md"), "Edit"), toolResult("b"),
+    toolUse("c", join(desktop, "note.ipynb"), "NotebookEdit", "notebook_path"), toolResult("c"),
+  );
+  for (const file of ["written.html", "edited.md", "note.ipynb"]) {
+    assert.equal((await resolveWorkspaceFile(workspace, join(desktop, file), wrote)).path, join(desktop, file));
+  }
+  await assert.rejects(resolveWorkspaceFile(workspace, join(desktop, "other.html"), wrote), { code: "outside_workspace" });
+});
+
+test("写入失败、只读取、只提到路径、没有结果的调用都不算写过", async () => {
+  const secret = join(root, "secret.txt");
+  await writeFile(secret, "x");
+  const fixtures = [
+    [toolUse("a", secret), toolResult("a", true)],
+    [toolUse("a", secret, "Read"), toolResult("a")],
+    [toolUse("a", secret)],
+    [JSON.stringify({ type: "user", message: { content: [{ type: "text", text: toolUse("a", secret) }] } }), toolResult("a")],
+    [JSON.stringify({ type: "user", message: { content: JSON.parse(toolUse("a", secret)).message.content } }), toolResult("a")],
+  ];
+  for (const [index, lines] of fixtures.entries()) {
+    const { wrote } = await writtenFixture(`not-written-${index}`, ...lines);
+    await assert.rejects(resolveWorkspaceFile(workspace, secret, wrote), { code: "outside_workspace" }, `第 ${index} 组`);
+  }
+});
+
+test("写入失败后重试成功算写过，子 Agent 的写入也算", async () => {
+  const retried = join(root, "retried.txt");
+  await writeFile(retried, "x");
+  const retry = await writtenFixture("retry", toolUse("a", retried), toolResult("a", true), toolUse("b", retried), toolResult("b"));
+  assert.equal((await resolveWorkspaceFile(workspace, retried, retry.wrote)).path, retried);
+
+  const byAgent = join(root, "by-agent.txt");
+  await writeFile(byAgent, "x");
+  const parent = await writtenFixture("parent", toolUse("x", join(root, "unrelated.txt")));
+  await mkdir(join(parent.dir, "session", "subagents"), { recursive: true });
+  await writeFile(join(parent.dir, "session", "subagents", "agent-1.jsonl"), `${toolUse("a", byAgent)}\n${toolResult("a")}\n`);
+  assert.equal((await resolveWorkspaceFile(workspace, byAgent, parent.wrote)).path, byAgent);
+});
+
+test("记录路径经过符号链接目录时，用记录路径和真实路径都能读", async () => {
+  const realDir = join(root, "real-dir");
+  await mkdir(realDir);
+  await symlink(realDir, join(root, "link-dir"));
+  await writeFile(join(realDir, "via-link.html"), "x");
+  const { wrote } = await writtenFixture("linked", toolUse("a", join(root, "link-dir", "via-link.html")), toolResult("a"));
+  const meta = await resolveWorkspaceFile(workspace, join(root, "link-dir", "via-link.html"), wrote);
+  assert.equal(meta.path, join(realDir, "via-link.html"));
+  assert.equal((await resolveWorkspaceFile(workspace, meta.path, wrote)).path, meta.path);
+});
+
+test("写过的路径被换成指向其他文件的符号链接时拒绝", async () => {
+  const secret = join(root, "swap-secret.txt");
+  await writeFile(secret, "x");
+  const swapped = join(root, "swapped.txt");
+  await symlink(secret, swapped);
+  const { wrote } = await writtenFixture("swap", toolUse("a", swapped), toolResult("a"));
+  await assert.rejects(resolveWorkspaceFile(workspace, swapped, wrote), { code: "outside_workspace" });
+  await assert.rejects(resolveWorkspaceFile(workspace, secret, wrote), { code: "outside_workspace" });
+});
+
+test("会话写过敏感文件也不开放", async () => {
+  const dir = join(root, "sensitive");
+  await mkdir(join(dir, ".ssh"), { recursive: true });
+  await writeFile(join(dir, ".env"), "x");
+  await writeFile(join(dir, ".ssh", "config"), "x");
+  const { wrote } = await writtenFixture("sensitive-log",
+    toolUse("a", join(dir, ".env")), toolResult("a"),
+    toolUse("b", join(dir, ".ssh", "config")), toolResult("b"),
+  );
+  await assert.rejects(resolveWorkspaceFile(workspace, join(dir, ".env"), wrote), { code: "sensitive_file" });
+  await assert.rejects(resolveWorkspaceFile(workspace, join(dir, ".ssh", "config"), wrote), { code: "sensitive_file" });
+});
+
+test("工作目录缺失时写过的文件仍可读，相对路径不解析到后台进程目录", async () => {
+  const lost = join(root, "lost.txt");
+  await writeFile(lost, "x");
+  const { wrote } = await writtenFixture("no-cwd", toolUse("a", lost), toolResult("a"));
+  assert.equal((await resolveWorkspaceFile("", lost, wrote)).path, lost);
+  assert.equal((await resolveWorkspaceFile(join(root, "gone"), lost, wrote)).path, lost);
+  await assert.rejects(resolveWorkspaceFile("", "lost.txt", async () => true), { code: "outside_workspace" });
+});
+
+test("写过后被删除是 file_not_found，没写过的不存在路径仍是 outside_workspace", async () => {
+  const removed = join(root, "removed.txt");
+  const { wrote } = await writtenFixture("removed", toolUse("a", removed), toolResult("a"));
+  await assert.rejects(resolveWorkspaceFile(workspace, removed, wrote), { code: "file_not_found" });
+  await assert.rejects(resolveWorkspaceFile(workspace, join(root, "never.txt"), wrote), { code: "outside_workspace" });
 });
 
 test("previewKind 按扩展名判断，大小写无关，未知类型为 none", () => {

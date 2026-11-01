@@ -5,8 +5,8 @@
 // 拿到即断流；整个文件没有 cwd 时返回 ""（调用方决定回退值）。
 
 import { createReadStream } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { readdir, realpath, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 
 /** 定位会话文件；不存在时抛 code=ENOENT 错误（HTTP 层转 404）。 */
@@ -56,4 +56,70 @@ export async function readSessionCwd(file: string): Promise<string> {
     stream.destroy();
   }
   return "";
+}
+
+const WRITE_TOOL_PATH_KEY: Record<string, string> = {
+  Write: "file_path",
+  Edit: "file_path",
+  MultiEdit: "file_path",
+  NotebookEdit: "notebook_path",
+};
+
+/** 只解析父目录：文件写入后被换成符号链接时，真实路径和记录对不上，不算写过。 */
+async function canonicalPath(path: string): Promise<string> {
+  try {
+    return join(await realpath(dirname(path)), basename(path));
+  } catch {
+    return path;
+  }
+}
+
+async function transcriptWroteFile(file: string, target: string): Promise<boolean> {
+  const name = basename(target);
+  const escapedName = JSON.stringify(name).slice(1, -1);
+  const pending = new Set<string>();
+  const stream = createReadStream(file, { encoding: "utf8" });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (!line.includes(escapedName) && ![...pending].some((id) => line.includes(id))) continue;
+      let record: { type?: unknown; message?: { content?: unknown } } | null;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const blocks = record?.message?.content;
+      if (!Array.isArray(blocks)) continue;
+      for (const block of blocks as Array<Record<string, unknown> | null>) {
+        if (record?.type === "assistant" && block?.type === "tool_use") {
+          const key = WRITE_TOOL_PATH_KEY[String(block.name)];
+          const path = key === undefined ? undefined : (block.input as Record<string, unknown> | null)?.[key];
+          if (typeof path !== "string" || !isAbsolute(path) || basename(path) !== name) continue;
+          if ((await canonicalPath(path)) === target) pending.add(String(block.id));
+        } else if (record?.type === "user" && block?.type === "tool_result" && pending.has(String(block.tool_use_id))) {
+          if (block.is_error !== true) return true;
+          pending.delete(String(block.tool_use_id));
+        }
+      }
+    }
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+  return false;
+}
+
+/** 按结构化的工具调用判断，且要求调用成功：对话正文提到路径、被拒绝的写入都不算。子 Agent 的记录一并查。 */
+export async function sessionWroteFile(sessionFile: string, target: string): Promise<boolean> {
+  const subagentsDir = join(dirname(sessionFile), basename(sessionFile, ".jsonl"), "subagents");
+  const subagents = await readdir(subagentsDir).catch(() => [] as string[]);
+  const transcripts = [
+    sessionFile,
+    ...subagents.filter((name) => name.endsWith(".jsonl")).map((name) => join(subagentsDir, name)),
+  ];
+  for (const transcript of transcripts) {
+    if (await transcriptWroteFile(transcript, target)) return true;
+  }
+  return false;
 }
