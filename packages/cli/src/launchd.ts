@@ -76,10 +76,14 @@ ${env}
 `;
 }
 
-/** repo 模式：以 login shell 运行 run-daemon.sh（加载 ~/.zprofile 里的 Homebrew 等 PATH，再 exec tsx）。 */
-export function repoProgram(repoDir: string): LaunchProgram {
+/**
+ * repo 模式：macOS 上以 zsh login shell 运行 run-daemon.sh（加载 ~/.zprofile 里的 Homebrew 等 PATH，再 exec tsx）。
+ * 其他平台没有 launchd，daemon 随 cr 启动并继承 cr 的 PATH；很多 Linux 发行版不带 zsh，用 /bin/sh。
+ */
+export function repoProgram(repoDir: string, platform: NodeJS.Platform = process.platform): LaunchProgram {
+  const script = join(repoDir, "scripts", "launchd", "run-daemon.sh");
   return {
-    args: ["/bin/zsh", "-l", join(repoDir, "scripts", "launchd", "run-daemon.sh")],
+    args: platform === "darwin" ? ["/bin/zsh", "-l", script] : ["/bin/sh", script],
     workingDir: repoDir,
     env: { CLAUDE_REMOTE_REPO: repoDir },
   };
