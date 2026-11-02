@@ -25,8 +25,8 @@ import { readEffortOptions, type EffortOptions } from "./effort-levels.js";
 import type { DaemonConfig } from "./config.js";
 import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
-import { FileAccessError, fileMeta, fileTypeOf, parseRange, resolveWorkspaceFile, type SessionFile } from "./session-file-access.js";
-import { readSessionCwd, resolveSessionFile, sessionWroteFile } from "./session-files.js";
+import { FileAccessError, fileMeta, fileTypeOf, parseRange, resolveRequestedFile, type SessionFile } from "./session-file-access.js";
+import { readSessionCwd, resolveSessionFile } from "./session-files.js";
 import { StreamBuffer } from "./run/stream-buffer.js";
 import { approvalLink, NotIdleError, sessionLink, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
 import { listSessions } from "./transcript/indexer.js";
@@ -817,7 +817,7 @@ export class DaemonServer {
   }
 
   async #handleSessionFile(req: IncomingMessage, res: ServerResponse, url: URL, sessionId: string, wantContent: boolean): Promise<void> {
-    // 会话 ID 会拼进 JSONL 路径，而工作目录边界来自该文件：含分隔符的 ID 能指向上传目录里伪造的会话
+    // 会话 ID 会拼进 JSONL 路径，相对路径按该文件里的工作目录解析：含分隔符的 ID 能指向上传目录里伪造的会话
     if (/[/\\]/.test(sessionId)) {
       this.#json(res, 404, { error: "session_not_found" });
       return;
@@ -832,7 +832,7 @@ export class DaemonServer {
     }
     let file: SessionFile;
     try {
-      file = await resolveWorkspaceFile(await readSessionCwd(sessionFile), url.searchParams.get("path"), (path) => sessionWroteFile(sessionFile, path));
+      file = await resolveRequestedFile(await readSessionCwd(sessionFile), url.searchParams.get("path"));
     } catch (error) {
       if (!(error instanceof FileAccessError)) throw error;
       this.#json(res, error.status, { error: error.code });

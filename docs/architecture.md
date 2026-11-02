@@ -142,19 +142,16 @@ GET /api/sessions/:id/files/content?path=<绝对或相对路径>
 
 | 状态码 | 错误 | 含义 |
 |---|---|---|
-| 400 | `invalid_path` | 路径为空或含空字符 |
-| 403 | `outside_workspace` | 不在工作目录内，也不是这个会话写过的文件 |
+| 400 | `invalid_path` | 路径为空、含空字符，或会话没有工作目录时传了相对路径 |
 | 403 | `sensitive_file` | 命中敏感文件规则 |
 | 404 | `session_not_found` / `file_not_found` | 会话或文件不存在；目录和其他非普通文件也按 `file_not_found` 返回 |
 | 416 | `range_not_satisfiable` | Range 超出文件范围，响应带 `Content-Range: bytes */<size>` |
 
-这组接口不经过模型，也不留下会话记录，所以比 Agent 的读文件能力更窄，校验集中在 `packages/daemon/src/session-file-access.ts`：
+这组接口不经过模型，也不留下会话记录。手机本来就能让 Agent 读写这台电脑上的任意文件，所以不限目录，只拦敏感文件，校验集中在 `packages/daemon/src/session-file-access.ts`：
 
-- 工作目录来自 `readSessionCwd`，取不到时不回退到 home。
-- 工作目录外只开放这个会话写过的文件：JSONL（含子 Agent 记录）里有成功的 `Write`、`Edit`、`MultiEdit` 或 `NotebookEdit` 调用才算，判断在 `session-files.ts` 的 `sessionWroteFile`。对话正文提到路径、被拒绝或失败的写入都不算；用 Bash 生成的文件没有结构化记录，也不算。文件写入后被换成符号链接时真实路径和记录对不上，同样拒绝。
-- 文件和工作目录都先 `realpath` 再比较，比较时带路径分隔符。工作目录外没写过的不存在路径同样返回 403，不能用来探测文件是否存在。
-- 敏感规则为 `.env*`、`.git`、`.ssh`、`*.pem`、`*.key`、`id_rsa*`、`.npmrc`、`.netrc`，不区分大小写，对请求路径和真实路径的每一段都检查。
-- 会话 ID 含路径分隔符时直接 404。工作目录边界来自 JSONL，而 ID 会拼进 JSONL 路径，不拦截的话可以指向上传目录里伪造的会话文件，把工作目录改成根目录。新增信任 JSONL 内容的接口时要保留这条检查。
+- 相对路径按 `readSessionCwd` 取到的工作目录解析，取不到时只接受绝对路径，不回退到 home 或后台进程目录。
+- 敏感规则为 `.env*`、`.git`、`.ssh`、`*.pem`、`*.key`、`id_rsa*`、`.npmrc`、`.netrc`，不区分大小写，对请求路径和 `realpath` 后的真实路径的每一段都检查，符号链接绕不过去。
+- 会话 ID 含路径分隔符时直接 404。ID 会拼进 JSONL 路径，不拦截的话可以指向上传目录里伪造的会话文件，篡改相对路径的解析基准。新增信任 JSONL 内容的接口时要保留这条检查。
 
 App 把 HTML 当作不可信内容：不注入令牌，不提供 `onMessage`，关闭跨文件访问，用 `incognito`。导航规则在 `app/src/lib/file-preview.js`：文件自身和页内地址留在预览里，外部链接交给系统浏览器，其他本机文件和自定义协议一律拦截。iOS 只放行真实点击，Android 拿不到导航类型。令牌只放请求头，不放 URL。
 
