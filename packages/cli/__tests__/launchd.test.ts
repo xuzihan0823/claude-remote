@@ -16,6 +16,11 @@ test("renderPlist：转义路径、KeepAlive、日志路径", () => {
   assert.equal((xml.match(/\/l\/daemon\.log/g) ?? []).length, 2);
 });
 
+test("repoProgram：macOS 用 zsh login shell，其他平台用 /bin/sh", () => {
+  assert.deepEqual(repoProgram("/r", "darwin").args, ["/bin/zsh", "-l", "/r/scripts/launchd/run-daemon.sh"]);
+  assert.deepEqual(repoProgram("/r", "linux").args, ["/bin/sh", "/r/scripts/launchd/run-daemon.sh"]);
+});
+
 test("packageProgram：node 直接跑 dist/daemon.js，PATH 带上 claude 与 node 目录", () => {
   const p = packageProgram({
     nodePath: "/Users/u/.nvm/versions/node/v22.12.0/bin/node",
