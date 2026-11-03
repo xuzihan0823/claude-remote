@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import Reanimated, { FadeIn, FadeOut } from 'react-native-reanimated';
+import { Keyboard } from 'react-native';
 import { normalizeBase } from '../../../../web/core/api.js';
 import { hostOf } from '../../../../web/core/devices.js';
 import { useConnActions } from '../../lib/conn-context.js';
@@ -7,7 +7,7 @@ import { useDevices } from '../../lib/useDevices.js';
 import { haptics } from '../../lib/haptics.js';
 import { QrScanner } from '../../components/QrScanner.js';
 import { useTheme } from '../../theme.js';
-import { Group, Row, SettingsPage } from './ui.js';
+import { Collapse, Group, Row, SettingsPage } from './ui.js';
 import { agoText } from './labels.js';
 import { DeviceFields, finishNewDevice } from './AddDeviceScreen.js';
 
@@ -25,6 +25,13 @@ export function DevicesScreen({ navigation }) {
   const [manualBusy, setManualBusy] = useState(false);
   const busy = !!switching || scanBusy || manualBusy;
 
+  const toggleManual = () => {
+    haptics.selection();
+    setManualOpen((v) => {
+      if (v) Keyboard.dismiss();
+      return !v;
+    });
+  };
   // 切换、扫码、手动添加成功后，导航都会按新连接整体重挂载回到首页，这里只需处理失败
   const doSwitch = async (id) => {
     setSwitching(id);
@@ -86,16 +93,12 @@ export function DevicesScreen({ navigation }) {
           label="手动输入地址和 Token"
           chevron={manualOpen ? 'chevronUp' : 'chevron'}
           disabled={busy}
-          onPress={() => setManualOpen((v) => !v)}
+          onPress={toggleManual}
         />
-        {manualOpen ? (
-          <Reanimated.View entering={FadeIn.duration(180)} exiting={FadeOut.duration(120)}>
-            <DeviceFields name={name} setName={setName} base={base} setBase={setBase} tok={tok} setTok={setTok} onSubmit={submitManual} autoFocus />
-          </Reanimated.View>
-        ) : null}
-        {manualOpen ? (
+        <Collapse open={manualOpen}>
+          <DeviceFields name={name} setName={setName} base={base} setBase={setBase} tok={tok} setTok={setTok} onSubmit={submitManual} autoFocus />
           <Row label={manualBusy ? '连接中…' : '连接并保存'} tone="accent" center disabled={!canSubmit} onPress={submitManual} />
-        ) : null}
+        </Collapse>
       </Group>
 
       <QrScanner visible={scanOpen} onClose={() => setScanOpen(false)} onResult={onScan} />
