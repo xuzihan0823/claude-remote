@@ -1,6 +1,17 @@
 import { Children, Fragment, isValidElement, useEffect, useRef, useState } from 'react';
 import { Animated, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
-import Reanimated, { FadeIn } from 'react-native-reanimated';
+import Reanimated, {
+  Easing,
+  Extrapolation,
+  FadeIn,
+  interpolate,
+  runOnJS,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -102,13 +113,66 @@ export function SettingsPage({ title, left = 'back', right = null, children, key
   );
 }
 
-export function Group({ title, footer, children, style }) {
+const FOLD_OPEN_SPRING = { damping: 26, stiffness: 280, mass: 0.8 };
+const FOLD_CLOSE_MS = 220;
+const FOLD_CLOSE_EASING = Easing.bezier(0.3, 0, 0.15, 1);
+const CHEVRON_SPRING = { damping: 22, stiffness: 280, mass: 0.7 };
+
+export function Collapse({ open, dividerInset = 54, children }) {
   const { colors } = useTheme();
+  const reduceMotion = useReducedMotion();
+  const [mounted, setMounted] = useState(open);
+  const progress = useSharedValue(open ? 1 : 0);
+  const bodyH = useSharedValue(196);
+
+  useEffect(() => {
+    if (open) {
+      setMounted(true);
+      progress.value = reduceMotion ? 1 : withSpring(1, FOLD_OPEN_SPRING);
+    } else if (mounted) {
+      if (reduceMotion) {
+        progress.value = 0;
+        setMounted(false);
+      } else {
+        progress.value = withTiming(
+          0,
+          { duration: FOLD_CLOSE_MS, easing: FOLD_CLOSE_EASING },
+          (done) => {
+            if (done) runOnJS(setMounted)(false);
+          },
+        );
+      }
+    }
+  }, [open, mounted, reduceMotion, progress]);
+
+  const clipStyle = useAnimatedStyle(() => {
+    const p = Math.max(0, progress.value);
+    return {
+      height: p * bodyH.value,
+      opacity: interpolate(p, [0, 0.15, 1], [0, 0.35, 1], Extrapolation.CLAMP),
+      overflow: 'hidden',
+    };
+  });
+
+  const innerStyle = useAnimatedStyle(() => {
+    const p = Math.max(0, Math.min(1, progress.value));
+    return {
+      transform: [{ translateY: (1 - p) * -10 }],
+    };
+  });
+
+  if (!open && !mounted) return null;
   const items = Children.toArray(children).filter(isValidElement);
   return (
-    <View style={[{ marginBottom: 26 }, style]}>
-      {title ? <Text style={{ color: colors.ink2, fontSize: 13.5, marginLeft: 16, marginBottom: 8 }}>{title}</Text> : null}
-      <View style={{ backgroundColor: colors.card, borderRadius: 20, borderCurve: 'continuous', overflow: 'hidden' }}>
+    <Reanimated.View pointerEvents={open ? 'auto' : 'none'} style={clipStyle}>
+      <Reanimated.View
+        onLayout={(e) => {
+          const h = e.nativeEvent.layout.height;
+          if (h > 0) bodyH.value = h;
+        }}
+        style={[{ position: 'absolute', top: 0, left: 0, right: 0 }, innerStyle]}
+      >
+        <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: colors.line, marginLeft: dividerInset, marginRight: 16 }} />
         {items.map((child, i) => (
           <Fragment key={child.key ?? i}>
             {child}
@@ -117,9 +181,82 @@ export function Group({ title, footer, children, style }) {
             ) : null}
           </Fragment>
         ))}
+      </Reanimated.View>
+    </Reanimated.View>
+  );
+}
+
+export function Group({ title, footer, children, style }) {
+  const { colors } = useTheme();
+  const reduceMotion = useReducedMotion();
+  const [shownFooter, setShownFooter] = useState(footer);
+  const footerProgress = useSharedValue(footer ? 1 : 0);
+
+  useEffect(() => {
+    if (footer) {
+      setShownFooter(footer);
+      footerProgress.value = reduceMotion ? 1 : withSpring(1, FOLD_OPEN_SPRING);
+    } else if (shownFooter) {
+      if (reduceMotion) {
+        footerProgress.value = 0;
+        setShownFooter(undefined);
+      } else {
+        footerProgress.value = withTiming(
+          0,
+          { duration: FOLD_CLOSE_MS, easing: FOLD_CLOSE_EASING },
+          (done) => {
+            if (done) runOnJS(setShownFooter)(undefined);
+          },
+        );
+      }
+    }
+  }, [footer, shownFooter, reduceMotion, footerProgress]);
+
+  const footerStyle = useAnimatedStyle(() => {
+    const p = Math.max(0, Math.min(1, footerProgress.value));
+    return {
+      opacity: p,
+      transform: [{ translateY: (1 - p) * -6 }],
+    };
+  });
+
+  const items = Children.toArray(children).filter(isValidElement);
+  const activeFooter = footer || shownFooter;
+  return (
+    <View style={[{ marginBottom: 26 }, style]}>
+      {title ? <Text style={{ color: colors.ink2, fontSize: 13.5, marginLeft: 16, marginBottom: 8 }}>{title}</Text> : null}
+      <View style={{ backgroundColor: colors.card, borderRadius: 20, borderCurve: 'continuous', overflow: 'hidden' }}>
+        {items.map((child, i) => (
+          <Fragment key={child.key ?? i}>
+            {child}
+            {i < items.length - 1 && items[i + 1]?.type !== Collapse ? (
+              <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: colors.line, marginLeft: child.props.icon ? 54 : 16, marginRight: 16 }} />
+            ) : null}
+          </Fragment>
+        ))}
       </View>
-      {footer ? <Text style={{ color: colors.ink2, fontSize: 12.5, lineHeight: 18, marginHorizontal: 16, marginTop: 8 }}>{footer}</Text> : null}
+      {activeFooter ? (
+        <Reanimated.Text style={[{ color: colors.ink2, fontSize: 12.5, lineHeight: 18, marginHorizontal: 16, marginTop: 8 }, footerStyle]}>
+          {activeFooter}
+        </Reanimated.Text>
+      ) : null}
     </View>
+  );
+}
+
+function FoldChevron({ up, color }) {
+  const reduceMotion = useReducedMotion();
+  const p = useSharedValue(up ? 1 : 0);
+  useEffect(() => {
+    p.value = reduceMotion ? (up ? 1 : 0) : withSpring(up ? 1 : 0, CHEVRON_SPRING);
+  }, [up, reduceMotion, p]);
+  const style = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${p.value * 180}deg` }],
+  }));
+  return (
+    <Reanimated.View style={[{ marginLeft: 4, marginRight: -4 }, style]}>
+      <Icon name="chevron" size={20} color={color} />
+    </Reanimated.View>
   );
 }
 
@@ -134,6 +271,7 @@ export function Row({
 }) {
   const { colors } = useTheme();
   const isToggle = typeof toggle === 'boolean';
+  const isFold = chevron === 'chevron' || chevron === 'chevronUp';
   const showChevron = chevron ?? (!!onPress && !onDetail && !isToggle && checked === undefined && !center);
   const color = tone === 'danger' ? colors.danger : tone === 'accent' ? colors.accent : colors.inkStrong;
   const content = (
@@ -168,7 +306,15 @@ export function Row({
           <Icon name="info" size={22} color={colors.ink2} strokeWidth={1.6} />
         </Pressable>
       ) : null}
-      {showChevron ? <View style={{ marginLeft: 4, marginRight: -4 }}><Icon name={typeof chevron === 'string' ? chevron : 'chevronRight'} size={20} color={colors.ink3} /></View> : null}
+      {showChevron ? (
+        isFold ? (
+          <FoldChevron up={chevron === 'chevronUp'} color={colors.ink3} />
+        ) : (
+          <View style={{ marginLeft: 4, marginRight: -4 }}>
+            <Icon name={typeof chevron === 'string' ? chevron : 'chevronRight'} size={20} color={colors.ink3} />
+          </View>
+        )
+      ) : null}
     </>
   );
   const rowStyle = { minHeight: sub ? 62 : 52, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center' };
@@ -180,7 +326,7 @@ export function Row({
       disabled={disabled}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel || label}
-      accessibilityState={checked !== undefined ? { selected: !!checked } : undefined}
+      accessibilityState={checked !== undefined ? { selected: !!checked } : isFold ? { expanded: chevron === 'chevronUp' } : undefined}
       style={({ pressed }) => [rowStyle, { backgroundColor: pressed ? colors.glassPressed : 'transparent', opacity: disabled ? 0.5 : 1 }]}
     >
       {content}
