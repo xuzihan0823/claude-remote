@@ -125,15 +125,16 @@ export function Group({ title, footer, children, style }) {
 
 /**
  * 一行设置。右侧四选一：toggle（Switch）、checked（✓）、chevron（默认，有 onPress 时）、无。
+ * onDetail：在最右侧放一个独立的 ⓘ 按钮（不显示 chevron），点行本身和点 ⓘ 是两个动作。
  * dot：值前面的状态点颜色；tone：'danger' | 'accent' 改文字颜色；center：居中按钮样式（如「移除此设备」）。
  */
 export function Row({
   icon, iconColor, label, sub, value, dot, onPress, onLongPress, toggle, onToggle, checked,
-  chevron, tone, center, disabled, accessibilityLabel,
+  chevron, onDetail, tone, center, disabled, accessibilityLabel,
 }) {
   const { colors } = useTheme();
   const isToggle = typeof toggle === 'boolean';
-  const showChevron = chevron ?? (!!onPress && !isToggle && checked === undefined && !center);
+  const showChevron = chevron ?? (!!onPress && !onDetail && !isToggle && checked === undefined && !center);
   const color = tone === 'danger' ? colors.danger : tone === 'accent' ? colors.accent : colors.inkStrong;
   const content = (
     <>
@@ -156,6 +157,17 @@ export function Row({
       ) : null}
       {checked ? <Reanimated.View entering={FadeIn.duration(150)} style={{ marginLeft: 8 }}><Icon name="check" size={20} color={colors.accent} strokeWidth={2.2} /></Reanimated.View> : null}
       {checked === false ? <View style={{ width: 28 }} /> : null}
+      {onDetail ? (
+        <Pressable
+          onPress={onDetail}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel={`${label} 详情`}
+          style={({ pressed }) => ({ marginLeft: 6, marginRight: -8, padding: 8, borderRadius: 19, backgroundColor: pressed ? colors.glassPressed : 'transparent' })}
+        >
+          <Icon name="info" size={22} color={colors.ink2} strokeWidth={1.6} />
+        </Pressable>
+      ) : null}
       {showChevron ? <View style={{ marginLeft: 4, marginRight: -4 }}><Icon name="chevronRight" size={20} color={colors.ink3} /></View> : null}
     </>
   );
