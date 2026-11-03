@@ -21,6 +21,7 @@ import { useTheme } from '../theme.js';
 import { LinkText } from './LinkText.js';
 import { usePref } from '../lib/prefs.js';
 import { haptics } from '../lib/haptics.js';
+import { copyText } from '../lib/clipboard.js';
 import { isImagePath, parseAttachmentNote, uploadImageSource } from '../lib/attachments.js';
 import { ImageViewer } from './ImageViewer.js';
 
@@ -184,6 +185,27 @@ function UserAttachments({ paths }) {
 
 const VISIBLE_FILE_CARDS = 5;
 
+function CopyButton({ text }) {
+  const { colors } = useTheme();
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return undefined;
+    const id = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(id);
+  }, [copied]);
+  return (
+    <TouchableOpacity accessibilityRole="button" accessibilityLabel={copied ? '已复制' : '复制回复'}
+      onPress={async () => {
+        if (!(await copyText(text))) return;
+        haptics.success();
+        setCopied(true);
+      }}
+      style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center', marginLeft: -10 }}>
+      <Icon name={copied ? 'check' : 'copy'} size={20} color={colors.ink2} />
+    </TouchableOpacity>
+  );
+}
+
 function AssistantMessage({ m, sessionId, live = false }) {
   const { colors } = useTheme();
   const [previewPath, setPreviewPath] = useState(null);
@@ -205,9 +227,10 @@ function AssistantMessage({ m, sessionId, live = false }) {
         </View>
       ) : null}
       <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+        <CopyButton text={m.text || ''} />
         <TouchableOpacity accessibilityRole="button" accessibilityLabel="分享回复"
           onPress={() => Share.share({ message: m.text || '' }).catch(() => {})}
-          style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center', marginLeft: -10 }}>
+          style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
           <Icon name="share" size={20} color={colors.ink2} />
         </TouchableOpacity>
         {m.timestamp ? <Text style={{ color: colors.ink3, fontSize: 12 }}>{fmtClock(m.timestamp)}</Text> : null}
