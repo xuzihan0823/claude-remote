@@ -35,7 +35,6 @@ export function SettingsHome({ navigation }) {
           dot={cur ? colors.ok : colors.ink3}
           onPress={() => navigation.navigate('Devices')}
         />
-        <Row icon="qr" label="添加设备" onPress={() => navigation.navigate('AddDevice')} />
       </Group>
 
       <Group title="应用">

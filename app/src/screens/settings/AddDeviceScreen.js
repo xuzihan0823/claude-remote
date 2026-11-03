@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { connErrMsg, normalizeBase, probeBases } from '../../../../web/core/api.js';
 import { bus, toast } from '../../../../web/core/bus.js';
@@ -10,9 +10,45 @@ import { Icon } from '../../components/Icon.js';
 import { useTheme } from '../../theme.js';
 import { Group, SettingsPage } from './ui.js';
 
+// 新设备连上后 tryConnectBases 已把它记为当前设备，这里只补上用户填的名称
+export function finishNewDevice(name) {
+  if (name) { const id = currentDeviceId(); if (id) updateDevice(id, { name }); }
+  bus.emit('devices');
+}
+
+export function DeviceFields({ name, setName, base, setBase, tok, setTok, onSubmit, autoFocus }) {
+  const { colors, fonts, dark } = useTheme();
+  const input = { flex: 1, color: colors.inkStrong, fontSize: 16, paddingVertical: 14 };
+  const label = { width: 64, color: colors.inkStrong, fontSize: 16.5 };
+  const sep = <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: colors.line, marginLeft: 16 }} />;
+  return (
+    <View>
+      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16 }}>
+        <Text style={label}>名称</Text>
+        <TextInput value={name} onChangeText={setName} placeholder="例如：家里的 Mac（可不填）" placeholderTextColor={colors.ink3}
+          keyboardAppearance={dark ? 'dark' : 'light'} style={input} returnKeyType="next" autoFocus={autoFocus} />
+      </View>
+      {sep}
+      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16 }}>
+        <Text style={label}>地址</Text>
+        <TextInput value={base} onChangeText={setBase} placeholder="http://100.x.x.x:8787" placeholderTextColor={colors.ink3}
+          autoCapitalize="none" autoCorrect={false} keyboardType="url" keyboardAppearance={dark ? 'dark' : 'light'}
+          style={[input, { fontFamily: fonts.mono, fontSize: 15 }]} />
+      </View>
+      {sep}
+      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16 }}>
+        <Text style={label}>Token</Text>
+        <TextInput value={tok} onChangeText={setTok} placeholder="BRIDGE_TOKEN" placeholderTextColor={colors.ink3}
+          autoCapitalize="none" autoCorrect={false} secureTextEntry keyboardAppearance={dark ? 'dark' : 'light'}
+          style={[input, { fontFamily: fonts.mono, fontSize: 15 }]} onSubmitEditing={onSubmit} returnKeyType="go" />
+      </View>
+    </View>
+  );
+}
+
 // 添加设备（扫码 / 手动）；带 params.deviceId 时是「修改这台设备的地址和 Token」。
 export function AddDeviceScreen({ navigation, route }) {
-  const { colors, fonts, dark } = useTheme();
+  const { colors, fonts } = useTheme();
   const { tryConnectBases } = useConnActions();
   const editing = route.params?.deviceId ? getDevice(route.params.deviceId) : null;
   const [name, setName] = useState(editing?.name || '');
@@ -20,13 +56,6 @@ export function AddDeviceScreen({ navigation, route }) {
   const [tok, setTok] = useState(editing?.token || '');
   const [busy, setBusy] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
-
-  useEffect(() => { if (route.params?.scan) setScanOpen(true); }, [route.params?.scan]);
-
-  const finishNew = (nm) => {
-    if (nm) { const id = currentDeviceId(); if (id) updateDevice(id, { name: nm }); }
-    bus.emit('devices');
-  };
 
   const submit = async () => {
     const b = normalizeBase(base);
@@ -50,7 +79,7 @@ export function AddDeviceScreen({ navigation, route }) {
       return;
     }
     const ok = await tryConnectBases([b], t, { manual: true, beforeCommit: () => haptics.success() });
-    if (ok) finishNew(name.trim());
+    if (ok) finishNewDevice(name.trim());
     else { setBusy(false); haptics.error(); }
   };
 
@@ -58,13 +87,10 @@ export function AddDeviceScreen({ navigation, route }) {
     setScanOpen(false);
     setBusy(true);
     const ok = await tryConnectBases(bases, t, { beforeCommit: () => haptics.success() });
-    if (ok) finishNew(name.trim());
+    if (ok) finishNewDevice(name.trim());
     else { setBusy(false); haptics.error(); }
   };
 
-  const input = { flex: 1, color: colors.inkStrong, fontSize: 16, paddingVertical: 14 };
-  const label = { width: 64, color: colors.inkStrong, fontSize: 16.5 };
-  const sep = <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: colors.line, marginLeft: 16 }} />;
   const canSubmit = !!base.trim() && !!tok.trim() && !busy;
 
   return (
@@ -90,27 +116,7 @@ export function AddDeviceScreen({ navigation, route }) {
       ) : null}
 
       <Group title={editing ? '地址和 Token' : '或手动输入'} footer={editing ? '保存前会先试连一次' : '连接成功后会自动切到这台设备'}>
-        <View>
-          <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16 }}>
-            <Text style={label}>名称</Text>
-            <TextInput value={name} onChangeText={setName} placeholder="例如：家里的 Mac（可不填）" placeholderTextColor={colors.ink3}
-              keyboardAppearance={dark ? 'dark' : 'light'} style={input} returnKeyType="next" />
-          </View>
-          {sep}
-          <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16 }}>
-            <Text style={label}>地址</Text>
-            <TextInput value={base} onChangeText={setBase} placeholder="http://100.x.x.x:8787" placeholderTextColor={colors.ink3}
-              autoCapitalize="none" autoCorrect={false} keyboardType="url" keyboardAppearance={dark ? 'dark' : 'light'}
-              style={[input, { fontFamily: fonts.mono, fontSize: 15 }]} />
-          </View>
-          {sep}
-          <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16 }}>
-            <Text style={label}>Token</Text>
-            <TextInput value={tok} onChangeText={setTok} placeholder="BRIDGE_TOKEN" placeholderTextColor={colors.ink3}
-              autoCapitalize="none" autoCorrect={false} secureTextEntry keyboardAppearance={dark ? 'dark' : 'light'}
-              style={[input, { fontFamily: fonts.mono, fontSize: 15 }]} onSubmitEditing={submit} returnKeyType="go" />
-          </View>
-        </View>
+        <DeviceFields name={name} setName={setName} base={base} setBase={setBase} tok={tok} setTok={setTok} onSubmit={submit} />
       </Group>
 
       <Pressable
