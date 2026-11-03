@@ -184,7 +184,7 @@ function UserAttachments({ paths }) {
 
 const VISIBLE_FILE_CARDS = 5;
 
-function AssistantMessage({ m, sessionId }) {
+function AssistantMessage({ m, sessionId, live = false }) {
   const { colors } = useTheme();
   const [previewPath, setPreviewPath] = useState(null);
   const [showAllFiles, setShowAllFiles] = useState(false);
@@ -192,7 +192,7 @@ function AssistantMessage({ m, sessionId }) {
   const visible = showAllFiles ? paths : paths.slice(0, VISIBLE_FILE_CARDS);
   return (
     <View style={{ marginTop: 8, marginBottom: 20 }}>
-      <MarkdownView text={m.text} sessionId={sessionId} onOpenFile={sessionId ? setPreviewPath : undefined} />
+      <MarkdownView text={m.text} sessionId={sessionId} live={live} onOpenFile={sessionId ? setPreviewPath : undefined} />
       {visible.length ? (
         <View style={{ gap: 8, marginTop: 10 }}>
           {visible.map((p) => <FileCard key={p} sessionId={sessionId} path={p} onOpen={setPreviewPath} />)}
@@ -298,5 +298,5 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
       </View>
     );
   }
-  return <AssistantMessage m={m} sessionId={sessionId} />;
+  return <AssistantMessage m={m} sessionId={sessionId} live={live} />;
 }

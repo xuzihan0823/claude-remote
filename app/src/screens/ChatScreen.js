@@ -481,7 +481,7 @@ export function ChatScreen({ route }) {
       {visiblePending.map((item) => <PendingBubble key={item.id} item={item} sessionId={sessionId} canRetry={status === 'idle' && !isRunning && !pending.some((p) => p.state === 'sending')} />)}
       {drafts.map((d) => (
         <View key={d.key} style={{ marginTop: 8, marginBottom: 20 }}>
-          <MarkdownView text={d.text} sessionId={sessionId} />
+          <MarkdownView text={d.text} sessionId={sessionId} streaming />
         </View>
       ))}
       {isRunning && !pending.some((p) => p.state === 'sending') && !drafts.some((d) => !d.done) ? (
