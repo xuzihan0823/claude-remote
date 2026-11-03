@@ -52,7 +52,7 @@ export function DevicesScreen({ navigation }) {
   };
 
   return (
-    <SettingsPage title="设备" keyboard right={{ icon: 'plus', label: '添加设备', onPress: () => navigation.navigate('AddDevice') }}>
+    <SettingsPage title="设备" keyboard>
       {list.length ? (
         <Group title="已配对" footer="点设备直接切换，点右侧 ⓘ 查看详情、改名或移除">
           {list.map((d) => {
