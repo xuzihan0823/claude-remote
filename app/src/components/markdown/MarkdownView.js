@@ -258,7 +258,6 @@ function renderHeading(tok, ctx, key) {
   return (
     <Text
       key={key}
-      selectable
       style={{
         color: ctx.colors.inkStrong,
         fontSize: fs,
@@ -376,7 +375,6 @@ function renderTableRow(cells, tok, widths, ctx, key, isHeader) {
           }}
         >
           <Text
-            selectable
             style={{
               color: isHeader ? ctx.colors.inkStrong : ctx.colors.ink,
               fontSize: ctx.fs * 0.88,
@@ -463,7 +461,6 @@ function renderListItem(item, ctx, key, index, ordered, start) {
         parts.push(
           <Text
             key={`t${i}`}
-            selectable
             style={{ color: ctx.colors.ink, fontSize: ctx.fs, lineHeight: ctx.lh }}
           >
             {kids}
@@ -524,7 +521,6 @@ function renderBlock(tok, ctx, key) {
       return (
         <Text
           key={key}
-          selectable
           style={{ color: ctx.colors.ink, fontSize: ctx.fs, lineHeight: ctx.lh, marginVertical: 4 }}
         >
           {renderInline(tok.tokens, ctx, `${key}-`)}
@@ -544,7 +540,6 @@ function renderBlock(tok, ctx, key) {
       return (
         <Text
           key={key}
-          selectable
           style={{
             color: ctx.colors.ink2,
             fontFamily: ctx.fonts.mono,
@@ -558,7 +553,7 @@ function renderBlock(tok, ctx, key) {
     case 'text':
       // 列表项里的 text token 兜底（正常路径在 renderListItem 内已处理）
       return (
-        <Text key={key} selectable style={{ color: ctx.colors.ink, fontSize: ctx.fs, lineHeight: ctx.lh }}>
+        <Text key={key} style={{ color: ctx.colors.ink, fontSize: ctx.fs, lineHeight: ctx.lh }}>
           {tok.tokens ? renderInline(tok.tokens, ctx, `${key}-`) : renderLeafText(decodeEntities(tok.text || ''), ctx, key)}
         </Text>
       );
@@ -567,7 +562,7 @@ function renderBlock(tok, ctx, key) {
       return null;
     default:
       return tok.raw ? (
-        <Text key={key} selectable style={{ color: ctx.colors.ink2, fontSize: ctx.fs, lineHeight: ctx.lh }}>
+        <Text key={key} style={{ color: ctx.colors.ink2, fontSize: ctx.fs, lineHeight: ctx.lh }}>
           {renderLeafText(tok.raw, ctx, key)}
         </Text>
       ) : null;
@@ -668,7 +663,7 @@ export function MarkdownView({ text, sessionId, onOpenFile, streaming = false, l
   };
 
   const fallback = (
-    <Text selectable style={{ color: colors.ink, fontSize: ctx.fs, lineHeight: ctx.lh }}>
+    <Text style={{ color: colors.ink, fontSize: ctx.fs, lineHeight: ctx.lh }}>
       {visibleText}
     </Text>
   );

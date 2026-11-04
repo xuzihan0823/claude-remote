@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Image, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Image, Pressable, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
 import Animated, {
   FadeIn,
   LinearTransition,
@@ -24,6 +24,7 @@ import { haptics } from '../lib/haptics.js';
 import { copyText } from '../lib/clipboard.js';
 import { isImagePath, parseAttachmentNote, uploadImageSource } from '../lib/attachments.js';
 import { ImageViewer } from './ImageViewer.js';
+import { SelectTextSheet } from './SelectTextSheet.js';
 
 // 折叠块：thinking / tool_use / tool_result 共用（web 的 <details> 对应物）
 const BLOCK_SPRING = { damping: 18, stiffness: 210, mass: 0.75 };
@@ -210,11 +211,17 @@ function AssistantMessage({ m, sessionId, live = false }) {
   const { colors } = useTheme();
   const [previewPath, setPreviewPath] = useState(null);
   const [showAllFiles, setShowAllFiles] = useState(false);
+  const [selectingText, setSelectingText] = useState(null);
   const paths = useMemo(() => (sessionId ? filePathsIn(m.text) : []), [m.text, sessionId]);
   const visible = showAllFiles ? paths : paths.slice(0, VISIBLE_FILE_CARDS);
   return (
     <View style={{ marginTop: 8, marginBottom: 20 }}>
-      <MarkdownView text={m.text} sessionId={sessionId} live={live} onOpenFile={sessionId ? setPreviewPath : undefined} />
+      <Pressable accessibilityHint="长按选择文本" onLongPress={() => {
+        haptics.confirm();
+        setSelectingText(m.text || '');
+      }}>
+        <MarkdownView text={m.text} sessionId={sessionId} live={live} onOpenFile={sessionId ? setPreviewPath : undefined} />
+      </Pressable>
       {visible.length ? (
         <View style={{ gap: 8, marginTop: 10 }}>
           {visible.map((p) => <FileCard key={p} sessionId={sessionId} path={p} onOpen={setPreviewPath} />)}
@@ -235,6 +242,7 @@ function AssistantMessage({ m, sessionId, live = false }) {
         </TouchableOpacity>
         {m.timestamp ? <Text style={{ color: colors.ink3, fontSize: 12 }}>{fmtClock(m.timestamp)}</Text> : null}
       </View>
+      {selectingText !== null ? <SelectTextSheet text={selectingText} onClose={() => setSelectingText(null)} /> : null}
       {previewPath ? <FilePreview sessionId={sessionId} path={previewPath} onClose={() => setPreviewPath(null)} /> : null}
     </View>
   );
