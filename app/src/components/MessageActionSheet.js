@@ -61,16 +61,14 @@ export function MessageActionSheet({ text, onClose }) {
         style={{ flex: 1, justifyContent: 'center', gap: 10, paddingHorizontal: 16, paddingTop: insets.top + 12, paddingBottom: insets.bottom + 12 }}>
         <Animated.View entering={ZoomIn.springify().damping(20).stiffness(260)}
           style={{ maxHeight: cardMaxH, backgroundColor: colors.bubble, borderRadius: 26, borderCurve: 'continuous', overflow: 'hidden' }}>
-          <View pointerEvents={selecting ? 'auto' : 'none'}>
-            {Platform.OS === 'ios' ? (
-              <TextInput value={text} editable={false} multiline scrollEnabled
-                style={[textStyle, { maxHeight: cardMaxH, paddingHorizontal: 18, paddingTop: 14, paddingBottom: 14 }]} />
-            ) : (
-              <ScrollView style={{ maxHeight: cardMaxH }} contentContainerStyle={{ paddingHorizontal: 18, paddingVertical: 14 }}>
-                <Text selectable style={textStyle}>{text}</Text>
-              </ScrollView>
-            )}
-          </View>
+          {Platform.OS === 'ios' ? (
+            <TextInput value={text} editable={false} multiline scrollEnabled
+              style={[textStyle, { maxHeight: cardMaxH, paddingHorizontal: 18, paddingTop: 14, paddingBottom: 14 }]} />
+          ) : (
+            <ScrollView style={{ maxHeight: cardMaxH }} contentContainerStyle={{ paddingHorizontal: 18, paddingVertical: 14 }}>
+              <Text selectable style={textStyle}>{text}</Text>
+            </ScrollView>
+          )}
         </Animated.View>
         {selecting ? (
           <Animated.View key="done" entering={FadeIn.duration(160)} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>

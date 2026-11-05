@@ -253,6 +253,7 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
   const scale = usePref('fontScale');
   const showThinking = usePref('showThinking');
   const toolsExpanded = usePref('toolsExpanded');
+  const [actionText, setActionText] = useState(null);
 
   const denial = m.permissionDenial;
   if (m.kind === 'notice') {
@@ -319,13 +320,19 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
           <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' }}>
             {sending ? <ActivityIndicator size="small" color={colors.ink3} style={{ marginRight: 10 }} accessibilityLabel="发送中" /> : null}
             {text ? (
-              <View style={{ backgroundColor: colors.bubble, borderRadius: 26, borderCurve: 'continuous',
-                paddingHorizontal: 18, paddingVertical: 12, maxWidth: '88%' }}>
-                <LinkText text={text} style={{ color: colors.inkStrong, fontSize: 17 * scale, lineHeight: Math.round(26 * scale) }} selectable />
-              </View>
+              <Pressable accessibilityHint="长按显示复制、选择文本等操作"
+                onLongPress={() => {
+                  haptics.confirm();
+                  setActionText(text);
+                }}
+                style={{ backgroundColor: colors.bubble, borderRadius: 26, borderCurve: 'continuous',
+                  paddingHorizontal: 18, paddingVertical: 12, maxWidth: '88%' }}>
+                <LinkText text={text} style={{ color: colors.inkStrong, fontSize: 17 * scale, lineHeight: Math.round(26 * scale) }} />
+              </Pressable>
             ) : null}
           </View>
         ) : null}
+        {actionText !== null ? <MessageActionSheet text={actionText} onClose={() => setActionText(null)} /> : null}
       </View>
     );
   }
