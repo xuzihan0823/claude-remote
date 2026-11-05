@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Image, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Image, Pressable, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
 import Animated, {
   FadeIn,
   LinearTransition,
@@ -21,8 +21,10 @@ import { useTheme } from '../theme.js';
 import { LinkText } from './LinkText.js';
 import { usePref } from '../lib/prefs.js';
 import { haptics } from '../lib/haptics.js';
+import { copyText } from '../lib/clipboard.js';
 import { isImagePath, parseAttachmentNote, uploadImageSource } from '../lib/attachments.js';
 import { ImageViewer } from './ImageViewer.js';
+import { MessageActionSheet } from './MessageActionSheet.js';
 
 // 折叠块：thinking / tool_use / tool_result 共用（web 的 <details> 对应物）
 const BLOCK_SPRING = { damping: 18, stiffness: 210, mass: 0.75 };
@@ -184,15 +186,42 @@ function UserAttachments({ paths }) {
 
 const VISIBLE_FILE_CARDS = 5;
 
+function CopyButton({ text }) {
+  const { colors } = useTheme();
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return undefined;
+    const id = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(id);
+  }, [copied]);
+  return (
+    <TouchableOpacity accessibilityRole="button" accessibilityLabel={copied ? '已复制' : '复制回复'}
+      onPress={async () => {
+        if (!(await copyText(text))) return;
+        haptics.success();
+        setCopied(true);
+      }}
+      style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center', marginLeft: -10 }}>
+      <Icon name={copied ? 'check' : 'copy'} size={20} color={colors.ink2} />
+    </TouchableOpacity>
+  );
+}
+
 function AssistantMessage({ m, sessionId, live = false }) {
   const { colors } = useTheme();
   const [previewPath, setPreviewPath] = useState(null);
   const [showAllFiles, setShowAllFiles] = useState(false);
+  const [actionText, setActionText] = useState(null);
   const paths = useMemo(() => (sessionId ? filePathsIn(m.text) : []), [m.text, sessionId]);
   const visible = showAllFiles ? paths : paths.slice(0, VISIBLE_FILE_CARDS);
   return (
     <View style={{ marginTop: 8, marginBottom: 20 }}>
-      <MarkdownView text={m.text} sessionId={sessionId} live={live} onOpenFile={sessionId ? setPreviewPath : undefined} />
+      <Pressable accessibilityHint="长按显示复制、选择文本等操作" onLongPress={() => {
+        haptics.confirm();
+        setActionText(m.text || '');
+      }}>
+        <MarkdownView text={m.text} sessionId={sessionId} live={live} onOpenFile={sessionId ? setPreviewPath : undefined} />
+      </Pressable>
       {visible.length ? (
         <View style={{ gap: 8, marginTop: 10 }}>
           {visible.map((p) => <FileCard key={p} sessionId={sessionId} path={p} onOpen={setPreviewPath} />)}
@@ -205,13 +234,15 @@ function AssistantMessage({ m, sessionId, live = false }) {
         </View>
       ) : null}
       <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+        <CopyButton text={m.text || ''} />
         <TouchableOpacity accessibilityRole="button" accessibilityLabel="分享回复"
           onPress={() => Share.share({ message: m.text || '' }).catch(() => {})}
-          style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center', marginLeft: -10 }}>
+          style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
           <Icon name="share" size={20} color={colors.ink2} />
         </TouchableOpacity>
         {m.timestamp ? <Text style={{ color: colors.ink3, fontSize: 12 }}>{fmtClock(m.timestamp)}</Text> : null}
       </View>
+      {actionText !== null ? <MessageActionSheet text={actionText} onClose={() => setActionText(null)} /> : null}
       {previewPath ? <FilePreview sessionId={sessionId} path={previewPath} onClose={() => setPreviewPath(null)} /> : null}
     </View>
   );
@@ -222,6 +253,7 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
   const scale = usePref('fontScale');
   const showThinking = usePref('showThinking');
   const toolsExpanded = usePref('toolsExpanded');
+  const [actionText, setActionText] = useState(null);
 
   const denial = m.permissionDenial;
   if (m.kind === 'notice') {
@@ -288,13 +320,19 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
           <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' }}>
             {sending ? <ActivityIndicator size="small" color={colors.ink3} style={{ marginRight: 10 }} accessibilityLabel="发送中" /> : null}
             {text ? (
-              <View style={{ backgroundColor: colors.bubble, borderRadius: 26, borderCurve: 'continuous',
-                paddingHorizontal: 18, paddingVertical: 12, maxWidth: '88%' }}>
-                <LinkText text={text} style={{ color: colors.inkStrong, fontSize: 17 * scale, lineHeight: Math.round(26 * scale) }} selectable />
-              </View>
+              <Pressable accessibilityHint="长按显示复制、选择文本等操作"
+                onLongPress={() => {
+                  haptics.confirm();
+                  setActionText(text);
+                }}
+                style={{ backgroundColor: colors.bubble, borderRadius: 26, borderCurve: 'continuous',
+                  paddingHorizontal: 18, paddingVertical: 12, maxWidth: '88%' }}>
+                <LinkText text={text} style={{ color: colors.inkStrong, fontSize: 17 * scale, lineHeight: Math.round(26 * scale) }} />
+              </Pressable>
             ) : null}
           </View>
         ) : null}
+        {actionText !== null ? <MessageActionSheet text={actionText} onClose={() => setActionText(null)} /> : null}
       </View>
     );
   }
