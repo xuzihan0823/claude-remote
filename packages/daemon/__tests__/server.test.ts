@@ -2,6 +2,8 @@
 // SDK 侧走 fake QueryFactory（不触真 SDK/网络）。fixture 会话文件建在临时目录。
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, mkdir, appendFile, readFile, writeFile, rm, symlink, truncate, utimes } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -16,7 +18,8 @@ import { ConfigError, loadConfig, type DaemonConfig } from "../src/config.js";
 import { readModelCatalog } from "../src/model-config.js";
 import { ApprovalBridge, TurnRunner, type ActivityGate, type Notifier } from "../src/run/index.js";
 import { DaemonServer } from "../src/server.js";
-import { ActivityTracker } from "../src/watch/activity.js";
+import { ActivityTracker, type ActivityTrackerOptions } from "../src/watch/activity.js";
+import { CliExitReleaser, readLiveCliSessions } from "../src/watch/cli-presence.js";
 import { SessionWatcher } from "../src/watch/watcher.js";
 import type { ProjectCatalog } from "../src/transcript/projects.js";
 import type { SessionSummary } from "../src/transcript/types.js";
@@ -115,7 +118,10 @@ interface Harness {
   dispose: () => Promise<void>;
 }
 
-async function startHarness(): Promise<Harness> {
+async function startHarness(
+  isCliAlive: (sessionId: string) => Promise<boolean> = async () => false,
+  trackerOptions: ActivityTrackerOptions = {},
+): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "claude-remote-it-"));
   const settingsPath = join(root, "settings.json");
   await writeFile(settingsPath, JSON.stringify({
@@ -145,7 +151,7 @@ async function startHarness(): Promise<Harness> {
   const store = new InteractionStore(":memory:");
   const manager = new InteractionManager(store, { defaultTtlMs: 300_000 });
   const watcher = new SessionWatcher({ projectsDir });
-  const tracker = new ActivityTracker({ cooldownMs: 120_000 });
+  const tracker = new ActivityTracker({ cooldownMs: 120_000, ...trackerOptions });
   const gate: ActivityGate = {
     isIdle: (id) => tracker.getStatus(id) === "idle",
     beginRun: (id) => tracker.beginRun(id),
@@ -163,6 +169,7 @@ async function startHarness(): Promise<Harness> {
   server = new DaemonServer({
     config, watcher, tracker, runner, approvals: bridge, notifier,
     version: "0.1.0-test", claudeCliVersion: () => "9.9.9-test",
+    isCliAlive,
     modelCatalog: () => readModelCatalog(settingsPath),
     effortOptions: async () => ({ levels: ["low", "high", "max"], verified: true }),
   });
@@ -654,6 +661,102 @@ test("新会话/模型输入校验：未知 cwd、未知模型拒绝；abort 对
   const malformed = await fetch(`${harness.base}/api/sessions/not-a-uuid/abort`, authed({ method: "POST" }));
   assert.equal(malformed.status, 400);
   assert.deepEqual(await malformed.json(), { error: "invalid_session_id" });
+});
+
+test("存活 CLI 超过冷却期仍拒绝发送和解除；退出后轮询释放并通过 WS 恢复 idle", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-release-it-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
+  await once(child, "spawn");
+  await writeFile(join(dir, `${child.pid}.json`), JSON.stringify({ pid: child.pid, sessionId: SESSION_ID, status: "idle" }));
+  const h = await startHarness(async (id) => (await readLiveCliSessions(dir)).has(id), {
+    cooldownMs: 100, isCliAlive: (id) => releaser.isCliAlive(id),
+  });
+  t.after(() => h.dispose());
+  const releaser = new CliExitReleaser({ tracker: h.tracker, readLive: () => readLiveCliSessions(dir) });
+  t.after(() => releaser.stop());
+  const sink = new FrameSink(h.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  sink.send({ type: "subscribe", sessionId: SESSION_ID });
+  await sink.waitFor((frame) => frame.type === "session-state");
+  await releaser.tick();
+  h.tracker.noteWrite(SESSION_ID);
+  await sink.waitFor((frame) => frame.type === "status" && frame.status === "terminal-driving");
+  sink.frames.length = 0;
+  await delay(200);
+  assert.equal(h.tracker.getStatus(SESSION_ID), "terminal-driving");
+  const blocked = await fetch(`${h.base}/api/sessions/${SESSION_ID}/messages`, authed({
+    method: "POST", body: JSON.stringify({ text: "must wait for terminal exit" }),
+  }));
+  assert.equal(blocked.status, 409);
+  assert.deepEqual(await blocked.json(), { error: "not_idle", status: "terminal-driving" });
+
+  const abort = (body = "{}") => fetch(`${h.base}/api/sessions/${SESSION_ID}/abort`, authed({ method: "POST", body }));
+  const rejected = await abort();
+  assert.equal(rejected.status, 409);
+  assert.deepEqual(await rejected.json(), { error: "terminal_alive", status: "terminal-driving" });
+  assert.equal(h.tracker.getStatus(SESSION_ID), "terminal-driving");
+  assert.equal(sink.frames.some((frame) => frame.type === "status" && frame.status === "idle"), false);
+
+  const ended = await abort(JSON.stringify({ runId: SESSION_ID }));
+  assert.equal(ended.status, 200);
+  assert.deepEqual(await ended.json(), { runId: null, status: "idle", sessionStatus: "terminal-driving" });
+  assert.equal(h.tracker.getStatus(SESSION_ID), "terminal-driving");
+
+  const exited = once(child, "exit");
+  child.kill();
+  await exited;
+  releaser.start();
+  await sink.waitFor((frame) => frame.type === "status" && frame.status === "idle", 2500);
+  assert.equal(h.tracker.getStatus(SESSION_ID), "idle");
+
+  h.tracker.noteWrite(SESSION_ID, Date.now() + 5000);
+  const released = await abort();
+  assert.equal(released.status, 200);
+  assert.deepEqual(await released.json(), { runId: null, status: "released" });
+  assert.equal(h.tracker.getStatus(SESSION_ID), "idle");
+});
+
+test("带 runId 停止活跃运行不检查 CLI 存活", async (t) => {
+  const h = await startHarness(async () => { throw new Error("must not check CLI presence"); });
+  t.after(() => h.dispose());
+  const accepted = await fetch(`${h.base}/api/sessions/${SESSION_ID}/messages`, authed({
+    method: "POST", body: JSON.stringify({ text: "run" }),
+  }));
+  assert.equal(accepted.status, 202);
+  const { runId } = await accepted.json() as { runId: string };
+  const stopped = await fetch(`${h.base}/api/sessions/${SESSION_ID}/abort`, authed({
+    method: "POST", body: JSON.stringify({ runId }),
+  }));
+  assert.equal(stopped.status, 200);
+  assert.deepEqual(await stopped.json(), { runId, status: "aborted" });
+});
+
+test("解除检查期间开始的新运行不能被解除或停止", async (t) => {
+  let resolvePresence!: (alive: boolean) => void;
+  let checking!: () => void;
+  const checked = new Promise<void>((resolve) => { checking = resolve; });
+  const h = await startHarness(() => {
+    checking();
+    return new Promise<boolean>((resolve) => { resolvePresence = resolve; });
+  });
+  t.after(() => h.dispose());
+  const releasing = fetch(`${h.base}/api/sessions/${SESSION_ID}/abort`, authed({ method: "POST" }));
+  await checked;
+  const accepted = await fetch(`${h.base}/api/sessions/${SESSION_ID}/messages`, authed({
+    method: "POST", body: JSON.stringify({ text: "new run" }),
+  }));
+  assert.equal(accepted.status, 202);
+  const { runId } = await accepted.json() as { runId: string };
+  resolvePresence(false);
+  const rejected = await releasing;
+  assert.equal(rejected.status, 409);
+  assert.deepEqual(await rejected.json(), { error: "run_mismatch", activeRunId: runId, status: "daemon-driving" });
+  assert.equal(h.tracker.getStatus(SESSION_ID), "daemon-driving");
+  assert.equal(h.sdk.interrupts, 0);
+  h.sdk.finish();
 });
 
 test("GET messages：升序主链；未知会话 404", async () => {

@@ -60,6 +60,7 @@ export interface DaemonServerOptions {
   version: string;
   /** 返回启动时探测的 claude CLI 版本（未就绪/失败时 "unknown"）。 */
   claudeCliVersion: () => string;
+  isCliAlive: (sessionId: string) => Promise<boolean>;
   /** 测试/嵌入方可注入；默认每次请求重新读取 Mac 设置，以反映即时切换。 */
   modelCatalog?: () => Promise<ModelCatalog>;
   effortOptions?: (cwd: string, model?: string) => Promise<EffortOptions>;
@@ -575,6 +576,16 @@ export class DaemonServer {
     }
     if (activeRunId === undefined) {
       // 未指定 runId 时保留旧客户端的手动解除占用入口；指定 runId 的幂等停止不得经过这里
+      const cliAlive = await this.#options.isCliAlive(sessionId);
+      const currentRunId = this.#options.runner.activeRunId(sessionId);
+      if (currentRunId !== undefined) {
+        this.#json(res, 409, { error: "run_mismatch", activeRunId: currentRunId, status: "daemon-driving" });
+        return;
+      }
+      if (cliAlive) {
+        this.#json(res, 409, { error: "terminal_alive", status: "terminal-driving" });
+        return;
+      }
       const released = this.#options.tracker.release(sessionId);
       this.#json(res, 200, { runId: null, status: released ? "released" : "idle" });
       return;

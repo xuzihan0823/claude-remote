@@ -100,7 +100,7 @@ export const CONFIG_FIELDS: ConfigField[] = [
     key: "ACTIVITY_COOLDOWN_MS",
     alias: "cooldown",
     label: "终端静默判定（秒）",
-    hint: "终端里的会话停止输出多久后算空闲，空闲后手机才能接着发",
+    hint: "仅无进程登记的旧版 CLI 按静默超时释放；新版需先在终端退出 Claude",
     fallback: "120",
     seconds: true,
     validate: positiveInt,

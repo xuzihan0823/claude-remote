@@ -10,7 +10,9 @@ import { CliExitReleaser, readLiveCliSessions } from "../src/watch/cli-presence.
 function setup() {
   let now = 0;
   let live = new Set<string>();
-  const tracker = new ActivityTracker({ cooldownMs: 120_000, now: () => now });
+  const tracker: ActivityTracker = new ActivityTracker({
+    cooldownMs: 120_000, now: () => now, isCliAlive: (id) => releaser.isCliAlive(id),
+  });
   const releaser = new CliExitReleaser({ tracker, readLive: async () => live, now: () => now });
   return {
     tracker,
@@ -70,12 +72,61 @@ test("终端仍开着 → 保持 terminal-driving", async () => {
   t.dispose();
 });
 
+test("存活缓存只在成功读取后更新，读取失败保留已知存活会话", async (t) => {
+  const tracker = new ActivityTracker();
+  t.after(() => tracker.dispose());
+  let fail = false;
+  let live = new Set(["s1"]);
+  const releaser = new CliExitReleaser({ tracker, readLive: async () => {
+    if (fail) throw new Error("temporary read failure");
+    return live;
+  } });
+  const warnings = t.mock.method(console, "warn", () => {});
+  assert.equal(releaser.isCliAlive("s1"), false);
+  await releaser.tick();
+  assert.equal(releaser.isCliAlive("s1"), true);
+  assert.equal(releaser.isCliAlive("other"), false);
+  fail = true;
+  live = new Set();
+  await releaser.tick();
+  assert.equal(releaser.isCliAlive("s1"), true);
+  assert.equal(warnings.mock.callCount(), 1);
+  fail = false;
+  await releaser.tick();
+  assert.equal(releaser.isCliAlive("s1"), false);
+});
+
+test("终端开着但还没写入（daemon 重启、刚 resume、未订阅）→ 判为 terminal-driving，退出后释放", async () => {
+  const t = setup();
+  t.setLive(["s1"]);
+  await t.releaser.tick();
+  assert.equal(t.tracker.getStatus("s1"), "terminal-driving");
+  t.advance(200_000);
+  await t.releaser.tick();
+  assert.equal(t.tracker.getStatus("s1"), "terminal-driving");
+  t.setLive([]);
+  t.advance(2_000);
+  await t.releaser.tick();
+  assert.equal(t.tracker.getStatus("s1"), "idle");
+  t.dispose();
+});
+
+test("daemon 自己的 run 期间看到登记 → 保持 daemon-driving", async () => {
+  const t = setup();
+  t.tracker.beginRun("s1");
+  t.setLive(["s1"]);
+  await t.releaser.tick();
+  assert.equal(t.tracker.getStatus("s1"), "daemon-driving");
+  t.dispose();
+});
+
 test("readLiveCliSessions 只返回存活进程的 sessionId，坏文件忽略", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cli-sessions-"));
   try {
     await writeFile(join(dir, "1.json"), JSON.stringify({ pid: 1, sessionId: "alive" }));
     await writeFile(join(dir, "2.json"), JSON.stringify({ pid: 2, sessionId: "dead" }));
     await writeFile(join(dir, "3.json"), "{ half");
+    await writeFile(join(dir, "4.json"), JSON.stringify({ pid: 1, sessionId: "daemon-run", entrypoint: "claude-remote" }));
     await writeFile(join(dir, "1.abc.key"), "x");
     const live = await readLiveCliSessions(dir, (pid) => pid === 1);
     assert.deepEqual([...live], ["alive"]);

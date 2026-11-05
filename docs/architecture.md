@@ -22,7 +22,7 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 - JSONL 是唯一的数据来源。Claude Code 对话时逐行追加，daemon 增量 tail 实现实时镜像，自己不写 JSONL。
 - `claude --resume <id>` 返回同一个 session_id，并追加到原文件；`--fork-session` 才会复制出新文件。手机续聊和终端续聊因此写的是同一个文件。
 - 手机建的会话要能出现在终端 `/resume` 列表里：CLI 会隐藏 entrypoint 为 `sdk-cli`/`sdk-ts`/`sdk-py` 的会话，所以 `sdk-bridge.ts` 把子进程的 `CLAUDE_CODE_ENTRYPOINT` 设为 `claude-remote`。SDK 的 `options.env` 会整体替换子进程环境，必须自己带上 `process.env`。历史会话可用 `scripts/unhide-sdk-sessions.mjs` 修复。
-- 驾驶状态（`watch/activity.ts`）分三种：`daemon-driving`（手机端有运行中的轮次）、`terminal-driving`（运行之外检测到文件写入）、`idle`。终端写入后静默 120 秒回到 idle；`cli-presence.ts` 通过 `~/.claude/sessions/<pid>.json` 判断终端是否已退出，退出后立即释放。
+- 驾驶状态（`watch/activity.ts`）分三种：`daemon-driving`（手机端有运行中的轮次）、`terminal-driving`（运行之外检测到文件写入）、`idle`。只要仍有存活 CLI 登记该会话，静默超时也保持终端占用，手机须等终端 `/exit` 后再接管，不区分登记中的 busy/idle。`cli-presence.ts` 每 2 秒读取 `~/.claude/sessions/<pid>.json` 并缓存存活集合供冷却检查使用，存活登记即使还没有写入（daemon 重启、刚 resume、会话未被订阅）也直接判为终端占用；daemon 经 SDK 起的子进程登记的 entrypoint 为 `claude-remote`，不计入；启动时先完成一轮读取，已见过的进程退出后自动释放。无存活登记的旧版 CLI 仍按 `ACTIVITY_COOLDOWN_MS`（默认 120 秒）回落 idle。
 - 停止接口 `POST /api/sessions/:id/abort` 可带 `runId`，与当前运行不一致时返回 409 `run_mismatch`，防止过期的停止请求误停新一轮。
 
 ## 安全边界
@@ -113,12 +113,17 @@ App 发送前生成 UUID（Hermes 缺少 crypto.randomUUID 时有兜底），保
 | runId 与当前运行不同 | `409 { "error": "run_mismatch", "activeRunId": "<当前uuid>", "status": "daemon-driving" }` | 不停止当前运行；客户端同步当前身份 |
 | 指定 runId，但当前无运行 | `200 { "runId": null, "status": "idle", "sessionStatus": "idle" }` | 幂等；sessionStatus 也可能为 terminal-driving，此时不解除终端占用 |
 | 不指定 runId，当前有运行 | `200 { "runId": "<uuid>", "status": "aborted" }` | 兼容旧客户端，停止会话当前轮次；无指定轮次保护 |
-| 不指定 runId，终端占用 | `200 { "runId": null, "status": "released" }` | 手动解除占用，后续终端写入仍可重新占用 |
+| 不指定 runId，无活跃运行，但 CLI 仍登记为存活 | `409 { "error": "terminal_alive", "status": "terminal-driving" }` | 拒绝解除，状态不变；先在终端执行 `/exit` |
+| 不指定 runId，终端占用且无存活 CLI 登记 | `200 { "runId": null, "status": "released" }` | 解除残留占用；后续终端写入仍可重新占用 |
 | 不指定 runId，当前空闲 | `200 { "runId": null, "status": "idle" }` | 无操作 |
 
 兼容无请求体及 `{}`。`aborted` 是受理结果，不是运行终态；客户端显示“正在停止”并保持发送受限，等待对应 run 终态或权威状态快照。Runner 默认最多等待约 5 秒中止宽限后强制关闭。A 的迟到停止响应不能清除 B；通用 404/409 不等于运行已结束。
 
+无活跃运行时，解除请求会重新读取 CLI 登记目录，使用与 `CliExitReleaser` 相同的进程存活判断，不区分登记中的 busy/idle。目录不存在或单个文件解析失败时兼容旧行为；进程探测返回 `EPERM` 时按存活处理。异步检查期间若已开始新运行，返回 `409 run_mismatch` 和当前 runId，不解除也不停止新运行。App 收到 `terminal_alive` 后保留占用、回退进度环并触发错误触感，提示先在终端退出；轮询已见过的进程退出后会自动释放。手动解除仅清理 daemon 状态，不结束终端进程，也不使终端重新载入手机写入的历史。
+
 ### 模型目录与消息读取
+
+CLI 注入的 `<task-notification>` 与 `<system-reminder>` 等包裹内容在读取用户消息、会话标题和预览时统一过滤。过滤后为空的用户行不展示，混排的实际用户文本仍保留。
 
 `GET /api/models` 返回 `{ "models": [{ "id": "provider/model", "alias": "sonnet", "displayName": "Sonnet" }], "defaultModel": "sonnet" }`，defaultModel 可缺省。目录读取用户 settings，不解析指定 cwd 的 project/local 设置，不包含凭据或 picker description；不能据此宣称项目一定使用某模型。
 

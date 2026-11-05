@@ -16,6 +16,7 @@ import { AttachmentChips } from './AttachmentChips.js';
 import { AttachmentPicker } from './AttachmentPicker.js';
 import { ModelPicker } from './ModelPicker.js';
 import { EffortPicker } from './EffortPicker.js';
+import { LockReleaseButton } from './LockReleaseButton.js';
 import { haptics } from '../../lib/haptics.js';
 import { tooLargeMessage, uploadAttachments, withAttachmentNote } from '../../lib/attachments.js';
 
@@ -81,10 +82,11 @@ export function ChatComposer({
   }, [sessionId, isRunning, activeRunId]);
 
   const canSend = status === 'idle' && !isRunning && !stopping && !sendBusy;
+  const terminalLocked = status === 'terminal-driving' && !isRunning && !sendBusy;
   const hasContent = draft.trim() !== '' || files.length > 0;
   const disabledReason = sendBusy ? (uploadProgress && uploadProgress.done < uploadProgress.total
       ? `上传附件 ${uploadProgress.done + 1}/${uploadProgress.total}…` : '发送中…')
-    : status === 'terminal-driving' ? '正在终端上使用，暂不可发送'
+    : status === 'terminal-driving' ? '终端占用中'
     : status === 'daemon-driving' ? 'Claude 正在运行…'
     : status == null ? '状态获取中…' : '';
 
@@ -131,8 +133,8 @@ export function ChatComposer({
 
   // 终端占用误判（如上一轮报错后 CLI 收尾写入）时的手动出口：daemon 无 run 时 abort = 解除占用
   const releaseSession = useCallback(async () => {
+    const context = stopContext.current;
     try {
-      const context = stopContext.current;
       const r = await api(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, { method: 'POST', body: '{}' });
       if (context !== stopContext.current) return;
       haptics.stop();
@@ -145,9 +147,21 @@ export function ChatComposer({
         toast('已解除占用', 'info');
       }
     } catch (e) {
-      if (e.code !== 'unauthorized') { haptics.error(); toast(`解除失败：${e.code}`, 'error'); }
+      if (context !== stopContext.current) return;
+      if (e.code === 'terminal_alive') {
+        onStatusConflict?.('terminal-driving');
+        haptics.error();
+        toast('终端里的 Claude 还开着这个会话，请先在终端退出（/exit）', 'error');
+      } else if (e.code === 'run_mismatch') {
+        onRunMismatch?.(e.data?.activeRunId ?? null, e.data?.status || 'daemon-driving');
+        haptics.error();
+        toast('Claude 正在运行，无法解除占用', 'error');
+      } else if (e.code !== 'unauthorized') {
+        haptics.error();
+        toast(`解除失败：${e.code}`, 'error');
+      }
     }
-  }, [sessionId, onStopped, onRunMismatch]);
+  }, [sessionId, onStopped, onRunMismatch, onStatusConflict]);
 
   const sendLock = useRef(false);
   const sendGeneration = useRef(0);
@@ -237,15 +251,10 @@ export function ChatComposer({
       style={{ paddingLeft: Math.max(insets.left, 16), paddingRight: Math.max(insets.right, 16), paddingTop: 8, backgroundColor: colors.bg }}
     >
       <View style={{ paddingBottom: padBottom }}>
-      {/* 发送中不出这一行：它只存在几百毫秒，一进一出会让输入框高度跳两次 */}
-      {!canSend && !isRunning && !sendBusy && disabledReason ? (
-        <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 4, paddingVertical: 6, gap: 8 }}>
-          <Text style={{ color: colors.ink3, fontSize: 13, flex: 1 }}>{disabledReason}</Text>
-          {status === 'terminal-driving' && !sendBusy ? (
-            <TouchableOpacity onPress={releaseSession} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }} accessibilityLabel="解除占用">
-              <Text style={{ color: colors.danger, fontSize: 13, fontWeight: '500' }}>解除占用</Text>
-            </TouchableOpacity>
-          ) : null}
+      {/* 发送中不出这一行：它只存在几百毫秒，一进一出会让输入框高度跳两次；终端占用只在输入框占位里提示 */}
+      {!canSend && !isRunning && !sendBusy && disabledReason && !terminalLocked ? (
+        <View style={{ paddingHorizontal: 4, paddingVertical: 6 }}>
+          <Text style={{ color: colors.ink3, fontSize: 13 }}>{disabledReason}</Text>
         </View>
       ) : null}
       <ComposerCard disabled={!canSend}>
@@ -309,6 +318,8 @@ export function ChatComposer({
               {stopping ? <ActivityIndicator size="small" color={colors.bg} /> : <Icon name="stop" color={colors.bg} />}
             </TouchableOpacity>
           ) : (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            {terminalLocked ? <LockReleaseButton onRelease={releaseSession} /> : null}
             <TouchableOpacity
               onPress={doSend}
               disabled={!canSend || !hasContent}
@@ -324,6 +335,7 @@ export function ChatComposer({
             >
               <Icon name="send" color={colors.bg} />
             </TouchableOpacity>
+            </View>
           )}
         />
       </ComposerCard>

@@ -2,7 +2,7 @@
 //
 //   daemon-driving   Runner 有该会话的活跃 run（beginRun..endRun 之间）
 //   terminal-driving 非 run 期间检测到文件写入
-//   idle             其余情形；最后一次外部写入后 cooldownMs 无写入回落至此
+//   idle             其余情形；无存活 CLI 登记时，最后一次外部写入后 cooldownMs 回落至此
 //
 // run 收尾宽限：CLI 在 result 之后、以及 sdk.close() 退出时还会补写 JSONL（报错的
 // synthetic assistant 行、last-prompt 行），watcher 异步 poll 到时 run 已 endRun。
@@ -18,8 +18,9 @@ import type { SessionStatus } from "../transcript/types.js";
 import { systemScheduler, type Scheduler } from "./watcher.js";
 
 export interface ActivityTrackerOptions {
-  /** terminal-driving 回落 idle 的静默期，默认 120_000（ACTIVITY_COOLDOWN_MS）。 */
+  /** 无存活 CLI 登记时回落 idle 的静默期，默认 120_000（ACTIVITY_COOLDOWN_MS）。 */
   cooldownMs?: number;
+  isCliAlive?: (sessionId: string) => boolean;
   /** endRun 后忽略文件写入的宽限期，默认 3_000。 */
   postRunGraceMs?: number;
   scheduler?: Scheduler;
@@ -46,6 +47,7 @@ export class ActivityTracker extends EventEmitter {
   readonly #postRunGraceMs: number;
   readonly #scheduler: Scheduler;
   readonly #now: () => number;
+  readonly #isCliAlive: (sessionId: string) => boolean;
   readonly #sessions = new Map<string, ActivityState>();
   /** sessionId → 宽限截止时刻；独立于 #sessions，后者回 idle 即被 gc。 */
   readonly #graceUntil = new Map<string, number>();
@@ -56,6 +58,7 @@ export class ActivityTracker extends EventEmitter {
     this.#postRunGraceMs = options.postRunGraceMs ?? DEFAULT_POST_RUN_GRACE_MS;
     this.#scheduler = options.scheduler ?? systemScheduler;
     this.#now = options.now ?? Date.now;
+    this.#isCliAlive = options.isCliAlive ?? (() => false);
   }
 
   override on(event: "change", listener: (payload: StatusChangeEvent) => void): this {
@@ -109,6 +112,13 @@ export class ActivityTracker extends EventEmitter {
     const state = this.#ensure(sessionId);
     state.lastWriteAt = at;
     this.#armCooldown(sessionId, state);
+    this.#setStatus(sessionId, state, "terminal-driving");
+  }
+
+  /** 有存活 CLI 登记该会话但还没有写入（daemon 重启、刚 resume、未订阅）：同样算终端占用，进程退出后由 CliExitReleaser 释放。 */
+  noteCliAlive(sessionId: string): void {
+    const state = this.#ensure(sessionId);
+    if (state.running) return;
     this.#setStatus(sessionId, state, "terminal-driving");
   }
 
@@ -169,6 +179,7 @@ export class ActivityTracker extends EventEmitter {
       state.timer = this.#scheduler.set(() => this.#onCooldown(sessionId), remaining);
       return;
     }
+    if (this.#isCliAlive(sessionId)) return;
     state.lastWriteAt = null;
     this.#setStatus(sessionId, state, "idle");
     this.#gc(sessionId, state);

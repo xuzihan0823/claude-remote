@@ -36,6 +36,7 @@ const WRAPPER_TAGS = [
   "local-command-stdout",
   "local-command-stderr",
   "system-reminder",
+  "task-notification",
   "ide_selection",
   "ide_opened_file",
   "ide_diagnostics",

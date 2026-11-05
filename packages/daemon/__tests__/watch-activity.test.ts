@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { ActivityTracker, type StatusChangeEvent } from "../src/watch/activity.js";
+import { CliExitReleaser } from "../src/watch/cli-presence.js";
 import { FakeScheduler } from "./fixtures/watch/fake-scheduler.js";
 
 function makeTracker(cooldownMs = 1000): {
@@ -36,6 +37,30 @@ test("外部写入 → terminal-driving，静默期满回落 idle", async () => 
     { sessionId: "s1", status: "idle" },
   ]);
   assert.equal(scheduler.pending, 0);
+});
+
+test("存活 CLI 静默超过冷却期仍保持占用，退出后 releaser 释放；无登记会话照常回落", async () => {
+  const scheduler = new FakeScheduler();
+  let live = new Set(["s1"]);
+  const tracker: ActivityTracker = new ActivityTracker({
+    cooldownMs: 1000, scheduler, now: scheduler.now,
+    isCliAlive: (id) => releaser.isCliAlive(id),
+  });
+  const releaser = new CliExitReleaser({ tracker, readLive: async () => live, now: scheduler.now });
+  await releaser.tick();
+  tracker.noteWrite("s1");
+  tracker.noteWrite("legacy");
+  await scheduler.advance(5000);
+  assert.equal(tracker.getStatus("s1"), "terminal-driving");
+  assert.equal(tracker.getStatus("legacy"), "idle");
+  assert.equal(scheduler.pending, 0);
+
+  live = new Set();
+  await releaser.tick();
+  assert.equal(tracker.getStatus("s1"), "idle");
+  tracker.noteWrite("s1");
+  assert.equal(tracker.getStatus("s1"), "idle", "退出后的收尾写入仍有宽限期");
+  tracker.dispose();
 });
 
 test("持续写入不断续期：从最后一次写入起算 cooldown", async () => {
