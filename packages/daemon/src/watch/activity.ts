@@ -115,6 +115,13 @@ export class ActivityTracker extends EventEmitter {
     this.#setStatus(sessionId, state, "terminal-driving");
   }
 
+  /** 有存活 CLI 登记该会话但还没有写入（daemon 重启、刚 resume、未订阅）：同样算终端占用，进程退出后由 CliExitReleaser 释放。 */
+  noteCliAlive(sessionId: string): void {
+    const state = this.#ensure(sessionId);
+    if (state.running) return;
+    this.#setStatus(sessionId, state, "terminal-driving");
+  }
+
   /** 当前处于 terminal-driving 的会话。 */
   terminalSessions(): string[] {
     const ids: string[] = [];

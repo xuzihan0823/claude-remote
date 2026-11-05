@@ -96,12 +96,37 @@ test("存活缓存只在成功读取后更新，读取失败保留已知存活�
   assert.equal(releaser.isCliAlive("s1"), false);
 });
 
+test("终端开着但还没写入（daemon 重启、刚 resume、未订阅）→ 判为 terminal-driving，退出后释放", async () => {
+  const t = setup();
+  t.setLive(["s1"]);
+  await t.releaser.tick();
+  assert.equal(t.tracker.getStatus("s1"), "terminal-driving");
+  t.advance(200_000);
+  await t.releaser.tick();
+  assert.equal(t.tracker.getStatus("s1"), "terminal-driving");
+  t.setLive([]);
+  t.advance(2_000);
+  await t.releaser.tick();
+  assert.equal(t.tracker.getStatus("s1"), "idle");
+  t.dispose();
+});
+
+test("daemon 自己的 run 期间看到登记 → 保持 daemon-driving", async () => {
+  const t = setup();
+  t.tracker.beginRun("s1");
+  t.setLive(["s1"]);
+  await t.releaser.tick();
+  assert.equal(t.tracker.getStatus("s1"), "daemon-driving");
+  t.dispose();
+});
+
 test("readLiveCliSessions 只返回存活进程的 sessionId，坏文件忽略", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cli-sessions-"));
   try {
     await writeFile(join(dir, "1.json"), JSON.stringify({ pid: 1, sessionId: "alive" }));
     await writeFile(join(dir, "2.json"), JSON.stringify({ pid: 2, sessionId: "dead" }));
     await writeFile(join(dir, "3.json"), "{ half");
+    await writeFile(join(dir, "4.json"), JSON.stringify({ pid: 1, sessionId: "daemon-run", entrypoint: "claude-remote" }));
     await writeFile(join(dir, "1.abc.key"), "x");
     const live = await readLiveCliSessions(dir, (pid) => pid === 1);
     assert.deepEqual([...live], ["alive"]);
