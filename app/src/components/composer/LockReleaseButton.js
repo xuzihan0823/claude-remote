@@ -26,7 +26,7 @@ export function LockReleaseButton({ onRelease }) {
       await onRelease();
     } finally {
       setBusy(false);
-      progress.value = 0;
+      progress.value = withTiming(0, { duration: 200 });
     }
   };
   const holdStart = () => {

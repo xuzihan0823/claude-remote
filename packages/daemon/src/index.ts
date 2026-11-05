@@ -102,6 +102,7 @@ async function main(): Promise<void> {
     notifier,
     version: pkg.version,
     claudeCliVersion: () => claudeCliVersion,
+    isCliAlive: async (sessionId) => (await readLiveCliSessions(cliSessionsDir)).has(sessionId),
     relayStatuses: () => connectors.map((connector) => connector.status()),
   });
 

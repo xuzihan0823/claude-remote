@@ -133,8 +133,8 @@ export function ChatComposer({
 
   // 终端占用误判（如上一轮报错后 CLI 收尾写入）时的手动出口：daemon 无 run 时 abort = 解除占用
   const releaseSession = useCallback(async () => {
+    const context = stopContext.current;
     try {
-      const context = stopContext.current;
       const r = await api(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, { method: 'POST', body: '{}' });
       if (context !== stopContext.current) return;
       haptics.stop();
@@ -147,9 +147,21 @@ export function ChatComposer({
         toast('已解除占用', 'info');
       }
     } catch (e) {
-      if (e.code !== 'unauthorized') { haptics.error(); toast(`解除失败：${e.code}`, 'error'); }
+      if (context !== stopContext.current) return;
+      if (e.code === 'terminal_alive') {
+        onStatusConflict?.('terminal-driving');
+        haptics.error();
+        toast('终端里的 Claude 还开着这个会话，请先在终端退出（/exit）', 'error');
+      } else if (e.code === 'run_mismatch') {
+        onRunMismatch?.(e.data?.activeRunId ?? null, e.data?.status || 'daemon-driving');
+        haptics.error();
+        toast('Claude 正在运行，无法解除占用', 'error');
+      } else if (e.code !== 'unauthorized') {
+        haptics.error();
+        toast(`解除失败：${e.code}`, 'error');
+      }
     }
-  }, [sessionId, onStopped, onRunMismatch]);
+  }, [sessionId, onStopped, onRunMismatch, onStatusConflict]);
 
   const sendLock = useRef(false);
   const sendGeneration = useRef(0);

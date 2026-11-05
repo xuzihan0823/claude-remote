@@ -147,6 +147,19 @@ test("stripWrapperTags removes known CLI wrapper tags but keeps user text", () =
   assert.equal(stripWrapperTags("普通 <b>加粗</b> 文本").trim(), "普通 <b>加粗</b> 文本");
 });
 
+test("task-notification 不产生用户消息，混排时保留真正的用户文本", () => {
+  const notification = "<task-notification>\n<task-id>task-1</task-id>\n<summary>Task stopped</summary>\n</task-notification>";
+  const line = (content: unknown) => JSON.stringify({ type: "user", uuid: "notification", message: { role: "user", content } });
+  assert.deepEqual(parseTranscriptLine(line(notification), 1), []);
+  assert.deepEqual(parseTranscriptLine(line([{ type: "text", text: notification }]), 2), []);
+  const mixed = `之前\n${notification}\n之后`;
+  assert.equal(stripWrapperTags(mixed), "之前\n\n之后");
+  assert.deepEqual(parseTranscriptLine(line(mixed), 3).map((message) => message.text), ["之前\n\n之后"]);
+  assert.deepEqual(parseTranscriptLine(line([
+    { type: "text", text: notification }, { type: "text", text: "实际提问" },
+  ]), 4).map((message) => [message.blockIndex, message.text]), [[1, "实际提问"]]);
+});
+
 test("assistant upstream message id survives parsing with original block indexes", () => {
   const messages = parseTranscriptLine(JSON.stringify({
     type: "assistant", uuid: "row-id", parentUuid: "user-id",

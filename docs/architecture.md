@@ -113,12 +113,17 @@ App 发送前生成 UUID（Hermes 缺少 crypto.randomUUID 时有兜底），保
 | runId 与当前运行不同 | `409 { "error": "run_mismatch", "activeRunId": "<当前uuid>", "status": "daemon-driving" }` | 不停止当前运行；客户端同步当前身份 |
 | 指定 runId，但当前无运行 | `200 { "runId": null, "status": "idle", "sessionStatus": "idle" }` | 幂等；sessionStatus 也可能为 terminal-driving，此时不解除终端占用 |
 | 不指定 runId，当前有运行 | `200 { "runId": "<uuid>", "status": "aborted" }` | 兼容旧客户端，停止会话当前轮次；无指定轮次保护 |
-| 不指定 runId，终端占用 | `200 { "runId": null, "status": "released" }` | 手动解除占用，后续终端写入仍可重新占用 |
+| 不指定 runId，无活跃运行，但 CLI 仍登记为存活 | `409 { "error": "terminal_alive", "status": "terminal-driving" }` | 拒绝解除，状态不变；先在终端执行 `/exit` |
+| 不指定 runId，终端占用且无存活 CLI 登记 | `200 { "runId": null, "status": "released" }` | 解除残留占用；后续终端写入仍可重新占用 |
 | 不指定 runId，当前空闲 | `200 { "runId": null, "status": "idle" }` | 无操作 |
 
 兼容无请求体及 `{}`。`aborted` 是受理结果，不是运行终态；客户端显示“正在停止”并保持发送受限，等待对应 run 终态或权威状态快照。Runner 默认最多等待约 5 秒中止宽限后强制关闭。A 的迟到停止响应不能清除 B；通用 404/409 不等于运行已结束。
 
+无活跃运行时，解除请求会重新读取 CLI 登记目录，使用与 `CliExitReleaser` 相同的进程存活判断，不区分登记中的 busy/idle。目录不存在或单个文件解析失败时兼容旧行为；进程探测返回 `EPERM` 时按存活处理。异步检查期间若已开始新运行，返回 `409 run_mismatch` 和当前 runId，不解除也不停止新运行。App 收到 `terminal_alive` 后保留占用、回退进度环并触发错误触感，提示先在终端退出；轮询已见过的进程退出后会自动释放。手动解除仅清理 daemon 状态，不结束终端进程，也不使终端重新载入手机写入的历史。
+
 ### 模型目录与消息读取
+
+CLI 注入的 `<task-notification>` 与 `<system-reminder>` 等包裹内容在读取用户消息、会话标题和预览时统一过滤。过滤后为空的用户行不展示，混排的实际用户文本仍保留。
 
 `GET /api/models` 返回 `{ "models": [{ "id": "provider/model", "alias": "sonnet", "displayName": "Sonnet" }], "defaultModel": "sonnet" }`，defaultModel 可缺省。目录读取用户 settings，不解析指定 cwd 的 project/local 设置，不包含凭据或 picker description；不能据此宣称项目一定使用某模型。
 

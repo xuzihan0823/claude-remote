@@ -75,6 +75,7 @@ async function startDaemon(relayStatuses?: () => ReturnType<RelayConnector["stat
     notifier: async () => {},
     version: "0.1.0-test",
     claudeCliVersion: () => "test",
+    isCliAlive: async () => false,
     modelCatalog: async () => ({ models: [] }),
     ...(relayStatuses === undefined ? {} : { relayStatuses }),
   });

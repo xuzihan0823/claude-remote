@@ -197,6 +197,56 @@ function composer(api, callbacks = {}, deps = {}) {
   return { instance, initial };
 }
 
+test('actual ChatComposer: terminal_alive keeps the session locked and explains how to exit', async () => {
+  const events = [];
+  const statuses = [];
+  let stopped = 0;
+  const { instance } = composer(async () => {
+    throw { status: 409, code: 'terminal_alive', data: { status: 'terminal-driving' } };
+  }, {
+    activeRunId: null, isRunning: false, status: 'terminal-driving',
+    onStopped: () => stopped++, onStatusConflict: (status) => statuses.push(status),
+  }, {
+    haptics: { error: () => events.push('error') },
+    toast: (...args) => events.push(args),
+  });
+  instance.render(); instance.effects();
+  await instance.render().releaseSession();
+  assert.equal(stopped, 0);
+  assert.equal(instance.render().canSend, false);
+  assert.deepEqual(statuses, ['terminal-driving']);
+  assert.deepEqual(events, ['error', ['终端里的 Claude 还开着这个会话，请先在终端退出（/exit）', 'error']]);
+});
+
+test('actual ChatComposer: a stale release rejection cannot affect another session', async () => {
+  let reject;
+  const events = [];
+  const { instance, initial } = composer(() => new Promise((_, fail) => { reject = fail; }), {
+    activeRunId: null, isRunning: false, status: 'terminal-driving', onStatusConflict: () => events.push('status'),
+  }, { haptics: { error: () => events.push('error') }, toast: () => events.push('toast') });
+  instance.render(); instance.effects();
+  const pending = instance.render().releaseSession();
+  instance.render({ ...initial, sessionId: 'another-session' }); instance.effects();
+  reject({ code: 'terminal_alive' });
+  await pending;
+  assert.deepEqual(events, []);
+});
+
+test('actual ChatComposer: release conflict syncs the new run without clearing it', async () => {
+  const mismatches = [];
+  let stopped = 0;
+  const { instance } = composer(async () => {
+    throw { code: 'run_mismatch', data: { activeRunId: 'B', status: 'daemon-driving' } };
+  }, {
+    activeRunId: null, isRunning: false, status: 'terminal-driving',
+    onStopped: () => stopped++, onRunMismatch: (...args) => mismatches.push(args),
+  });
+  instance.render(); instance.effects();
+  await instance.render().releaseSession();
+  assert.equal(stopped, 0);
+  assert.deepEqual(mismatches, [['B', 'daemon-driving']]);
+});
+
 test('actual ChatComposer: stop accepted stays running until terminal props arrive', async () => {
   let stopped = 0;
   const { instance, initial } = composer(async () => ({ runId: 'A', status: 'aborted' }), { onStopped: () => stopped++ });
