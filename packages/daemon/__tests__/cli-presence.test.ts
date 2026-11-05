@@ -10,7 +10,9 @@ import { CliExitReleaser, readLiveCliSessions } from "../src/watch/cli-presence.
 function setup() {
   let now = 0;
   let live = new Set<string>();
-  const tracker = new ActivityTracker({ cooldownMs: 120_000, now: () => now });
+  const tracker: ActivityTracker = new ActivityTracker({
+    cooldownMs: 120_000, now: () => now, isCliAlive: (id) => releaser.isCliAlive(id),
+  });
   const releaser = new CliExitReleaser({ tracker, readLive: async () => live, now: () => now });
   return {
     tracker,
@@ -68,6 +70,30 @@ test("终端仍开着 → 保持 terminal-driving", async () => {
   await t.releaser.tick();
   assert.equal(t.tracker.getStatus("s1"), "terminal-driving");
   t.dispose();
+});
+
+test("存活缓存只在成功读取后更新，读取失败保留已知存活会话", async (t) => {
+  const tracker = new ActivityTracker();
+  t.after(() => tracker.dispose());
+  let fail = false;
+  let live = new Set(["s1"]);
+  const releaser = new CliExitReleaser({ tracker, readLive: async () => {
+    if (fail) throw new Error("temporary read failure");
+    return live;
+  } });
+  const warnings = t.mock.method(console, "warn", () => {});
+  assert.equal(releaser.isCliAlive("s1"), false);
+  await releaser.tick();
+  assert.equal(releaser.isCliAlive("s1"), true);
+  assert.equal(releaser.isCliAlive("other"), false);
+  fail = true;
+  live = new Set();
+  await releaser.tick();
+  assert.equal(releaser.isCliAlive("s1"), true);
+  assert.equal(warnings.mock.callCount(), 1);
+  fail = false;
+  await releaser.tick();
+  assert.equal(releaser.isCliAlive("s1"), false);
 });
 
 test("readLiveCliSessions 只返回存活进程的 sessionId，坏文件忽略", async () => {

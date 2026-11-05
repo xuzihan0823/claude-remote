@@ -22,7 +22,7 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 - JSONL 是唯一的数据来源。Claude Code 对话时逐行追加，daemon 增量 tail 实现实时镜像，自己不写 JSONL。
 - `claude --resume <id>` 返回同一个 session_id，并追加到原文件；`--fork-session` 才会复制出新文件。手机续聊和终端续聊因此写的是同一个文件。
 - 手机建的会话要能出现在终端 `/resume` 列表里：CLI 会隐藏 entrypoint 为 `sdk-cli`/`sdk-ts`/`sdk-py` 的会话，所以 `sdk-bridge.ts` 把子进程的 `CLAUDE_CODE_ENTRYPOINT` 设为 `claude-remote`。SDK 的 `options.env` 会整体替换子进程环境，必须自己带上 `process.env`。历史会话可用 `scripts/unhide-sdk-sessions.mjs` 修复。
-- 驾驶状态（`watch/activity.ts`）分三种：`daemon-driving`（手机端有运行中的轮次）、`terminal-driving`（运行之外检测到文件写入）、`idle`。终端写入后静默 120 秒回到 idle；`cli-presence.ts` 通过 `~/.claude/sessions/<pid>.json` 判断终端是否已退出，退出后立即释放。
+- 驾驶状态（`watch/activity.ts`）分三种：`daemon-driving`（手机端有运行中的轮次）、`terminal-driving`（运行之外检测到文件写入）、`idle`。只要仍有存活 CLI 登记该会话，静默超时也保持终端占用，手机须等终端 `/exit` 后再接管，不区分登记中的 busy/idle。`cli-presence.ts` 每 2 秒读取 `~/.claude/sessions/<pid>.json` 并缓存存活集合供冷却检查使用；启动时先完成一轮读取，已见过的进程退出后自动释放。无存活登记的旧版 CLI 仍按 `ACTIVITY_COOLDOWN_MS`（默认 120 秒）回落 idle。
 - 停止接口 `POST /api/sessions/:id/abort` 可带 `runId`，与当前运行不一致时返回 409 `run_mismatch`，防止过期的停止请求误停新一轮。
 
 ## 安全边界

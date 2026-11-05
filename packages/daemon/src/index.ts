@@ -60,7 +60,10 @@ async function main(): Promise<void> {
   const manager = new InteractionManager(store, { defaultTtlMs: config.permissionTimeoutMs });
 
   const watcher = new SessionWatcher({ projectsDir: config.projectsDir });
-  const tracker = new ActivityTracker({ cooldownMs: config.cooldownMs });
+  const tracker: ActivityTracker = new ActivityTracker({
+    cooldownMs: config.cooldownMs,
+    isCliAlive: (id) => cliExitReleaser.isCliAlive(id),
+  });
   const gate: ActivityGate = {
     isIdle: (id) => tracker.getStatus(id) === "idle",
     beginRun: (id) => tracker.beginRun(id),
@@ -68,6 +71,7 @@ async function main(): Promise<void> {
   };
   const cliSessionsDir = join(dirname(config.projectsDir), "sessions");
   const cliExitReleaser = new CliExitReleaser({ tracker, readLive: () => readLiveCliSessions(cliSessionsDir) });
+  await cliExitReleaser.tick();
   cliExitReleaser.start();
 
   // server 在 bridge 之后创建；审批事件只会在 HTTP/WS 流量之后产生，届时 server 已就位。

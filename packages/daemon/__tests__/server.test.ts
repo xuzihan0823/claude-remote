@@ -18,7 +18,7 @@ import { ConfigError, loadConfig, type DaemonConfig } from "../src/config.js";
 import { readModelCatalog } from "../src/model-config.js";
 import { ApprovalBridge, TurnRunner, type ActivityGate, type Notifier } from "../src/run/index.js";
 import { DaemonServer } from "../src/server.js";
-import { ActivityTracker } from "../src/watch/activity.js";
+import { ActivityTracker, type ActivityTrackerOptions } from "../src/watch/activity.js";
 import { CliExitReleaser, readLiveCliSessions } from "../src/watch/cli-presence.js";
 import { SessionWatcher } from "../src/watch/watcher.js";
 import type { ProjectCatalog } from "../src/transcript/projects.js";
@@ -118,7 +118,10 @@ interface Harness {
   dispose: () => Promise<void>;
 }
 
-async function startHarness(isCliAlive: (sessionId: string) => Promise<boolean> = async () => false): Promise<Harness> {
+async function startHarness(
+  isCliAlive: (sessionId: string) => Promise<boolean> = async () => false,
+  trackerOptions: ActivityTrackerOptions = {},
+): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "claude-remote-it-"));
   const settingsPath = join(root, "settings.json");
   await writeFile(settingsPath, JSON.stringify({
@@ -148,7 +151,7 @@ async function startHarness(isCliAlive: (sessionId: string) => Promise<boolean> 
   const store = new InteractionStore(":memory:");
   const manager = new InteractionManager(store, { defaultTtlMs: 300_000 });
   const watcher = new SessionWatcher({ projectsDir });
-  const tracker = new ActivityTracker({ cooldownMs: 120_000 });
+  const tracker = new ActivityTracker({ cooldownMs: 120_000, ...trackerOptions });
   const gate: ActivityGate = {
     isIdle: (id) => tracker.getStatus(id) === "idle",
     beginRun: (id) => tracker.beginRun(id),
@@ -660,14 +663,16 @@ test("新会话/模型输入校验：未知 cwd、未知模型拒绝；abort 对
   assert.deepEqual(await malformed.json(), { error: "invalid_session_id" });
 });
 
-test("解除占用：存活 CLI 拒绝解除；退出后轮询释放并通过 WS 恢复 idle", async (t) => {
+test("存活 CLI 超过冷却期仍拒绝发送和解除；退出后轮询释放并通过 WS 恢复 idle", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "cli-release-it-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
   await once(child, "spawn");
   await writeFile(join(dir, `${child.pid}.json`), JSON.stringify({ pid: child.pid, sessionId: SESSION_ID, status: "idle" }));
-  const h = await startHarness(async (id) => (await readLiveCliSessions(dir)).has(id));
+  const h = await startHarness(async (id) => (await readLiveCliSessions(dir)).has(id), {
+    cooldownMs: 100, isCliAlive: (id) => releaser.isCliAlive(id),
+  });
   t.after(() => h.dispose());
   const releaser = new CliExitReleaser({ tracker: h.tracker, readLive: () => readLiveCliSessions(dir) });
   t.after(() => releaser.stop());
@@ -676,10 +681,17 @@ test("解除占用：存活 CLI 拒绝解除；退出后轮询释放并通过 WS
   await sink.open();
   sink.send({ type: "subscribe", sessionId: SESSION_ID });
   await sink.waitFor((frame) => frame.type === "session-state");
-  h.tracker.noteWrite(SESSION_ID);
   await releaser.tick();
+  h.tracker.noteWrite(SESSION_ID);
   await sink.waitFor((frame) => frame.type === "status" && frame.status === "terminal-driving");
   sink.frames.length = 0;
+  await delay(200);
+  assert.equal(h.tracker.getStatus(SESSION_ID), "terminal-driving");
+  const blocked = await fetch(`${h.base}/api/sessions/${SESSION_ID}/messages`, authed({
+    method: "POST", body: JSON.stringify({ text: "must wait for terminal exit" }),
+  }));
+  assert.equal(blocked.status, 409);
+  assert.deepEqual(await blocked.json(), { error: "not_idle", status: "terminal-driving" });
 
   const abort = (body = "{}") => fetch(`${h.base}/api/sessions/${SESSION_ID}/abort`, authed({ method: "POST", body }));
   const rejected = await abort();
