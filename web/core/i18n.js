@@ -5,10 +5,11 @@ import { en as enComposer } from './locales/en/composer.js';
 import { en as enCore } from './locales/en/core.js';
 import { en as enChat } from './locales/en/chat.js';
 import { en as enHome } from './locales/en/home.js';
+import { en as enMisc } from './locales/en/misc.js';
 import { en as enSettings } from './locales/en/settings.js';
 
 const DICTS = {
-  en: { ...enComponents, ...enComposer, ...enCore, ...enChat, ...enHome, ...enSettings },
+  en: { ...enComponents, ...enComposer, ...enCore, ...enChat, ...enHome, ...enMisc, ...enSettings },
 };
 
 export const SUPPORTED_LOCALES = ['zh', 'en'];
