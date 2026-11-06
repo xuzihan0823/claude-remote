@@ -1,3 +1,5 @@
+import { scopeErrMsg } from './errors.js';
+
 // 会话搜索控制器（web 与 iOS App 共用，无 UI 依赖）。
 //
 // 输入防抖后分两步：先 meta（标题/路径/最近预览，毫秒级）立刻出结果，再 full（扫 JSONL 全文）
@@ -32,8 +34,8 @@ export function createSessionSearch(searchFn, onChange, { debounceMs = SEARCH_DE
       if (myGen !== gen) return;
       set({ results: mergeResults(state.results, full.results || []), fullLoading: false, truncated: !!full.truncated });
     } catch (e) {
-      if (myGen !== gen || e?.code === 'connection_changed') return;
-      set({ loading: false, fullLoading: false, error: e?.code === 'network_error' ? '网络不可达' : `搜索失败：${e?.code || 'unknown'}` });
+      if (myGen !== gen || e?.code === 'connection_changed' || e?.code === 'unauthorized') return;
+      set({ loading: false, fullLoading: false, error: scopeErrMsg('对话搜索', e, '搜索失败') });
     }
   }
 

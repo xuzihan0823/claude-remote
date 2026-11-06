@@ -244,14 +244,14 @@ test('first-page and pagination errors retry independently without losing useful
   controller.toggle('/repo/a');
   controller.toggle('/repo/b');
   await settle();
-  assert.equal(group(controller, '/repo/a').error, '网络不可达');
+  assert.equal(group(controller, '/repo/a').error, '会话列表：网络不可达');
   assert.equal(group(controller, '/repo/b').error, '');
   fail = false;
   await controller.retry('/repo/a');
   assert.equal(group(controller, '/repo/a').error, '');
   fail = true;
   await controller.loadMore('/repo/a');
-  assert.equal(group(controller, '/repo/a').moreError, '网络不可达');
+  assert.equal(group(controller, '/repo/a').moreError, '会话列表：网络不可达');
   assert.equal(group(controller, '/repo/a').sessions.length, 50);
   fail = false;
   await controller.loadMore('/repo/a');

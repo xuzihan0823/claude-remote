@@ -1,7 +1,8 @@
+import { scopeErrMsg } from '../../../web/core/errors.js';
 import { mergeSessions, SESSION_PAGE, sessionQuery } from './projects.js';
 
 const initialState = () => ({ items: [], total: 0, loading: true, error: '', loadingMore: false, moreError: '' });
-const errorText = (e) => e.code === 'unauthorized' ? '' : e.code === 'network_error' ? '网络不可达' : `加载失败：${e.code}`;
+const errorText = (e) => e?.code === 'unauthorized' ? '' : scopeErrMsg('会话列表', e, '加载失败');
 
 export function createSessionPager(fetchPage, publish) {
   let state = initialState();
