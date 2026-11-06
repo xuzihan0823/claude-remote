@@ -26,7 +26,7 @@ export function SettingsHome({ navigation }) {
   const version = appJson?.expo?.version || '';
 
   return (
-    <SettingsPage title="设置" left="close" right={{ icon: 'info', label: '快速上手', onPress: () => navigation.navigate('QuickStart') }}>
+    <SettingsPage title="设置" left="close">
       <Group title="连接">
         <Row
           icon="laptop"
