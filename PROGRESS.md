@@ -56,3 +56,10 @@
 - 真机首次安装报 `kAMDMobileImageMounterDeviceLocked`：手机锁屏导致，解锁即可，不用换 Xcode。
 - 国内服务器上未备案域名（含 sslip.io）访问 80 端口会被阻断，sslip.io 兜底在国内不可用。
 - 本仓库多个 worktree 共用 stash 列表，临时保存文件别用 `git stash`。
+
+### 2026-11-06·relay 配置热加载
+
+- `cr relay add/remove/on/off` 不再重启 daemon：daemon 新增仅本机的 `POST /api/relay/reload`，重读配置文件里的 `RELAY_*`，`RelayManager` 按地址 diff 增删 connector，参数未变的连接原样保留，成功后广播 `{"type":"channels"}`。
+- 手机收到 `channels` 后重新拉 `connect-info` 并 `syncBases`，新增/删除 relay 不必再完整连接一次。
+- 旧 daemon 没有这个接口时 cr 退回原来的重启路径；daemon 没在运行时只保存配置，下次启动生效。
+- 验证：daemon 测试 191 通过（含热加载接口与管理器用例），daemon、cli 两包 typecheck 通过。未在真机和真实 relay 上验证热加载与通道同步。

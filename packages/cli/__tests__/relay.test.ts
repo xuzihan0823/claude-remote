@@ -10,7 +10,7 @@ import { deriveDeviceId } from "@claude-remote/relay/protocol";
 import { ApiError, type ConnectInfo, type RelayStatus } from "../src/api.js";
 import { configuredRelayBases, pairInfo } from "../src/daemon-control.js";
 import { parseDotenv } from "../src/env.js";
-import { parseRelayUrl, readRelayFile, relayLine, snapshotRelayLine, type RelayDeps, type RestartResult, runRelay } from "../src/relay.js";
+import { parseRelayUrl, readRelayFile, relayLine, snapshotRelayLine, type RelayDeps, type ReloadResult, type RestartResult, runRelay } from "../src/relay.js";
 
 const SECRET = "x".repeat(40);
 const URL_ = "https://relay.example.com";
@@ -30,16 +30,17 @@ interface Harness {
   lines: string[];
   fetched: string[];
   restarts: number;
+  reloads: number;
   polls: number;
 }
 
 /** connectInfo 依次返回 statuses（用完后重复最后一个）；时钟随 sleep 前进。 */
 function harness(
   file: string,
-  opts: { statuses?: Array<RelayStatus | RelayStatus[] | Error>; restart?: RestartResult; fetch?: typeof fetch } = {},
+  opts: { statuses?: Array<RelayStatus | RelayStatus[] | Error>; restart?: RestartResult; reload?: ReloadResult; fetch?: typeof fetch } = {},
 ): Harness {
   let clock = 0;
-  const h: Harness = { deps: undefined as unknown as RelayDeps, lines: [], fetched: [], restarts: 0, polls: 0 };
+  const h: Harness = { deps: undefined as unknown as RelayDeps, lines: [], fetched: [], restarts: 0, reloads: 0, polls: 0 };
   const statuses = opts.statuses;
   h.deps = {
     envFile: file,
@@ -54,6 +55,12 @@ function harness(
       h.restarts += 1;
       return opts.restart ?? { kind: "restarted" };
     },
+    ...(opts.reload === undefined ? {} : {
+      reload: async () => {
+        h.reloads += 1;
+        return opts.reload as ReloadResult;
+      },
+    }),
     connectInfo: async (): Promise<ConnectInfo> => {
       const next = statuses?.[Math.min(h.polls, statuses.length - 1)];
       h.polls += 1;
@@ -317,4 +324,43 @@ test("CLI 离线配对包含所有 relay；尚未重启时摘要提示配置尚�
   assert.match(relayLine(statuses, { ...config, enabled: false }), /尚未加载/);
   assert.match(relayLine(statuses, { ...config, relays: [config.relays[0]!] }), /尚未加载/);
   assert.match(relayLine([statuses[0]!], config), /1\/2 已连接.*尚未加载/);
+});
+
+test("relay add：热加载可用时不重启 daemon", async () => {
+  const file = envFile();
+  const h = harness(file, { reload: { kind: "reloaded" } });
+  assert.equal(await runRelay(["add", URL_, SECRET], h.deps), 0);
+  assert.equal(h.reloads, 1);
+  assert.equal(h.restarts, 0);
+  assert.ok(h.lines.some((line) => line.startsWith("✓ 已连接 relay")));
+});
+
+test("relay remove：热加载后立即断开；旧 daemon 退回重启", async () => {
+  const file = envFile();
+  await runRelay(["add", URL_, SECRET], harness(file, { reload: { kind: "reloaded" } }).deps);
+
+  const h = harness(file, { reload: { kind: "reloaded" } });
+  assert.equal(await runRelay(["remove"], h.deps), 0);
+  assert.equal(h.reloads, 1);
+  assert.equal(h.restarts, 0);
+  assert.ok(h.lines.some((line) => line.includes("daemon 已断开指定 relay")));
+
+  const fallback = harness(envFile(), { reload: { kind: "unsupported" } });
+  assert.equal(await runRelay(["add", URL_, SECRET], fallback.deps), 0);
+  assert.equal(fallback.reloads, 1);
+  assert.equal(fallback.restarts, 1);
+});
+
+test("relay add：daemon 拒绝新配置时报错且不重启", async () => {
+  const h = harness(envFile(), { reload: { kind: "invalid", message: "RELAY_DEVICE_ID is malformed" } });
+  assert.equal(await runRelay(["add", URL_, SECRET], h.deps), 1);
+  assert.equal(h.restarts, 0);
+  assert.ok(h.lines.some((line) => line.includes("relay 配置无效") && line.includes("RELAY_DEVICE_ID is malformed")));
+});
+
+test("relay add：daemon 没在运行时只保存，不尝试重启", async () => {
+  const h = harness(envFile(), { reload: { kind: "inactive", note: "已保存。daemon 没在运行：下次启动（打开 cr）时生效" } });
+  assert.equal(await runRelay(["add", URL_, SECRET], h.deps), 0);
+  assert.equal(h.restarts, 0);
+  assert.ok(h.lines.some((line) => line.includes("下次启动")));
 });

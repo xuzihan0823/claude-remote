@@ -66,6 +66,8 @@ export interface DaemonServerOptions {
   effortOptions?: (cwd: string, model?: string) => Promise<EffortOptions>;
   /** relay connector 只读状态；缺省视为未启用。 */
   relayStatuses?: () => RelayStatus[];
+  /** 仅本机：重读 RELAY_* 并按地址增删连接；缺省表示不支持热加载（旧版本或嵌入方）。 */
+  reloadRelays?: () => Promise<RelayStatus[]>;
 }
 
 export interface RelayStatus {
@@ -247,6 +249,11 @@ export class DaemonServer {
       return;
     }
 
+    if (method === "POST" && path === "/api/relay/reload") {
+      await this.#handleRelayReload(req, res);
+      return;
+    }
+
     if (method === "GET" && path === "/api/sessions") {
       await this.#handleListSessions(res, url);
       return;
@@ -357,6 +364,32 @@ export class DaemonServer {
     const svg = await QRCode.toString(pairPayload(this.pairInfo), { type: "svg" });
     res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "no-store" });
     res.end(svg);
+  }
+
+  /**
+   * 仅本机：重读 RELAY_* 并按地址增删 connector，不重启进程。
+   * 配置没变的连接原样保留，活跃轮次和手机连接都不受影响；成功后广播 channels，手机重新同步地址。
+   */
+  async #handleRelayReload(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!isLoopbackAddress(req.socket.remoteAddress) || looksProxied(req.headers)) {
+      this.#json(res, 403, { error: "loopback_only" });
+      return;
+    }
+    req.resume();
+    const reload = this.#options.reloadRelays;
+    if (reload === undefined) {
+      this.#json(res, 404, { error: "not_supported" });
+      return;
+    }
+    let relays: RelayStatus[];
+    try {
+      relays = await reload();
+    } catch (error) {
+      this.#json(res, 400, { error: "invalid_relay_config", message: (error as Error).message });
+      return;
+    }
+    this.#broadcastAll({ type: "channels" });
+    this.#json(res, 200, { relays });
   }
 
   async #handleListSessions(res: ServerResponse, url: URL): Promise<void> {
