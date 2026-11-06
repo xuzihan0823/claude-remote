@@ -46,6 +46,8 @@ sudo bash install.sh --domain relay.example.com
 cr relay add https://relay.example.com <密钥>
 ```
 
+不想从输出里挑那一行也没关系：把安装输出整段复制，回到 Mac 直接执行 `cr relay add`，它会自己认出地址和密钥；有管道时读 stdin（`… | cr relay add`）。识别到多个候选地址或密钥时会直接报错，不会替你猜。
+
 之后让已配对的手机完整连接一次（冷启动或点“重新连接”），即可同步 relay 地址，无需重新扫码。新手机用 `cr pair` 扫码。
 
 ### 多个 relay 同时在线

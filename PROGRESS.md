@@ -56,3 +56,9 @@
 - 真机首次安装报 `kAMDMobileImageMounterDeviceLocked`：手机锁屏导致，解锁即可，不用换 Xcode。
 - 国内服务器上未备案域名（含 sslip.io）访问 80 端口会被阻断，sslip.io 兜底在国内不可用。
 - 本仓库多个 worktree 共用 stash 列表，临时保存文件别用 `git stash`。
+
+### 2026-11-06·cr relay add 省掉复制地址和密钥
+
+- 服务器装完 relay 后不用从输出里挑出 `cr relay add …` 那一行：把输出整段复制到剪贴板，在 Mac 上直接 `cr relay add` 即可；有管道时读 stdin（`… | cr relay add`），方便脚本化。
+- 识别顺序：`cr relay add <地址> <密钥>` 行 → `RELAY_URL=` / `RELAY_SECRET=` → 全文唯一的地址和唯一的密钥；出现多个候选时明确报错，不猜。
+- 验证：cli 测试 54 通过（新增 2 个用例覆盖识别与歧义报错）、`pnpm --filter @claude-remote/cli typecheck` 与 `pnpm typecheck:root` 通过；用临时 repo 目录 + 本地假 relay 实测管道导入、显式参数和缺参数报错。

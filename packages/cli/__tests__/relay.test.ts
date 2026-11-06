@@ -149,6 +149,40 @@ test("relay add：密钥错误立即报告，不等满 15 秒", async () => {
   assert.match(h.lines.at(-1) ?? "", /✗ .*relay 密钥错误/);
 });
 
+test("relay add 无参数：从剪贴板 / 管道文本里认出地址和密钥", async () => {
+  const cases: Array<[string, string]> = [
+    [`\x1b[1;34m==>\x1b[0m relay 已就绪\n    cr relay add ${URL_} ${SECRET}\n`, `${URL_}/healthz`],
+    [`RELAY_DOMAIN=relay.example.com\nRELAY_URL=${URL_}\nRELAY_SECRET=${SECRET}\nRELAY_HTTPS_PORT=443\n`, `${URL_}/healthz`],
+    [`安装完成，地址 ${URL_} ，密钥 ${SECRET} 请自行保存`, `${URL_}/healthz`],
+  ];
+  for (const [text, probe] of cases) {
+    const h = harness(envFile());
+    h.deps.readImport = async () => text;
+    assert.equal(await runRelay(["add"], h.deps), 0, text);
+    assert.deepEqual(h.fetched, [probe]);
+    assert.equal(parseDotenv(readFileSync(h.deps.envFile, "utf8")).RELAY_SECRET, SECRET);
+    assert.ok(h.lines.includes(`✓ 已识别地址 ${URL_}`), text);
+  }
+});
+
+test("relay add 无参数：认不出或候选不唯一时明确报错，不写文件、不重启", async () => {
+  const cases: Array<[string, RegExp]> = [
+    [" \n\t\n", /没有内容/],
+    ["安装完成，没有可识别的内容", /没从输入里找到 relay 地址/],
+    [`https://a.example.com https://b.example.com ${SECRET}`, /识别到多个地址/],
+    [`${URL_} 这次没带上密钥`, /没从输入里找到 relay 密钥/],
+    [`${URL_} ${"a".repeat(40)} ${"b".repeat(40)}`, /多个候选密钥/],
+  ];
+  for (const [text, message] of cases) {
+    const file = envFile();
+    const h = harness(file);
+    h.deps.readImport = async () => text;
+    await assert.rejects(runRelay(["add"], h.deps), message, text);
+    assert.equal(readFileSync(file, "utf8"), "BRIDGE_TOKEN=t\n# 注释\n");
+    assert.equal(h.restarts, 0);
+  }
+});
+
 test("relay add：15 秒内连不上 → 超时提示；暂时性错误（unreachable）会继续等", async () => {
   const pending = harness(envFile(), { statuses: [{ state: "connecting", since: 0 }] });
   assert.equal(await runRelay(["add", URL_, SECRET], pending.deps), 1);
