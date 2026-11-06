@@ -77,8 +77,10 @@ function mergeMessages(current: RenderMessage[], incoming: RenderMessage[]): Ren
   return [...map.values()].sort((a, b) => a.seq - b.seq || a.blockIndex - b.blockIndex).slice(-200);
 }
 
-function messageLines(messages: RenderMessage[], width: number, maxLines: number): Array<{ who: string; text: string; color: string }> {
-  const lines: Array<{ who: string; text: string; color: string }> = [];
+type MessageLine = { who: string; text: string; color: string };
+
+function wrapMessages(messages: RenderMessage[], width: number): MessageLine[] {
+  const lines: MessageLine[] = [];
   for (const m of messages) {
     if (m.kind === "thinking" || m.kind === "meta") continue;
     const { who, text } = describeMessage(m);
@@ -90,7 +92,11 @@ function messageLines(messages: RenderMessage[], width: number, maxLines: number
       lines.push({ who, text: fit(text, width - 10, false), color });
     }
   }
-  return lines.slice(-maxLines);
+  return lines;
+}
+
+function messageLines(messages: RenderMessage[], width: number, maxLines: number): MessageLine[] {
+  return wrapMessages(messages, width).slice(-maxLines);
 }
 
 export function App({
@@ -117,6 +123,8 @@ export function App({
   const [selected, setSelected] = useState(0);
   const [preview, setPreview] = useState<RenderMessage[]>([]);
   const [detail, setDetail] = useState<RenderMessage[]>([]);
+  /** 详情窗口第一行的绝对下标；undefined 表示跟随最新消息。 */
+  const [detailAnchor, setDetailAnchor] = useState<number | undefined>(undefined);
   const [draft, setDraft] = useState("");
   const [toast, setToast] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState<string | undefined>(undefined);
@@ -261,6 +269,7 @@ export function App({
       streamRef.current?.subscribe(session.sessionId);
       setDetailSession(session);
       setDetail([]);
+      setDetailAnchor(undefined);
       setDraft("");
       setView("session");
       deps.api
@@ -275,6 +284,7 @@ export function App({
     const id = watchRef.current.detail;
     watchRef.current.detail = undefined;
     if (id !== undefined && id !== watchRef.current.preview) streamRef.current?.unsubscribe(id);
+    setDetailAnchor(undefined);
     setView("main");
   }, []);
 
@@ -392,6 +402,19 @@ export function App({
     [deps.config, flash, applyConfig, quit],
   );
 
+  // 详情窗口：anchor 固定第一行，新消息不会把正在看的历史顶走；undefined 时跟随底部。
+  const detailLines = useMemo(() => wrapMessages(detail, Math.max(60, columns) - 4), [detail, columns]);
+  const detailHeight = Math.max(3, rows - 10 - (pending.length > 0 && view !== "approvals" ? 1 : 0) - (toast === undefined ? 0 : 1));
+  const detailMaxStart = Math.max(0, detailLines.length - detailHeight);
+  const detailStart = detailAnchor === undefined ? detailMaxStart : Math.min(detailAnchor, detailMaxStart);
+  const scrollDetail = (delta: number): void => {
+    setDetailAnchor((anchor) => {
+      const from = anchor === undefined ? detailMaxStart : Math.min(anchor, detailMaxStart);
+      const next = Math.min(detailMaxStart, Math.max(0, from + delta));
+      return next >= detailMaxStart ? undefined : next;
+    });
+  };
+
   // -- 键盘 ---------------------------------------------------------------------
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
@@ -401,6 +424,8 @@ export function App({
 
     if (view === "session") {
       if (key.escape) closeDetail();
+      else if (key.pageUp) scrollDetail(-(detailHeight - 1));
+      else if (key.pageDown) scrollDetail(detailHeight - 1);
       else if (key.ctrl && input === "o") tryResume(detailSession);
       else if (key.ctrl && input === "x" && detailSession !== undefined && deps.api !== undefined) {
         deps.api.abort(detailSession.sessionId).then(() => flash("已请求中止当前轮次"), (e: unknown) => flash(errorText(e)));
@@ -549,15 +574,20 @@ export function App({
         {header}
         <Box flexDirection="column" paddingX={2} paddingY={1}>
           <Text bold>会话列表</Text>
-          <Text>  ↑↓ / j k   选择          Enter  实时查看并回复（经 daemon，手机同步）</Text>
-          <Text>  o          在本终端 claude --resume 接管（仅空闲会话）</Text>
-          <Text>  /          搜索          Tab    切换 标题/路径 ⇄ 全文</Text>
-          <Text bold>{"\n"}daemon</Text>
-          <Text>  s 启动/停止   r 重启   l 日志   p 配对二维码   c 设置   g 刷新</Text>
+          <Text>  ↑↓ / j k   选择              Enter  查看并回复（经 daemon，手机同步）</Text>
+          <Text>  o          在本终端接管（仅空闲）   /      搜索，Tab 切 标题/路径 ⇄ 全文</Text>
+          <Text>  a          待审批            p      配对二维码</Text>
+          <Text bold>{"\n"}会话详情</Text>
+          <Text>  PgUp/PgDn  翻历史（新消息不会顶走正在看的内容）</Text>
+          <Text>  Enter      发送回复          Esc    返回列表</Text>
+          <Text>  Ctrl+O     本地接管          Ctrl+X 中止当前轮次</Text>
           <Text bold>{"\n"}审批</Text>
-          <Text>  a 打开待审批   y 允许   n 拒绝   1-9 选择问题选项</Text>
-          <Text bold>{"\n"}会话视图</Text>
-          <Text>  Enter 发送   Esc 返回   Ctrl+O 本地接管   Ctrl+X 中止当前轮次</Text>
+          <Text>  y 允许一次   n 拒绝   1-9 选择问题选项   ↑↓ 切换</Text>
+          <Text bold>{"\n"}daemon</Text>
+          <Text>  s 启动/停止   r 重启   l 日志   c 设置   g 刷新</Text>
+          <Text bold>{"\n"}命令行等价</Text>
+          <Text color="gray">  cr ls / search / show / open    列表、搜索、详情、接管</Text>
+          <Text color="gray">  cr pair / logs / status / relay 配对、日志、状态、relay</Text>
           <Text color="gray">{"\n"}Esc 返回 · Ctrl+C 退出</Text>
         </Box>
       </Box>
@@ -706,8 +736,7 @@ export function App({
 
   if (view === "session" && detailSession !== undefined) {
     // 顶栏 4 + 标题 1 + 输入框 3 + 底栏 1，再减掉可选的审批横幅/提示行；超出终端高度会把顶栏挤出屏幕
-    const msgHeight = Math.max(3, rows - 10 - (approvalBanner ? 1 : 0) - (toastLine ? 1 : 0));
-    const lines = messageLines(detail, inner, msgHeight);
+    const lines = detailLines.slice(detailStart, detailStart + detailHeight);
     const canSend = detailSession.status === "idle";
     return (
       <Box flexDirection="column" width={width}>
@@ -717,8 +746,9 @@ export function App({
           <Text color={STATUS_COLOR[detailSession.status]}>{STATUS_ICON[detailSession.status]} </Text>
           <Text bold>{fit(`${projectName(detailSession.cwd)} · ${detailSession.title}`, inner - 14, false)}</Text>
           <Text color="gray">  {STATUS_LABEL[detailSession.status]}</Text>
+          {detailAnchor === undefined ? null : <Text color="yellow">  已上翻 {detailMaxStart - detailStart} 行</Text>}
         </Box>
-        <Box flexDirection="column" paddingX={1} height={msgHeight}>
+        <Box flexDirection="column" paddingX={1} height={detailHeight}>
           {lines.map((l, i) => (
             <Text key={i} color={l.color}>
               <Text color="gray">{fit(l.who, 7)}</Text>
@@ -743,7 +773,7 @@ export function App({
             }}
           />
         </Box>
-        <Text color="gray"> Enter 发送 · Esc 返回 · Ctrl+O 本地接管 · Ctrl+X 中止</Text>
+        <Text color="gray"> Enter 发送 · PgUp/PgDn 翻历史 · Esc 返回 · Ctrl+O 接管 · Ctrl+X 中止</Text>
       </Box>
     );
   }
@@ -803,7 +833,7 @@ export function App({
         ))}
       </Box>
       {toastLine}
-      <Text color="gray"> ↑↓ 选择 ⏎ 查看/回复 o 本地接管 a 审批 p 配对 l 日志 r 重启 s 启停 c 设置 ? 帮助 q 退出</Text>
+      <Text color="gray"> ↑↓ 选择 ⏎ 查看/回复 / 搜索 a 审批 ? 帮助 q 退出</Text>
     </Box>
   );
 }

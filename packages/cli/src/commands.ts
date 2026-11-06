@@ -54,6 +54,8 @@ export const HELP = `cr — Claude Remote 控制台
   cr show <id>          最近消息（id 可写前缀）
   cr open <id>          在当前终端 claude --resume 接着聊
   cr uninstall          移除 launchd 服务（不删数据）
+
+控制台里这些操作都有快捷键（进去按 ? 查看）；子命令更适合脚本和一次性查看。
 `;
 
 function touch(file: string): void {
