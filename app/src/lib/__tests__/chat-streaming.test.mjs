@@ -516,6 +516,7 @@ test('actual NewChatComposer: sends effort on creation and stores it for the new
         };
       },
       fetchModels: async () => {},
+      scopeErrMsg,
       tooLargeMessage: () => '',
       toast: () => {},
     },

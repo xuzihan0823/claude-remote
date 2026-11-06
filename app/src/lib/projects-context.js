@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
-import { fetchProjects } from '../../../web/core/api.js';
+import { fetchProjects, scopeErrMsg } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
 import {
   ALL_PROJECTS, normalizeCatalog, parsePref, pathTail,
@@ -49,8 +49,10 @@ export function ProjectsProvider({ base, children }) {
       setCatalogLoaded(true);
       setCatalogError('');
     } catch (e) {
-      if (g !== gen.current || seq !== catalogSeq.current || e.code === 'unauthorized') return;
-      setCatalogError(e.code === 'network_error' ? '网络不可达' : `项目加载失败：${e.code}`);
+      if (g !== gen.current || seq !== catalogSeq.current || e?.code === 'unauthorized') return;
+      const msg = scopeErrMsg('项目列表', e, '加载失败');
+      setCatalogError(msg);
+      toast(msg, 'error');
     }
   }, []);
 

@@ -110,11 +110,6 @@ export function HomeScreen() {
       </ScrollView>
 
       <FadeIn play={intro} delay={850 + d0} dy={18} duration={420}>
-        {catalogError && !catalogLoaded ? (
-          <TouchableOpacity onPress={refresh} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 20, paddingBottom: 6 }}>
-            <Text style={{ color: colors.danger, fontSize: 13, textAlign: 'center' }}>{catalogError} · 点击重试</Text>
-          </TouchableOpacity>
-        ) : null}
         <NewChatComposer
           cwd={target}
           cwdLabel={cwdLabel}
