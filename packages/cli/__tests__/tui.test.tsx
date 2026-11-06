@@ -320,3 +320,50 @@ test("设置：只读显示 relay 状态（取自 daemon 快照，光标不会�
     ui.unmount();
   }
 });
+
+test("会话详情：PgUp 翻历史停在原地，PgDn 回到底部跟随新消息", async () => {
+  const many = Array.from({ length: 40 }, (_, i) => ({ seq: i + 1, blockIndex: 0, uuid: `u${i}`, role: "user" as const, kind: "text" as const, text: `第${i}行` }));
+  const { deps, push } = fakeDeps();
+  deps.api = { ...deps.api!, messages: async () => ({ messages: many, hasMore: false }) } as NonNullable<TuiDeps["api"]>;
+  const ui = render(<App deps={deps} onExit={() => {}} />);
+  await settle(200);
+  ui.stdin.write("\r");
+  await settle();
+  assert.match(ui.lastFrame() ?? "", /第39行/);
+  assert.doesNotMatch(ui.lastFrame() ?? "", /已上翻/);
+
+  ui.stdin.write("\u001b[5~"); // PgUp
+  await settle();
+  const scrolled = ui.lastFrame() ?? "";
+  assert.match(scrolled, /已上翻 \d+ 行/);
+  assert.doesNotMatch(scrolled, /第39行/);
+
+  // 翻上去时来了新消息，视口不跟着跳
+  push({ type: "message", sessionId: sessions[0]!.sessionId, message: { seq: 41, blockIndex: 0, uuid: "u41", role: "user", kind: "text", text: "第40行" } });
+  await settle();
+  assert.doesNotMatch(ui.lastFrame() ?? "", /第40行/);
+
+  for (let i = 0; i < 5; i += 1) {
+    ui.stdin.write("\u001b[6~"); // PgDn
+    await settle(30);
+  }
+  assert.doesNotMatch(ui.lastFrame() ?? "", /已上翻/);
+  assert.match(ui.lastFrame() ?? "", /第40行/);
+  ui.unmount();
+});
+
+test("底部提示只留常用键，其余收进帮助页", async () => {
+  const { deps } = fakeDeps();
+  const ui = render(<App deps={deps} onExit={() => {}} />);
+  await settle(200);
+  const main = ui.lastFrame() ?? "";
+  assert.match(main, /搜索 a 审批/);
+  assert.doesNotMatch(main, /p 配对/);
+  ui.stdin.write("?");
+  await settle();
+  const help = ui.lastFrame() ?? "";
+  assert.match(help, /命令行等价/);
+  assert.match(help, /cr pair \/ logs \/ status \/ relay/);
+  assert.match(help, /PgUp\/PgDn/);
+  ui.unmount();
+});
