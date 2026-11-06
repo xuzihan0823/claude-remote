@@ -18,6 +18,7 @@ import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { GlassSurface } from '../../components/GlassSurface.js';
 import { ProgressiveBlur } from '../../components/ProgressiveBlur.js';
 import { Icon } from '../../components/Icon.js';
+import { useI18n } from '../../lib/i18n.js';
 import { useTheme } from '../../theme.js';
 
 // 设置页通用骨架（对照 Claude iOS 设置）：页面以 sheet 弹出，悬浮的液态玻璃圆钮 + 居中标题；
@@ -58,6 +59,7 @@ export function GlassButton({ icon, onPress, label, disabled }) {
  * right：{ icon, label, onPress } 或 null。
  */
 export function SettingsPage({ title, left = 'back', right = null, children, keyboard = false }) {
+  const { t } = useI18n();
   const { colors, dark } = useTheme();
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
@@ -100,7 +102,7 @@ export function SettingsPage({ title, left = 'back', right = null, children, key
         style={{ position: 'absolute', top: 0, left: 0, right: 0, height: HEADER_H, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16 }}
       >
         <View style={{ width: 52 }}>
-          <GlassButton icon={left === 'close' ? 'close' : 'back'} label={left === 'close' ? '关闭' : '返回'} onPress={close} />
+          <GlassButton icon={left === 'close' ? 'close' : 'back'} label={left === 'close' ? t('关闭') : t('返回')} onPress={close} />
         </View>
         <Text numberOfLines={1} style={{ flex: 1, textAlign: 'center', color: colors.inkStrong, fontSize: 17, fontWeight: '600' }}>
           {title}
@@ -269,6 +271,7 @@ export function Row({
   icon, iconColor, label, sub, value, dot, onPress, onLongPress, toggle, onToggle, checked,
   chevron, onDetail, tone, center, disabled, accessibilityLabel,
 }) {
+  const { t } = useI18n();
   const { colors } = useTheme();
   const isToggle = typeof toggle === 'boolean';
   const isFold = chevron === 'chevron' || chevron === 'chevronUp';
@@ -300,7 +303,7 @@ export function Row({
           onPress={onDetail}
           hitSlop={8}
           accessibilityRole="button"
-          accessibilityLabel={`${label} 详情`}
+          accessibilityLabel={t('{label} 详情', { label })}
           style={({ pressed }) => ({ marginLeft: 6, marginRight: -8, padding: 8, borderRadius: 19, backgroundColor: pressed ? colors.glassPressed : 'transparent' })}
         >
           <Icon name="info" size={22} color={colors.ink2} strokeWidth={1.6} />

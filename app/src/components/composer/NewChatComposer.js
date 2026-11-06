@@ -11,6 +11,7 @@ import { token, fetchModels, modelSelection, scopeErrMsg, setSessionModel } from
 import { effortLabel, effortUsable, setSessionEffort } from '../../../../web/core/effort.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useEffortLevels } from '../../lib/useEffortLevels.js';
+import { useI18n } from '../../lib/i18n.js';
 import { useTheme } from '../../theme.js';
 import { Icon } from '../Icon.js';
 import { ComposerActions } from './ComposerActions.js';
@@ -25,6 +26,7 @@ import { EffortPicker } from './EffortPicker.js';
 // 附件走 /api/upload（新建会话专用端点），POST /api/sessions {cwd, text, model?, effort?, permissionMode?}；
 // 成功 setSessionMode + setSessionModel + setSessionEffort + onCreated(result, body)。
 export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onDraftChange, onCreated, mode }) {
+  const { t } = useI18n();
   const { colors, dark } = useTheme();
   const insets = useSafeAreaInsets();
   const catalog = useModelCatalog();
@@ -50,7 +52,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
   const effortMenuItem = {
     key: 'effort',
     icon: 'brain',
-    label: '思考程度',
+    label: t('思考程度'),
     detail: effortLabel(effort),
     detailTone: effortOk ? undefined : 'danger',
     onPress: openEffort,
@@ -63,14 +65,14 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
   }, [hasDraft, onDraftChange]);
 
   const create = useCallback(async () => {
-    const text = draft.trim() || (files.length ? '请查看我上传的附件。' : '');
+    const text = draft.trim() || (files.length ? t('请查看我上传的附件。') : '');
     if (!text || !cwd || !cwdKnown || busy) return;
     if (modelSelection(catalog, model).status === 'unavailable') {
-      toast('新建会话：所选模型不可用', 'error');
+      toast(t('新建会话：所选模型不可用'), 'error');
       return;
     }
     if (!effortOk) {
-      toast(`新建会话：不支持思考程度「${effortLabel(effort)}」`, 'error');
+      toast(t('新建会话：不支持思考程度「{level}」', { level: effortLabel(effort) }), 'error');
       return;
     }
     setBusy(true);
@@ -98,16 +100,16 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
       createRequest.current = null;
     } catch (e) {
       if (e.code !== 'connection_changed' && e.code !== 'unauthorized') haptics.error();
-      if (e.status === 409) toast('新建会话：当前目录不可创建会话', 'error');
-      else if (e.status === 413) toast(e?.file || files.length > 0 ? tooLargeMessage(e, { hasFiles: true }) : '新建会话：消息内容过长', 'error');
-      else if (e.code === 'attachment_read_failed') toast(e.file ? `附件读取：无法读取「${e.file}」` : '附件读取：无法读取文件', 'error');
-      else if (e.code === 'unknown_model') { toast('新建会话：所选模型不可用', 'error'); fetchModels().catch(() => {}); }
-      else if (e.code === 'invalid_effort') toast('新建会话：思考程度参数无效', 'error');
-      else if (e.code === 'unknown_cwd') toast('新建会话：工作目录不可用', 'error');
-      else if (e.code === 'connection_changed') toast('连接已切换，请在当前连接重新发送', 'info');
+      if (e.status === 409) toast(t('新建会话：当前目录不可创建会话'), 'error');
+      else if (e.status === 413) toast(e?.file || files.length > 0 ? tooLargeMessage(e, { hasFiles: true }) : t('新建会话：消息内容过长'), 'error');
+      else if (e.code === 'attachment_read_failed') toast(e.file ? t('附件读取：无法读取「{file}」', { file: e.file }) : t('附件读取：无法读取文件'), 'error');
+      else if (e.code === 'unknown_model') { toast(t('新建会话：所选模型不可用'), 'error'); fetchModels().catch(() => {}); }
+      else if (e.code === 'invalid_effort') toast(t('新建会话：思考程度参数无效'), 'error');
+      else if (e.code === 'unknown_cwd') toast(t('新建会话：工作目录不可用'), 'error');
+      else if (e.code === 'connection_changed') toast(t('连接已切换，请在当前连接重新发送'), 'info');
       else if (e.code !== 'unauthorized') toast(scopeErrMsg('新建会话', e, '创建失败'), 'error');
     } finally { setBusy(false); }
-  }, [draft, cwd, cwdKnown, catalog, model, effort, effortOk, mode, busy, files, onCreated]);
+  }, [draft, cwd, cwdKnown, catalog, model, effort, effortOk, mode, busy, files, onCreated, t]);
 
   const onContentSizeChange = (e) => {
     const h = Math.min(Math.max(Math.ceil(e.nativeEvent.contentSize.height), 44), 150);
@@ -137,9 +139,9 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
           onChangeText={setDraft}
           multiline
           editable={!busy}
-          placeholder="今天想做什么？"
+          placeholder={t('今天想做什么？')}
           placeholderTextColor={colors.ink2}
-          accessibilityLabel="消息"
+          accessibilityLabel={t('输入消息')}
           keyboardAppearance={dark ? 'dark' : 'light'}
           onContentSizeChange={onContentSizeChange}
           style={{
@@ -178,7 +180,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
             disabled={!canSend}
             accessibilityRole="button"
             accessibilityState={{ disabled: !canSend, busy }}
-            accessibilityLabel={needsCwd ? '选择工作目录后发送' : '创建会话并发送'}
+            accessibilityLabel={needsCwd ? t('选择工作目录后发送') : t('创建会话并发送')}
             style={{
               width: 44, height: 44, borderRadius: 22,
               backgroundColor: colors.inkStrong,
@@ -196,7 +198,7 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
       </ComposerCard>
       {files.length > 0 ? (
         <Text style={{ color: colors.ink3, fontSize: 11, marginTop: 6, textAlign: 'center' }}>
-          附件将随首条消息一起发送。
+          {t('附件将随首条消息一起发送。')}
         </Text>
       ) : null}
       </View>

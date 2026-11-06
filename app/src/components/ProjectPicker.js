@@ -1,6 +1,7 @@
 import { useImperativeHandle, useState } from 'react';
 import { ActivityIndicator, Text, TouchableOpacity } from 'react-native';
 import { ALL_PROJECTS, UNCLASSIFIED, pathTail, projectTitles, shortPath } from '../lib/projects.js';
+import { useI18n } from '../lib/i18n.js';
 import { GlassMenu } from './GlassMenu.js';
 import { useTheme } from '../theme.js';
 
@@ -9,6 +10,7 @@ import { useTheme } from '../theme.js';
 // variant="target"：Home 新建目标，只列出项目里真实出现过的 cwd（多个 worktree 分行），value 为 cwd。
 export function ProjectPicker({ sheetRef, anchor: propAnchor, variant, catalog, value, onPick, loaded, error, onRetry }) {
   const { colors } = useTheme();
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [dynAnchor, setDynAnchor] = useState(null);
   const titles = projectTitles(catalog.projects);
@@ -36,7 +38,7 @@ export function ProjectPicker({ sheetRef, anchor: propAnchor, variant, catalog, 
 
   const filterItems = () => [
     row('all', {
-      title: '全部对话',
+      title: t('全部对话'),
       count: catalog.totalSessions,
       selected: value === ALL_PROJECTS,
       onPress: () => onPick(ALL_PROJECTS),
@@ -44,8 +46,8 @@ export function ProjectPicker({ sheetRef, anchor: propAnchor, variant, catalog, 
     }),
     ...(catalog.unclassifiedCount > 0 || value === UNCLASSIFIED
       ? [row('unclassified', {
-        title: '未归类',
-        sub: '缺少工作目录的旧会话',
+        title: t('未归类'),
+        sub: t('缺少工作目录的旧会话'),
         count: catalog.unclassifiedCount,
         selected: value === UNCLASSIFIED,
         onPress: () => onPick(UNCLASSIFIED),
@@ -65,7 +67,7 @@ export function ProjectPicker({ sheetRef, anchor: propAnchor, variant, catalog, 
   const homeProject = catalog.projects.find((p) => p.id === catalog.homeCwd);
   const targetItems = () => [
     ...(catalog.homeCwd ? [row('home', {
-      title: '主目录 (~)',
+      title: t('主目录 (~)'),
       sub: shortPath(catalog.homeCwd),
       count: homeProject?.sessionCount,
       selected: value === catalog.homeCwd,
@@ -88,14 +90,14 @@ export function ProjectPicker({ sheetRef, anchor: propAnchor, variant, catalog, 
         {
           key: `${p.id}:h`,
           type: 'section',
-          label: `${titles.get(p.id)} · ${p.cwds.length} 个工作目录`,
+          label: t('{title} · {count} 个工作目录', { title: titles.get(p.id), count: p.cwds.length }),
           count: p.sessionCount,
         },
         ...p.cwds.map((cwd) => row(`${p.id}:${cwd}`, {
           title: pathTail(cwd, 1),
           sub: shortPath(cwd),
           indent: true,
-          badge: cwd === p.cwd ? '最近' : '',
+          badge: cwd === p.cwd ? t('最近') : '',
           selected: value === cwd,
           onPress: () => onPick(cwd),
           testID: `workspace-option-${cwd}`,
@@ -111,7 +113,7 @@ export function ProjectPicker({ sheetRef, anchor: propAnchor, variant, catalog, 
     <GlassMenu
       visible={open}
       anchor={dynAnchor || propAnchor}
-      title={variant === 'filter' ? '浏览项目' : '新对话的工作目录'}
+      title={variant === 'filter' ? t('浏览项目') : t('新对话的工作目录')}
       items={items}
       width={284}
       testID={`project-picker-${variant}`}
@@ -121,16 +123,16 @@ export function ProjectPicker({ sheetRef, anchor: propAnchor, variant, catalog, 
         <TouchableOpacity
           onPress={onRetry}
           accessibilityRole="button"
-          accessibilityLabel={`${error}，重试`}
+          accessibilityLabel={t('{error}，重试', { error })}
           style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 16 }}
         >
-          <Text style={{ color: colors.danger, fontSize: 13, textAlign: 'center' }}>{error} · 点击重试</Text>
+          <Text style={{ color: colors.danger, fontSize: 13, textAlign: 'center' }}>{t('{error} · 点击重试', { error })}</Text>
         </TouchableOpacity>
       ) : null}
       {!loaded && !error ? <ActivityIndicator style={{ marginVertical: 12 }} color={colors.ink2} /> : null}
       {loaded && empty ? (
         <Text style={{ padding: 16, color: colors.ink3, fontSize: 13, textAlign: 'center' }}>
-          还没有可用的工作目录。先在 Mac 上用 Claude Code 打开一个项目。
+          {t('还没有可用的工作目录。先在 Mac 上用 Claude Code 打开一个项目。')}
         </Text>
       ) : null}
     </GlassMenu>

@@ -3,11 +3,12 @@ import { Linking, Share } from 'react-native';
 import { baseUrl } from '../../../web/core/api.js';
 import { toast } from '../../../web/core/bus.js';
 import { isSafeHref, resolveHref } from '../../../web/core/linkify.js';
+import { t } from './i18n.js';
 
 export function openLink(href) {
   if (!isSafeHref(href)) return;
   const target = resolveHref(href, baseUrl);
-  Linking.openURL(target).catch(() => toast('链接打开：无法打开该链接', 'error'));
+  Linking.openURL(target).catch(() => toast(t('链接打开：无法打开该链接'), 'error'));
 }
 
 export function shareLink(href) {

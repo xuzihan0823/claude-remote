@@ -29,6 +29,7 @@ import {
 } from 'expo-glass-effect';
 import { Icon } from './Icon.js';
 import { haptics } from '../lib/haptics.js';
+import { useI18n } from '../lib/i18n.js';
 import { useTheme } from '../theme.js';
 
 const MENU_WIDTH = 252;
@@ -87,6 +88,7 @@ export function GlassMenu({
   testID,
 }) {
   const { colors, dark } = useTheme();
+  const { t, locale } = useI18n();
   const { width: screenW, height: screenH } = useWindowDimensions();
   const [mounted, setMounted] = useState(false);
   const [reduceTransparency, setReduceTransparency] = useState(false);
@@ -496,7 +498,7 @@ export function GlassMenu({
           testID={item.testID}
           accessibilityRole={item.accessibilityRole || 'menuitem'}
           accessibilityState={item.selected !== undefined ? { selected: !!item.selected, disabled: !!item.disabled } : (item.disabled ? { disabled: true } : undefined)}
-          accessibilityLabel={item.accessibilityLabel || [item.label, item.badge, item.count != null ? `${item.count} 个对话` : '', subText].filter(Boolean).join('，')}
+          accessibilityLabel={item.accessibilityLabel || [item.label, item.badge, item.count != null ? t('{n} 个对话', { n: item.count }) : '', subText].filter(Boolean).join(locale === 'en' ? ', ' : '，')}
           style={({ pressed }) => ({
             minHeight: large ? 60 : (insideSub ? 46 : 48),
             marginHorizontal: large ? 8 : 6,
@@ -707,7 +709,7 @@ export function GlassMenu({
         style={StyleSheet.absoluteFill}
         onPress={onClose}
         accessibilityRole="button"
-        accessibilityLabel="关闭菜单"
+        accessibilityLabel={t('关闭菜单')}
       />
       <Wrapper {...wrapperProps}>
         <Animated.View style={orbStyle}>

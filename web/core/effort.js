@@ -1,4 +1,5 @@
 import { api } from './api.js';
+import { t } from './i18n.js';
 
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const SESSION_EFFORT_KEY = 'session_effort';
@@ -22,7 +23,8 @@ export const EFFORT_DESCRIPTIONS = {
 };
 
 export function effortLabel(value) {
-  return EFFORT_LABELS[value || ''] || String(value);
+  const label = EFFORT_LABELS[value || ''];
+  return label ? t(label) : String(value);
 }
 
 export function getSessionEffort(sessionId) {

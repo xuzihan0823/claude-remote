@@ -7,6 +7,7 @@
 // 任何意外结构都退回 { kind: 'json' }，由界面直接显示原始 JSON。
 
 import { cwdTail } from './format.js';
+import { t } from './i18n.js';
 
 const MAX_DIFF_CELLS = 400_000; // 行级 LCS 的 n*m 上限，超过就整段「删旧加新」
 const CONTEXT = 2; // 改动前后保留的未改动行数
@@ -112,7 +113,7 @@ export function toolView(name, input) {
       case 'Edit':
         if (typeof i.old_string === 'string' || typeof i.new_string === 'string') {
           const v = diffView(i.file_path, [[i.old_string, i.new_string]]);
-          return i.replace_all ? { ...v, note: '全部替换' } : v;
+          return i.replace_all ? { ...v, note: t('全部替换') } : v;
         }
         break;
       case 'MultiEdit':
@@ -123,12 +124,12 @@ export function toolView(name, input) {
           const lines = splitLines(i.content);
           const shown = lines.slice(0, MAX_WRITE_LINES).map((text) => ({ op: '+', text }));
           if (lines.length > MAX_WRITE_LINES) shown.push({ op: '…', count: lines.length - MAX_WRITE_LINES });
-          return { kind: 'diff', file: str(i.file_path), rows: shown, added: lines.length, removed: 0, note: '写入整个文件' };
+          return { kind: 'diff', file: str(i.file_path), rows: shown, added: lines.length, removed: 0, note: t('写入整个文件') };
         }
         break;
       case 'NotebookEdit':
         if (typeof i.new_source === 'string') {
-          return { ...diffView(i.notebook_path, [['', i.new_source]]), note: `单元格 ${i.edit_mode || 'replace'}` };
+          return { ...diffView(i.notebook_path, [['', i.new_source]]), note: t('单元格 {mode}', { mode: i.edit_mode || 'replace' }) };
         }
         break;
       case 'Bash':
@@ -164,7 +165,7 @@ export function toolView(name, input) {
     ['file_path', '文件'], ['notebook_path', '笔记本'], ['path', '路径'], ['pattern', '匹配'], ['glob', '文件过滤'],
     ['url', '网址'], ['query', '搜索'], ['description', '说明'], ['prompt', '提示'], ['offset', '起始行'], ['limit', '行数'],
   ];
-  const fields = LABELS.filter(([k]) => i[k] !== undefined && i[k] !== '').map(([k, label]) => [label, str(i[k])]);
+  const fields = LABELS.filter(([k]) => i[k] !== undefined && i[k] !== '').map(([k, label]) => [t(label), str(i[k])]);
   return fields.length > 0 ? { kind: 'fields', fields } : { kind: 'json' };
 }
 
@@ -178,7 +179,7 @@ export function toolHeadline(name, input) {
   if (v.kind === 'bash') return `$ ${v.command.split('\n')[0]}`;
   if (v.kind === 'todos') {
     const done = v.todos.filter((t) => t.status === 'completed').length;
-    return `${done}/${v.todos.length} 已完成`;
+    return t('{done}/{total} 已完成', { done, total: v.todos.length });
   }
   if (v.kind === 'questions') {
     const first = v.questions[0];

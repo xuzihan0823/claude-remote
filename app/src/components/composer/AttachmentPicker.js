@@ -6,6 +6,7 @@ import { toast } from '../../../../web/core/bus.js';
 import { GlassMenu } from '../GlassMenu.js';
 import { Icon } from '../Icon.js';
 import { MAX_UPLOAD_BYTES, normalizeAsset } from '../../lib/attachments.js';
+import { useI18n } from '../../lib/i18n.js';
 import { useTheme } from '../../theme.js';
 import { PhotoGridPanel } from './PhotoGridPanel.js';
 
@@ -14,6 +15,7 @@ import { PhotoGridPanel } from './PhotoGridPanel.js';
 // picker 返回值均 guard canceled 与空 assets（image-picker: {assets, canceled}；
 // document-picker: {assets, canceled}）。
 export function AttachmentPicker({ disabled, onPicked, extraItems = [] }) {
+  const { t } = useI18n();
   const { colors } = useTheme();
   const { width: screenW, height: screenH } = useWindowDimensions();
   const anchorRef = useRef(null);
@@ -25,15 +27,20 @@ export function AttachmentPicker({ disabled, onPicked, extraItems = [] }) {
     const items = assets.map((a) => normalizeAsset(a));
     const ok = items.filter((f) => !(f.size > MAX_UPLOAD_BYTES));
     const big = items.length - ok.length;
-    if (big) toast(`附件选择：已跳过 ${big} 个超过 25MB 的文件`, 'error');
+    if (big) toast(t('附件选择：已跳过 {count} 个超过 25MB 的文件', { count: big }), 'error');
     if (ok.length) onPicked(ok);
   };
 
   const askSettings = (what) => {
-    Alert.alert(`没有${what}权限`, `请在「设置」里允许 Claude Remote 访问${what}。`, [
-      { text: '取消', style: 'cancel' },
-      { text: '去设置', onPress: () => Linking.openSettings().catch(() => {}) },
-    ]);
+    const name = t(what);
+    Alert.alert(
+      t('没有{what}权限', { what: name }),
+      t('请在「设置」里允许 Claude Remote 访问{what}。', { what: name }),
+      [
+        { text: t('取消'), style: 'cancel' },
+        { text: t('去设置'), onPress: () => Linking.openSettings().catch(() => {}) },
+      ],
+    );
   };
 
   // 选图统一要「兼容」格式：iOS 会把 HEIC 转成 JPEG，Claude 的 Read 不认 HEIC
@@ -51,7 +58,7 @@ export function AttachmentPicker({ disabled, onPicked, extraItems = [] }) {
       const r = await ImagePicker.launchCameraAsync(imageOpts);
       if (r && !r.canceled && r.assets) addAssets(r.assets);
     } catch {
-      toast('相机：无法打开', 'error');
+      toast(t('相机：无法打开'), 'error');
     }
   };
 
@@ -61,7 +68,7 @@ export function AttachmentPicker({ disabled, onPicked, extraItems = [] }) {
       const r = await ImagePicker.launchImageLibraryAsync({ ...imageOpts, allowsMultipleSelection: true, selectionLimit: 10 });
       if (r && !r.canceled && r.assets) addAssets(r.assets);
     } catch {
-      toast('相册：无法打开', 'error');
+      toast(t('相册：无法打开'), 'error');
     }
   };
 
@@ -70,14 +77,14 @@ export function AttachmentPicker({ disabled, onPicked, extraItems = [] }) {
       const r = await DocumentPicker.getDocumentAsync({ multiple: true, copyToCacheDirectory: true, type: '*/*' });
       if (r && !r.canceled && r.assets) addAssets(r.assets);
     } catch {
-      toast('文件选择：读取失败', 'error');
+      toast(t('文件选择：读取失败'), 'error');
     }
   };
 
   const items = [
-    { key: 'camera', icon: 'camera', label: '拍照', onPress: pickCamera },
-    { key: 'photos', icon: 'image', label: '照片', keepOpen: true, onPress: () => setPanel('photos') },
-    { key: 'files', icon: 'paperclip', label: '文件', onPress: pickFiles },
+    { key: 'camera', icon: 'camera', label: t('拍照'), onPress: pickCamera },
+    { key: 'photos', icon: 'image', label: t('照片'), keepOpen: true, onPress: () => setPanel('photos') },
+    { key: 'files', icon: 'paperclip', label: t('选择文件'), onPress: pickFiles },
     ...extraItems,
   ];
 
@@ -104,7 +111,7 @@ export function AttachmentPicker({ disabled, onPicked, extraItems = [] }) {
         onPress={openMenu}
         disabled={disabled}
         accessibilityRole="button"
-        accessibilityLabel="上传附件"
+        accessibilityLabel={t('上传附件')}
         accessibilityState={{ disabled: !!disabled, expanded: menuOpen }}
         style={{
           width: 44,

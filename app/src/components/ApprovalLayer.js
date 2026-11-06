@@ -14,6 +14,7 @@ import { api, approvalErrMsg, sessionCache } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
 import { truncate } from '../lib/format.js';
 import { haptics } from '../lib/haptics.js';
+import { useI18n } from '../lib/i18n.js';
 import { Icon, toolIconName } from './Icon.js';
 import { ToolInputView } from './ToolInputView.js';
 import { useTheme } from '../theme.js';
@@ -34,6 +35,7 @@ const RESOLVED_LABEL = { allowed: '已允许', denied: '已拒绝', answered: '�
 // 倒计时：每秒 tick；剩 ≤20s 变 warn 色；resolved 后停表；过期显示「已超时」。
 function Countdown({ expiresAt, stop }) {
   const { colors, fonts } = useTheme();
+  const { t } = useI18n();
   const [, setTick] = useState(0);
   useEffect(() => {
     if (stop) return undefined;
@@ -44,7 +46,7 @@ function Countdown({ expiresAt, stop }) {
   const warn = left <= 20;
   const text = left > 0
     ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`
-    : '已超时';
+    : t('已超时');
   return (
     <Text
       style={{
@@ -80,6 +82,7 @@ function InputBlock({ toolName, value }) {
 
 function ApprovalCard({ item, onDecide }) {
   const { colors, fonts, radius } = useTheme();
+  const { t } = useI18n();
   const it = item.interaction;
   const reduceMotion = useReducedMotion();
   const progress = useSharedValue(reduceMotion ? 1 : 0);
@@ -126,8 +129,8 @@ function ApprovalCard({ item, onDecide }) {
       );
       if (data && data.status) onDecide(it.interactionId, 'resolve', data.status);
     } catch (e) {
-      if (e.status === 409) toast('该审批已在别处处理', 'info');
-      else if (e.status === 404) toast('审批已不存在', 'info');
+      if (e.status === 409) toast(t('该审批已在别处处理'), 'info');
+      else if (e.status === 404) toast(t('审批已不存在'), 'info');
       else {
         onDecide(it.interactionId, 'rollback');
         if (e.code !== 'unauthorized') haptics.error();
@@ -221,7 +224,7 @@ function ApprovalCard({ item, onDecide }) {
                     : colors.ink2,
             }}
           >
-            {RESOLVED_LABEL[item.resolved] || item.resolved}
+            {t(RESOLVED_LABEL[item.resolved] || item.resolved)}
           </Text>
         </View>
       ) : null}
@@ -245,7 +248,7 @@ function ApprovalCard({ item, onDecide }) {
           />
         </View>
         <Text style={{ fontSize: 13.5, fontWeight: '600', color: colors.inkStrong }}>
-          {it.kind === 'question' ? '提问' : '审批'}
+          {it.kind === 'question' ? t('提问') : t('审批')}
         </Text>
         {it.toolName ? (
           <View
@@ -269,7 +272,7 @@ function ApprovalCard({ item, onDecide }) {
       </View>
 
       <Text style={{ fontSize: 12, color: colors.ink2, marginTop: 2 }}>
-        会话：{sessLabel}
+        {t('会话：{name}', { name: sessLabel })}
       </Text>
 
       {it.prompt ? (
@@ -284,7 +287,7 @@ function ApprovalCard({ item, onDecide }) {
           <TextInput
             value={denyMsg}
             onChangeText={setDenyMsg}
-            placeholder="拒绝理由（可选）"
+            placeholder={t('拒绝理由（可选）')}
             placeholderTextColor={colors.ink3}
             autoCapitalize="none"
             autoCorrect={false}
@@ -315,7 +318,7 @@ function ApprovalCard({ item, onDecide }) {
                 opacity: disabled ? 0.5 : 1,
               }}
             >
-              <Text style={{ color: colors.danger, fontSize: 14.5, fontWeight: '500' }}>拒绝</Text>
+              <Text style={{ color: colors.danger, fontSize: 14.5, fontWeight: '500' }}>{t('拒绝')}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               onPress={() => decide({ type: 'allow_once' })}
@@ -329,7 +332,7 @@ function ApprovalCard({ item, onDecide }) {
                 opacity: disabled ? 0.5 : 1,
               }}
             >
-              <Text style={{ color: '#fff', fontSize: 14.5, fontWeight: '500' }}>允许一次</Text>
+              <Text style={{ color: '#fff', fontSize: 14.5, fontWeight: '500' }}>{t('允许一次')}</Text>
             </TouchableOpacity>
           </View>
         </>
@@ -359,7 +362,7 @@ function ApprovalCard({ item, onDecide }) {
                 <Text style={{ fontSize: 14, color: colors.inkStrong, marginTop: 4, marginBottom: 8 }}>
                   {q.question}
                   {q.multiSelect ? (
-                    <Text style={{ fontSize: 12, color: colors.ink2 }}>（可多选）</Text>
+                    <Text style={{ fontSize: 12, color: colors.ink2 }}>{t('（可多选）')}</Text>
                   ) : null}
                 </Text>
                 <View style={{ gap: 7 }}>
@@ -404,7 +407,7 @@ function ApprovalCard({ item, onDecide }) {
                 <TextInput
                   value={a.free}
                   onChangeText={(v) => setAns(q.question, (cur) => { cur.free = v; return cur; })}
-                  placeholder="或自由输入…"
+                  placeholder={t('或自由输入…')}
                   placeholderTextColor={colors.ink3}
                   autoCapitalize="none"
                   autoCorrect={false}
@@ -438,7 +441,7 @@ function ApprovalCard({ item, onDecide }) {
                 opacity: (disabled || !allAnswered) ? 0.5 : 1,
               }}
             >
-              <Text style={{ color: '#fff', fontSize: 14.5, fontWeight: '500' }}>提交回答</Text>
+              <Text style={{ color: '#fff', fontSize: 14.5, fontWeight: '500' }}>{t('提交回答')}</Text>
             </TouchableOpacity>
           </View>
         </>
@@ -449,6 +452,7 @@ function ApprovalCard({ item, onDecide }) {
 
 export function ApprovalLayer() {
   const { fonts } = useTheme();
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const [items, setItems] = useState([]);
   const removalTimers = useRef(new Map());
@@ -524,7 +528,7 @@ export function ApprovalLayer() {
     if (has(interactionId)) { moveToFront(interactionId); return; }
     syncPending().then((ids) => {
       if (ids?.has(interactionId)) moveToFront(interactionId);
-      else if (ids) toast('这条审批已处理或已超时', 'info');
+      else if (ids) toast(t('这条审批已处理或已超时'), 'info');
     });
   }, [syncPending]);
   useBus('ws:approval.resolved', ({ interactionId, status }) => {
@@ -588,7 +592,7 @@ export function ApprovalLayer() {
               }}
             >
               <Text style={{ fontSize: 12, color: '#fff', fontFamily: fonts.serifCn }}>
-                还有 {items.length - 1} 个待处理
+                {t('还有 {n} 个待处理', { n: items.length - 1 })}
               </Text>
             </View>
           ) : null}

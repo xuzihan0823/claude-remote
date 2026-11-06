@@ -18,6 +18,7 @@ import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import { GlassView, isGlassEffectAPIAvailable, isLiquidGlassAvailable } from 'expo-glass-effect';
 import { toast } from '../../../../web/core/bus.js';
 import { resolveMediaLibraryAsset, toggleSelectedId } from '../../lib/attachments.js';
+import { useI18n } from '../../lib/i18n.js';
 import { haptics } from '../../lib/haptics.js';
 import { useTheme } from '../../theme.js';
 import { Icon } from '../Icon.js';
@@ -104,6 +105,7 @@ function FloatingGlassPill({ onPress, disabled, accessibilityLabel, testID, styl
 }
 
 export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }) {
+  const { t } = useI18n();
   const { colors } = useTheme();
   const [assets, setAssets] = useState([]);
   const [selectedIds, setSelectedIds] = useState([]);
@@ -158,7 +160,7 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
         }
       } catch {
         if (!cancelled) {
-          toast('相册：读取失败', 'error');
+          toast(t('相册：读取失败'), 'error');
           setLoading(false);
         }
         return;
@@ -173,7 +175,7 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
       try {
         await fetchPage(true);
       } catch {
-        if (!cancelled) toast('相册：读取失败', 'error');
+        if (!cancelled) toast(t('相册：读取失败'), 'error');
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -206,13 +208,13 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
       const { next, overLimit } = toggleSelectedId(prev, id, SELECTION_LIMIT);
       if (overLimit) {
         haptics.error();
-        toast(`最多一次选择 ${SELECTION_LIMIT} 张照片`, 'info');
+        toast(t('最多一次选择 {limit} 张照片', { limit: SELECTION_LIMIT }), 'info');
         return prev;
       }
       haptics.selection();
       return next;
     });
-  }, [submitting]);
+  }, [submitting, t]);
 
   const handleConfirm = useCallback(async () => {
     if (!selectedIds.length || submitting) return;
@@ -234,10 +236,10 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
       onConfirm(resolved);
     } catch {
       haptics.error();
-      toast('照片处理：转换失败', 'error');
+      toast(t('照片处理：转换失败'), 'error');
       setSubmitting(false);
     }
-  }, [selectedIds, submitting, onConfirm]);
+  }, [selectedIds, submitting, onConfirm, t]);
 
   const cellSize = (width - GAP * (COLS - 1)) / COLS;
 
@@ -249,7 +251,7 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
         onPress={() => onTogglePhoto(item.id)}
         accessibilityRole="checkbox"
         accessibilityState={{ checked: isSelected }}
-        accessibilityLabel={item.filename || '照片'}
+        accessibilityLabel={item.filename || t('照片')}
         style={{ width: cellSize, height: cellSize, backgroundColor: colors.bubble }}
       >
         <Image
@@ -294,7 +296,7 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
         </View>
       </Pressable>
     );
-  }, [cellSize, colors.accent, colors.bubble, onTogglePhoto, selectedIds]);
+  }, [cellSize, colors.accent, colors.bubble, onTogglePhoto, selectedIds, t]);
 
   return (
     <Animated.View entering={FadeIn.duration(160)} style={{ width, height }} testID="photo-grid-panel">
@@ -305,10 +307,10 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
       ) : permState === 'denied' ? (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28, paddingBottom: 48 }}>
           <Text style={{ color: colors.inkStrong, fontSize: 16, fontWeight: '600', textAlign: 'center' }}>
-            需要访问相册才能在此预览近期照片
+            {t('需要访问相册才能在此预览近期照片')}
           </Text>
           <Text style={{ color: colors.ink2, fontSize: 13.5, marginTop: 6, textAlign: 'center', lineHeight: 19 }}>
-            你也可以直接点右下角「所有照片」调用系统相册选图（无需开启权限）。
+            {t('你也可以直接点右下角「所有照片」调用系统相册选图（无需开启权限）。')}
           </Text>
           <TouchableOpacity
             onPress={() => Linking.openSettings().catch(() => {})}
@@ -324,13 +326,13 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
               borderColor: colors.controlBorder,
             }}
           >
-            <Text style={{ color: colors.inkStrong, fontSize: 13.5, fontWeight: '500' }}>去设置开启相册权限</Text>
+            <Text style={{ color: colors.inkStrong, fontSize: 13.5, fontWeight: '500' }}>{t('去设置开启相册权限')}</Text>
           </TouchableOpacity>
         </View>
       ) : assets.length === 0 ? (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28, paddingBottom: 48 }}>
           <Text style={{ color: colors.ink2, fontSize: 14.5, textAlign: 'center' }}>
-            暂无可预览的照片，可点右下角「所有照片」选择
+            {t('暂无可预览的照片，可点右下角「所有照片」选择')}
           </Text>
         </View>
       ) : (
@@ -367,7 +369,7 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
         <FloatingGlassPill
           onPress={() => { haptics.tap(); onBack(); }}
           disabled={submitting}
-          accessibilityLabel="返回附件菜单"
+          accessibilityLabel={t('返回附件菜单')}
           testID="photo-grid-back"
           glass={glass}
           colors={colors}
@@ -380,20 +382,20 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
           <FloatingGlassPill
             onPress={() => { haptics.tap(); onAllPhotos(); }}
             disabled={submitting}
-            accessibilityLabel="所有照片"
+            accessibilityLabel={t('所有照片')}
             testID="photo-grid-all-photos"
             glass={glass}
             colors={colors}
             style={{ height: 48, borderRadius: 24, paddingHorizontal: 22 }}
           >
-            <Text style={{ color: '#FFFFFF', fontSize: 16.5, fontWeight: '600' }}>所有照片</Text>
+            <Text style={{ color: '#FFFFFF', fontSize: 16.5, fontWeight: '600' }}>{t('所有照片')}</Text>
           </FloatingGlassPill>
 
           {selectedIds.length > 0 ? (
             <FloatingGlassPill
               onPress={handleConfirm}
               disabled={submitting}
-              accessibilityLabel={`添加已选的 ${selectedIds.length} 张照片`}
+              accessibilityLabel={t('添加已选的 {count} 张照片', { count: selectedIds.length })}
               testID="photo-grid-confirm"
               glass={glass}
               accent
@@ -404,7 +406,7 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
                 <ActivityIndicator size="small" color="#FFFFFF" />
               ) : (
                 <Text style={{ color: '#FFFFFF', fontSize: 16, fontWeight: '600', fontVariant: ['tabular-nums'] }}>
-                  {`添加 (${selectedIds.length})`}
+                  {t('添加 ({count})', { count: selectedIds.length })}
                 </Text>
               )}
             </FloatingGlassPill>

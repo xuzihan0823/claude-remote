@@ -32,7 +32,7 @@ export function SettingsHome({ navigation }) {
 
   return (
     <SettingsPage title={t('设置')} left="close">
-      <Group title={t('连接')}>
+      <Group title={t('连接方式')}>
         <Row
           icon="laptop"
           label={t('设备')}

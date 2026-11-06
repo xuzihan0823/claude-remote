@@ -1,2 +1,102 @@
 // 输入框与附件相关英文词条。
-export const en = {};
+export const en = {
+  // 权限模式
+  '权限模式：{name}': 'Permission mode: {name}',
+  '逐项审批（默认）': 'Approve each action (default)',
+  '自动同意文件编辑': 'Automatically approve file edits',
+  '只读规划模式': 'Read-only planning mode',
+  '全自动，危险': 'Fully automatic, risky',
+  '启用 Bypass 模式？': 'Enable Bypass mode?',
+  '启用': 'Enable',
+  'Claude 将不再请求任何审批，直接执行所有操作（含文件修改与命令执行）。仅在完全信任当前任务时使用。':
+    'Claude will stop asking for approval and run all actions directly, including file edits and commands. Only use this when you fully trust the task.',
+
+  // 模型选择
+  '选择模型': 'Select model',
+  '选择模型，当前{name}': 'Select model, currently {name}',
+
+  // 思考程度
+  '思考程度': 'Reasoning effort',
+  '关闭思考程度': 'Close reasoning effort',
+  '思考程度：{level}': 'Reasoning effort: {level}',
+  '思考程度：{level}，当前模型不支持': 'Reasoning effort: {level} (not supported by this model)',
+  '当前模型不支持调整思考程度': 'This model does not support reasoning effort settings',
+  '当前模型不支持这一档，请重新选择': 'This model does not support the selected level. Choose another.',
+  '未能从网关确认该模型支持的档位': 'Could not verify the supported reasoning levels from the gateway',
+
+  // 输入框
+  '输入消息': 'Message input',
+  '回复 Claude…': 'Reply to Claude…',
+  '今天想做什么？': 'What would you like to do today?',
+  '发送': 'Send',
+  '停止生成': 'Stop generating',
+  '正在停止': 'Stopping',
+  '发送中…': 'Sending…',
+  '状态获取中…': 'Checking status…',
+  '终端占用中': 'Terminal in use',
+  'Claude 正在运行…': 'Claude is running…',
+  '选择工作目录后发送': 'Choose a working folder to send',
+  '创建会话并发送': 'Create session and send',
+  '附件将随首条消息一起发送。': 'Attachments are sent with your first message.',
+  '请查看我上传的附件。': 'Please review the files I uploaded.',
+
+  // 发送与停止
+  '上传附件 {done}/{total}…': 'Uploading attachments {done}/{total}…',
+  '正在停止当前运行…': 'Stopping the current run…',
+  '运行已结束': 'Run ended',
+  '当前已是新一轮运行': 'A new run has already started',
+  '已解除占用': 'Terminal released',
+  '解除占用：请先在终端输入 /exit': 'Release lock: Type /exit in the terminal first',
+  '解除占用：Claude 正在运行': 'Release lock: Claude is running',
+  '终端正在使用该会话': 'The terminal is using this session',
+  'Claude 正在运行': 'Claude is running',
+  '会话被占用': 'Session busy',
+  '消息发送：{reason}': 'Send: {reason}',
+  '消息发送：所选模型不可用': 'Send: Selected model unavailable',
+  '消息发送：不支持思考程度「{level}」': 'Send: Reasoning effort "{level}" is not supported',
+  '消息发送：思考程度参数无效': 'Send: Invalid reasoning effort',
+  '消息发送：状态未确认，正在核对': 'Send: Status unconfirmed. Checking…',
+  '连接已切换，正在核对原消息状态': 'Connection changed. Checking the original message…',
+  '新建会话：所选模型不可用': 'New session: Selected model unavailable',
+  '新建会话：不支持思考程度「{level}」': 'New session: Reasoning effort "{level}" is not supported',
+  '新建会话：思考程度参数无效': 'New session: Invalid reasoning effort',
+  '新建会话：当前目录不可创建会话': 'New session: This folder cannot be used',
+  '新建会话：消息内容过长': 'New session: Message too long',
+  '新建会话：工作目录不可用': 'New session: Working folder unavailable',
+  '连接已切换，请在当前连接重新发送': 'Connection changed. Resend on the current connection.',
+  '附件读取：无法读取「{file}」': 'Attachment: Unable to read "{file}"',
+  '附件读取：无法读取文件': 'Attachment: Unable to read file',
+
+  // 附件与照片
+  '上传附件': 'Add attachment',
+  '移除附件': 'Remove attachment',
+  '拍照': 'Take Photo',
+  '照片': 'Photos',
+  '相机': 'camera',
+  '相册：无法打开': 'Photos: Unable to open',
+  '相机：无法打开': 'Camera: Unable to open',
+  '文件选择：读取失败': 'Files: Failed to read',
+  '选择文件': 'Choose Files',
+  '附件选择：已跳过 {count} 个超过 25MB 的文件': 'Attachments: Skipped {count} files over 25 MB',
+  '没有{what}权限': 'No {what} access',
+  '请在「设置」里允许 Claude Remote 访问{what}。': 'Allow Claude Remote to use the {what} in Settings.',
+  '去设置': 'Open Settings',
+  '相册：读取失败': 'Photos: Failed to read',
+  '照片处理：转换失败': 'Photo processing: Conversion failed',
+  '所有照片': 'All Photos',
+  '最多一次选择 {limit} 张照片': 'Select up to {limit} photos at a time',
+  '需要访问相册才能在此预览近期照片': 'Photo access is required to preview recent photos',
+  '你也可以直接点右下角「所有照片」调用系统相册选图（无需开启权限）。':
+    'You can also tap "All Photos" in the bottom-right to use the system picker (no permission needed).',
+  '暂无可预览的照片，可点右下角「所有照片」选择':
+    'No photos to preview. Tap "All Photos" in the bottom-right to choose.',
+  '去设置开启相册权限': 'Open Settings to Allow Photo Access',
+  '返回附件菜单': 'Back to attachment menu',
+  '添加 ({count})': 'Add ({count})',
+  '添加已选的 {count} 张照片': 'Add {count} selected photos',
+
+  // 终端占用
+  '按住锁直到红圈走满，解除终端占用': 'Hold the lock until the ring completes to release the terminal',
+  '解除终端占用': 'Release terminal lock',
+  '按住直到圆圈走满': 'Hold until the circle completes',
+};

@@ -1,11 +1,13 @@
 import { Text, TouchableOpacity, View } from 'react-native';
 import { useTheme } from '../theme.js';
+import { useI18n } from '../lib/i18n.js';
 
 // 移植 web/ui/screens/setup.js 的 PairConfirm：全屏 absolute 遮罩 + 居中卡片 +
 // 候选地址等宽列表 + 覆盖警告 + 取消/确认连接按钮。
 // 渲染于 App.js 根 View 内（导航容器之后），zIndex 置顶；ToastLayer 在其后渲染可叠于其上。
 export function PairConfirm({ req, busy, onConfirm, onCancel, hasExisting }) {
   const { colors, fonts, radius } = useTheme();
+  const { t } = useI18n();
   if (!req || !Array.isArray(req.bases)) return null;
 
   return (
@@ -43,7 +45,7 @@ export function PairConfirm({ req, busy, onConfirm, onCancel, hasExisting }) {
             textAlign: 'center',
           }}
         >
-          扫码配对
+          {t('扫码配对')}
         </Text>
         <Text
           style={{
@@ -54,7 +56,7 @@ export function PairConfirm({ req, busy, onConfirm, onCancel, hasExisting }) {
             textAlign: 'center',
           }}
         >
-          将连接以下 Mac 地址（按顺序探测）：
+          {t('将连接以下 Mac 地址（按顺序探测）：')}
         </Text>
 
         <View style={{ gap: 6, marginTop: 4, marginBottom: 6 }}>
@@ -81,7 +83,7 @@ export function PairConfirm({ req, busy, onConfirm, onCancel, hasExisting }) {
 
         {hasExisting ? (
           <Text style={{ color: colors.danger, fontSize: 13, marginTop: 4 }}>
-            注意：确认后将覆盖当前已保存的连接配置。
+            {t('注意：确认后将覆盖当前已保存的连接配置。')}
           </Text>
         ) : null}
 
@@ -101,7 +103,7 @@ export function PairConfirm({ req, busy, onConfirm, onCancel, hasExisting }) {
               opacity: busy ? 0.5 : 1,
             }}
           >
-            <Text style={{ color: colors.danger, fontSize: 14.5, fontWeight: '500' }}>取消</Text>
+            <Text style={{ color: colors.danger, fontSize: 14.5, fontWeight: '500' }}>{t('取消')}</Text>
           </TouchableOpacity>
           <TouchableOpacity
             onPress={onConfirm}
@@ -119,7 +121,7 @@ export function PairConfirm({ req, busy, onConfirm, onCancel, hasExisting }) {
             }}
           >
             <Text style={{ color: '#fff', fontSize: 14.5, fontWeight: '500' }}>
-              {busy ? '连接中…' : '确认连接'}
+              {busy ? t('连接中…') : t('确认连接')}
             </Text>
           </TouchableOpacity>
         </View>

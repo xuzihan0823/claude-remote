@@ -6,6 +6,7 @@ import { GlassSurface } from './GlassSurface.js';
 import { Icon } from './Icon.js';
 import { buildModeMenuItems, MODE_LABELS } from './composer/ModeSheet.js';
 import { haptics } from '../lib/haptics.js';
+import { useI18n } from '../lib/i18n.js';
 import { useTheme } from '../theme.js';
 
 // 顶栏：左侧抽屉按钮；右侧胶囊（新建会话 + 三点菜单）点击时整体原位变形为液态玻璃下拉框。
@@ -24,6 +25,7 @@ export function ConversationHeader({
 }) {
   const navigation = useNavigation();
   const { colors } = useTheme();
+  const { t } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
   const [pillHidden, setPillHidden] = useState(false);
   const [menuAnchor, setMenuAnchor] = useState(null);
@@ -45,17 +47,17 @@ export function ConversationHeader({
     rootItems.push({
       key: 'info',
       icon: 'info',
-      label: '会话信息',
+      label: t('会话信息'),
       testID: 'menu-info',
-      onPress: () => Alert.alert(title || '会话信息', details),
+      onPress: () => Alert.alert(title || t('会话信息'), details),
     });
   }
   if (onPickCwd) {
     rootItems.push({
       key: 'cwd',
       icon: 'folder',
-      label: cwdLabel ? '工作目录' : '选择工作目录',
-      detail: cwdLabel || '未选择',
+      label: cwdLabel ? t('工作目录') : t('选择工作目录'),
+      detail: cwdLabel || t('未选择'),
       detailTone: cwdLabel ? undefined : 'danger',
       chevron: true,
       testID: 'menu-cwd',
@@ -66,8 +68,8 @@ export function ConversationHeader({
     rootItems.push({
       key: 'mode',
       icon: 'shield',
-      label: '权限模式',
-      detail: MODE_LABELS[mode] || '标准',
+      label: t('权限模式'),
+      detail: t(MODE_LABELS[mode] || '标准'),
       detailTone: mode === 'bypassPermissions' ? 'danger' : undefined,
       chevron: true,
       testID: 'menu-mode',
@@ -108,7 +110,7 @@ export function ConversationHeader({
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 }}>
       <GlassSurface interactive variant="pill" style={{ borderRadius: 24 }}>
-        <Pressable style={buttonStyle} onPress={() => navigation.dispatch(DrawerActions.openDrawer())} testID="header-open-drawer" accessibilityRole="button" accessibilityLabel="打开会话列表">
+        <Pressable style={buttonStyle} onPress={() => navigation.dispatch(DrawerActions.openDrawer())} testID="header-open-drawer" accessibilityRole="button" accessibilityLabel={t('打开会话列表')}>
           <Icon name="menu" />
         </Pressable>
       </GlassSurface>
@@ -124,11 +126,11 @@ export function ConversationHeader({
       >
         <GlassSurface interactive variant="pill" style={{ borderRadius: 24, flexDirection: 'row' }}>
           {newChat ? (
-            <Pressable style={buttonStyle} onPress={onNewChat || (() => navigation.navigate('Home'))} testID="header-new-chat" accessibilityRole="button" accessibilityLabel="新建会话">
+            <Pressable style={buttonStyle} onPress={onNewChat || (() => navigation.navigate('Home'))} testID="header-new-chat" accessibilityRole="button" accessibilityLabel={t('新建会话')}>
               <Icon name="newChat" size={21} strokeWidth={2} />
             </Pressable>
           ) : null}
-          <Pressable style={buttonStyle} onPress={openMenu} testID="header-more" accessibilityRole="button" accessibilityLabel="更多选项" accessibilityState={{ expanded: menuOpen }}>
+          <Pressable style={buttonStyle} onPress={openMenu} testID="header-more" accessibilityRole="button" accessibilityLabel={t('更多选项')} accessibilityState={{ expanded: menuOpen }}>
             <Icon name="more" />
           </Pressable>
         </GlassSurface>

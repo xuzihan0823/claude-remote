@@ -1,14 +1,15 @@
 import { Text, TouchableOpacity, View } from 'react-native';
 import { defaultModelDescription, findModel, modelMainName, modelValue } from '../../../../web/core/api.js';
+import { useI18n, t as translate } from '../../lib/i18n.js';
 import { useTheme } from '../../theme.js';
 
-export function buildModelMenuItems({ value, catalog, onPick }) {
+export function buildModelMenuItems({ value, catalog, onPick, t = translate }) {
   const { models = [] } = catalog || {};
   const sel = findModel(models, value);
   return [
     {
       key: 'default',
-      label: '跟随项目默认',
+      label: t('跟随项目默认'),
       detail: defaultModelDescription(catalog),
       selected: !value,
       testID: 'model-option-default',
@@ -21,7 +22,7 @@ export function buildModelMenuItems({ value, catalog, onPick }) {
       return {
         key: v,
         label: modelMainName(m),
-        detail: m.alias && m.alias !== m.id ? `别名 ${m.alias}` : undefined,
+        detail: m.alias && m.alias !== m.id ? t('别名 {alias}', { alias: m.alias }) : undefined,
         selected: on,
         testID: `model-option-${v}`,
         accessibilityRole: 'button',
@@ -33,8 +34,9 @@ export function buildModelMenuItems({ value, catalog, onPick }) {
 
 // 模型列表内容；思考程度在 + 菜单里单独选择（EffortPicker）。
 export function ModelSheetContent({ value, catalog, onPick }) {
+  const { t } = useI18n();
   const { colors } = useTheme();
-  const items = buildModelMenuItems({ value, catalog, onPick });
+  const items = buildModelMenuItems({ value, catalog, onPick, t });
   const row = { flexDirection: 'row', alignItems: 'center', minHeight: 48, paddingVertical: 10, paddingHorizontal: 16 };
   const main = { color: colors.inkStrong, fontSize: 15 };
   const sub = { color: colors.ink2, fontSize: 12, marginTop: 2 };
@@ -43,7 +45,7 @@ export function ModelSheetContent({ value, catalog, onPick }) {
   return (
     <View style={{ paddingBottom: 8 }}>
       <View style={{ alignItems: 'center', paddingVertical: 6 }}>
-        <Text accessibilityRole="header" style={{ color: colors.ink2, fontSize: 13 }}>选择模型</Text>
+        <Text accessibilityRole="header" style={{ color: colors.ink2, fontSize: 13 }}>{t('选择模型')}</Text>
       </View>
       {items.map((item) => (
         <TouchableOpacity

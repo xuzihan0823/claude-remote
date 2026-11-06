@@ -23,6 +23,7 @@ import { usePref } from '../lib/prefs.js';
 import { haptics } from '../lib/haptics.js';
 import { copyText } from '../lib/clipboard.js';
 import { isImagePath, parseAttachmentNote, uploadImageSource } from '../lib/attachments.js';
+import { useI18n } from '../lib/i18n.js';
 import { ImageViewer } from './ImageViewer.js';
 import { MessageActionSheet } from './MessageActionSheet.js';
 
@@ -123,6 +124,7 @@ const fileName = (p) => p.split('/').pop().replace(/^\d+-/, '');
 
 function SentImage({ path, single }) {
   const { colors } = useTheme();
+  const { t } = useI18n();
   const [ratio, setRatio] = useState(1);
   const [failed, setFailed] = useState(false);
   const [viewing, setViewing] = useState(false);
@@ -143,7 +145,7 @@ function SentImage({ path, single }) {
       <TouchableOpacity
         activeOpacity={0.75}
         accessibilityRole="imagebutton"
-        accessibilityLabel={`查看图片 ${fileName(path)}`}
+        accessibilityLabel={t('查看图片 {name}', { name: fileName(path) })}
         onPress={() => {
           haptics.selection();
           setViewing(true);
@@ -188,6 +190,7 @@ const VISIBLE_FILE_CARDS = 5;
 
 function CopyButton({ text }) {
   const { colors } = useTheme();
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return undefined;
@@ -195,7 +198,7 @@ function CopyButton({ text }) {
     return () => clearTimeout(id);
   }, [copied]);
   return (
-    <TouchableOpacity accessibilityRole="button" accessibilityLabel={copied ? '已复制' : '复制回复'}
+    <TouchableOpacity accessibilityRole="button" accessibilityLabel={copied ? t('已复制') : t('复制回复')}
       onPress={async () => {
         if (!(await copyText(text))) return;
         haptics.success();
@@ -209,6 +212,7 @@ function CopyButton({ text }) {
 
 function AssistantMessage({ m, sessionId, live = false }) {
   const { colors } = useTheme();
+  const { t } = useI18n();
   const [previewPath, setPreviewPath] = useState(null);
   const [showAllFiles, setShowAllFiles] = useState(false);
   const [actionText, setActionText] = useState(null);
@@ -216,7 +220,7 @@ function AssistantMessage({ m, sessionId, live = false }) {
   const visible = showAllFiles ? paths : paths.slice(0, VISIBLE_FILE_CARDS);
   return (
     <View style={{ marginTop: 8, marginBottom: 20 }}>
-      <Pressable accessibilityHint="长按显示复制、选择文本等操作" onLongPress={() => {
+      <Pressable accessibilityHint={t('长按显示复制、选择文本等操作')} onLongPress={() => {
         haptics.confirm();
         setActionText(m.text || '');
       }}>
@@ -228,14 +232,14 @@ function AssistantMessage({ m, sessionId, live = false }) {
           {visible.length < paths.length ? (
             <TouchableOpacity accessibilityRole="button" onPress={() => setShowAllFiles(true)}
               style={{ minHeight: 44, alignItems: 'center', justifyContent: 'center' }}>
-              <Text style={{ color: colors.ink2, fontSize: 13 }}>还有 {paths.length - visible.length} 个文件</Text>
+              <Text style={{ color: colors.ink2, fontSize: 13 }}>{t('还有 {n} 个文件', { n: paths.length - visible.length })}</Text>
             </TouchableOpacity>
           ) : null}
         </View>
       ) : null}
       <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
         <CopyButton text={m.text || ''} />
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel="分享回复"
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel={t('分享回复')}
           onPress={() => Share.share({ message: m.text || '' }).catch(() => {})}
           style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
           <Icon name="share" size={20} color={colors.ink2} />
@@ -250,6 +254,7 @@ function AssistantMessage({ m, sessionId, live = false }) {
 
 export function MessageRow({ m, sessionId, sending = false, live = false }) {
   const { colors } = useTheme();
+  const { t } = useI18n();
   const scale = usePref('fontScale');
   const showThinking = usePref('showThinking');
   const toolsExpanded = usePref('toolsExpanded');
@@ -257,12 +262,13 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
 
   const denial = m.permissionDenial;
   if (m.kind === 'notice') {
-    return <Block icon={<Icon name="info" size={15} color={m.level === 'warning' ? colors.danger : colors.ink2} />} title="会话提示" defaultOpen>
+    return <Block icon={<Icon name="info" size={15} color={m.level === 'warning' ? colors.danger : colors.ink2} />} title={t('会话提示')} defaultOpen>
       <Text selectable style={{ color: colors.ink, fontSize: 14, lineHeight: 21 }}>{m.text}</Text>
     </Block>;
   }
   if (m.kind === 'permission_denied') {
-    return <Block icon={<Icon name="close" size={15} color={colors.danger} />} title={`${denial.agentId ? '子代理 · ' : ''}${denial.toolName || '工具'}已拒绝`} err defaultOpen>
+    const deniedTool = denial.toolName || t('工具');
+    return <Block icon={<Icon name="close" size={15} color={colors.danger} />} title={denial.agentId ? t('子代理 · {tool}已拒绝', { tool: deniedTool }) : t('{tool}已拒绝', { tool: deniedTool })} err defaultOpen>
       <Text selectable style={{ color: colors.danger, fontSize: 14, lineHeight: 21 }}>{denialText(denial)}</Text>
     </Block>;
   }
@@ -276,7 +282,7 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
   if (m.kind === 'thinking') {
     if (!showThinking) return null;
     return (
-      <Block icon={<Spark size={13} />} title="思考过程" live={live}>
+      <Block icon={<Spark size={13} />} title={t('思考过程')} live={live}>
         <LinkText text={m.text} style={{ color: colors.ink2, fontSize: 13 * scale, lineHeight: Math.round(20 * scale) }} selectable />
       </Block>
     );
@@ -285,7 +291,7 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
     return (
       <Block
         icon={<Icon name={toolIconName(m.toolName)} size={15} color={colors.accentDeep} />}
-        title={denial ? `${m.toolName || '工具'}已拒绝` : m.toolName || '工具'}
+        title={denial ? t('{tool}已拒绝', { tool: m.toolName || t('工具') }) : m.toolName || t('工具')}
         sub={toolHeadline(m.toolName, m.toolInput) || toolSummary(m)}
         defaultOpen={toolsExpanded}
         live={live}
@@ -302,8 +308,8 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
     return (
       <Block
         icon={<Icon name={m.isError || denial ? 'close' : 'check'} size={15} color={m.isError || denial ? colors.danger : colors.ok} strokeWidth={2.1} />}
-        title={denial ? '操作已拒绝' : m.isError ? '工具出错' : '工具结果'}
-        sub={denial ? denial.toolName : (errSub || `${chars} 字符`)}
+        title={denial ? t('操作已拒绝') : m.isError ? t('工具出错') : t('工具结果')}
+        sub={denial ? denial.toolName : (errSub || t('{n} 字符', { n: chars }))}
         defaultOpen={toolsExpanded}
         live={live}
       >
@@ -318,9 +324,9 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
         {paths.length ? <UserAttachments paths={paths} /> : null}
         {text || sending ? (
           <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' }}>
-            {sending ? <ActivityIndicator size="small" color={colors.ink3} style={{ marginRight: 10 }} accessibilityLabel="发送中" /> : null}
+            {sending ? <ActivityIndicator size="small" color={colors.ink3} style={{ marginRight: 10 }} accessibilityLabel={t('发送中')} /> : null}
             {text ? (
-              <Pressable accessibilityHint="长按显示复制、选择文本等操作"
+              <Pressable accessibilityHint={t('长按显示复制、选择文本等操作')}
                 onLongPress={() => {
                   haptics.confirm();
                   setActionText(text);

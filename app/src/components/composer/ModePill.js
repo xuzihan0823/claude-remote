@@ -1,4 +1,5 @@
 import { Text, TouchableOpacity } from 'react-native';
+import { useI18n } from '../../lib/i18n.js';
 import { useTheme } from '../../theme.js';
 
 const MODE_LABELS = { default: '标准', acceptEdits: '自动编辑', plan: '规划', auto: '自动审核', bypassPermissions: 'Bypass' };
@@ -6,13 +7,15 @@ const MODE_LABELS = { default: '标准', acceptEdits: '自动编辑', plan: '规
 // 模式 pill：非 default 时 accent 边高亮。点击 onOpen 打开 sheet。
 // 对应 web/ui/components/mode-sheet.js 的 ModePill。
 export function ModePill({ mode, onOpen }) {
+  const { t } = useI18n();
   const { colors } = useTheme();
   const active = mode !== 'default';
+  const label = MODE_LABELS[mode] || '标准';
   return (
     <TouchableOpacity
       onPress={onOpen}
       accessibilityRole="button"
-      accessibilityLabel={`权限模式：${MODE_LABELS[mode] || '标准'}`}
+      accessibilityLabel={t('权限模式：{name}', { name: t(label) })}
       style={{
         borderRadius: 22,
         borderCurve: 'continuous',
@@ -26,7 +29,7 @@ export function ModePill({ mode, onOpen }) {
       }}
     >
       <Text style={{ color: active ? colors.accent : colors.ink, fontSize: 12.5, fontWeight: active ? '600' : '500' }}>
-        {MODE_LABELS[mode] || '标准'}
+        {t(label)}
       </Text>
     </TouchableOpacity>
   );

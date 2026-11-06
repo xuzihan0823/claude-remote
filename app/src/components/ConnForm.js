@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import { Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useTheme } from '../theme.js';
+import { useI18n } from '../lib/i18n.js';
 
 // 移植 web/ui/screens/setup.js 的 ConnForm：地址 TextInput + token TextInput + 提交按钮。
 // 文案照抄 web；视觉套 theme token。地址与 token 同表单状态由本组件持有，提交时 trim 后回传。
 export function ConnForm({ initBase, initToken, busy, submitLabel, onSubmit }) {
   const { colors, fonts, radius } = useTheme();
+  const { t } = useI18n();
   const [base, setBase] = useState(initBase);
   const [tok, setTok] = useState(initToken);
 
@@ -31,7 +33,7 @@ export function ConnForm({ initBase, initToken, busy, submitLabel, onSubmit }) {
   return (
     <View style={{ gap: 14 }}>
       <View style={{ gap: 4 }}>
-        <Text style={labelStyle}>服务器地址</Text>
+        <Text style={labelStyle}>{t('服务器地址')}</Text>
         <TextInput
           value={base}
           onChangeText={setBase}
@@ -43,10 +45,10 @@ export function ConnForm({ initBase, initToken, busy, submitLabel, onSubmit }) {
           placeholderTextColor={colors.ink3}
           style={inputStyle}
         />
-        <Text style={hintStyle}>Mac 的 Tailscale IP 或局域网 IP + 端口，cr 配对页（按 p）里有</Text>
+        <Text style={hintStyle}>{t('Mac 的 Tailscale IP 或局域网 IP + 端口，cr 配对页（按 p）里有')}</Text>
       </View>
       <View style={{ gap: 4 }}>
-        <Text style={labelStyle}>访问令牌</Text>
+        <Text style={labelStyle}>{t('访问令牌')}</Text>
         <TextInput
           value={tok}
           onChangeText={setTok}
@@ -58,7 +60,7 @@ export function ConnForm({ initBase, initToken, busy, submitLabel, onSubmit }) {
           placeholderTextColor={colors.ink3}
           style={inputStyle}
         />
-        <Text style={hintStyle}>Mac 上 ~/.claude-remote/config.env 里的 BRIDGE_TOKEN</Text>
+        <Text style={hintStyle}>{t('Mac 上 ~/.claude-remote/config.env 里的 BRIDGE_TOKEN')}</Text>
       </View>
       <TouchableOpacity
         onPress={submit}
@@ -76,7 +78,7 @@ export function ConnForm({ initBase, initToken, busy, submitLabel, onSubmit }) {
         }}
       >
         <Text style={{ color: '#fff', fontSize: 15.5, fontWeight: '500' }}>
-          {busy ? '连接中…' : submitLabel}
+          {busy ? t('连接中…') : submitLabel}
         </Text>
       </TouchableOpacity>
     </View>

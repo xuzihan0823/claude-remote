@@ -1,2 +1,105 @@
 // web/core 的英文词条（错误文案、设备、模型目录等）。
-export const en = {};
+export const en = {
+  // 模型目录
+  '未命名模型': 'Untitled model',
+  '{value}（不可用）': '{value} (Unavailable)',
+  '跟随项目默认': 'Follow project default',
+  '用户配置默认：{name}；实际运行遵循当前项目配置': 'User default: {name}. Runs follow the project config.',
+  '实际运行遵循当前项目配置': 'Runs follow the project config.',
+
+  // 思考程度
+  '跟随默认': 'Default',
+  '低': 'Low',
+  '中': 'Medium',
+  '高': 'High',
+  '超高': 'Extra high',
+  '最大': 'Max',
+  '遵循本机与项目当前思考配置': "Use the Mac and project's current reasoning settings",
+  '轻量思考，响应更快': 'Light reasoning for faster responses',
+  '均衡思考深度与速度': 'Balanced reasoning depth and speed',
+  '深入推理复杂问题': 'Deeper reasoning for complex problems',
+  '高强度深度思考': 'Intensive deep reasoning',
+  '最高思考程度，通常耗时更长': 'Maximum reasoning; usually takes longer',
+
+  // 通用错误原因
+  '会话不存在': 'Session not found',
+  '目标不存在': 'Not found',
+  '无法读取文件': "Couldn't read file",
+  '连接超时': 'Connection timed out',
+  '网络不可达': 'Network unreachable',
+  '设备离线': 'Device offline',
+  '连接繁忙': 'Connection busy',
+  '中继不可用': 'Relay unavailable',
+  '内容超过大小限制': 'Content exceeds size limit',
+  '参数无效': 'Invalid parameters',
+  '服务异常': 'Service error',
+  '请求失败': 'Request failed',
+  '{scope}：{reason}': '{scope}: {reason}',
+
+  // 模型运行
+  '模型运行：运行中断': 'Model run: Interrupted',
+  '模型运行：鉴权失败': 'Model run: Authentication failed',
+  '模型运行：模型不可用': 'Model run: Model unavailable',
+  '模型运行：请求过于频繁': 'Model run: Rate limited',
+  '模型运行：服务繁忙': 'Model run: Service busy',
+  '模型运行：连接中断': 'Model run: Connection lost',
+  '模型运行：{detail}': 'Model run: {detail}',
+
+  // 审批
+  '审批提交：请先完成作答': 'Approval: Answer all questions first',
+  '审批提交：参数无效': 'Approval: Invalid parameters',
+  '提交失败': "Couldn't submit",
+  '审批提交': 'Approval',
+  '标准审批': 'Standard approval',
+  '自动编辑': 'Auto-edit',
+  '规划': 'Plan',
+  '自动审核': 'Auto-review',
+  '{mode}，正在确认': '{mode}, confirming…',
+  '本轮已转为标准审批；CLI 未启用或已退出自动审核': 'This run switched to Standard approval; auto-review is off or the CLI exited',
+  '本轮：{mode}': 'This run: {mode}',
+  '未知模式（{mode}）': 'Unknown mode ({mode})',
+  '已手动拒绝该操作': 'Denied manually',
+  '审批已取消': 'Approval cancelled',
+  '审批超时未处理': 'Approval timed out',
+  '服务重启，审批已失效': 'Approval expired after restart',
+  '未收到有效的审批确认': 'No valid approval confirmation',
+  '审批结果无效': 'Invalid approval result',
+  '问题未作答': 'Question not answered',
+  '审批通道异常中断': 'Approval channel interrupted',
+
+  // 设备连接
+  '设备连接：令牌不正确': 'Device connection: Incorrect token',
+  '设备连接：Mac 端离线': 'Device connection: Mac offline',
+  '设备连接：连接繁忙': 'Device connection: Connection busy',
+  '设备连接：连接超时': 'Device connection: Connection timed out',
+  '设备连接：中继不可用': 'Device connection: Relay unavailable',
+  '设备连接：无法连接（请检查地址或网络）': 'Device connection: Unable to connect (check address or network)',
+  '设备连接': 'Device connection',
+
+  // 操作位置
+  '会话加载': 'Session load',
+  '历史消息': 'History',
+  '消息定位': 'Jump to message',
+  '停止运行': 'Stop run',
+  '解除占用': 'Release terminal',
+  '消息发送': 'Send message',
+  '新建会话': 'New session',
+  '项目列表': 'Projects',
+  '会话列表': 'Sessions',
+  '对话搜索': 'Search',
+
+  // 操作失败
+  '加载失败': 'Failed to load',
+  '定位失败': "Couldn't locate",
+  '停止失败': "Couldn't stop",
+  '解除失败': "Couldn't release",
+  '发送失败': "Couldn't send",
+  '创建失败': "Couldn't create",
+  '搜索失败': 'Search failed',
+
+  // 搜索命中位置
+  '标题': 'Title',
+  '路径': 'Path',
+  '最近消息': 'Recent message',
+  '正文': 'Content',
+};

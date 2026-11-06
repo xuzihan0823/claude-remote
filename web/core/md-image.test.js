@@ -73,6 +73,7 @@ function mountMdImage(initialProps, getSize) {
         effects[index] = { fn, deps, cleanup: prev?.cleanup, pending: true };
       }
     },
+    useI18n: () => ({ t: (text) => text }),
     useWindowDimensions: () => ({ width: 390, height: 844 }),
     resolveImageSrc: (href, o) => resolveImageSrc(href, { ...opt, ...o }),
     shouldAutoLoad: (src) => Boolean(src && (src.local || /^data:image\//i.test(src.uri))),

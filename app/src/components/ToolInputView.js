@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import { cwdTail } from '../lib/format.js';
+import { useI18n } from '../lib/i18n.js';
 import { toolView } from '../lib/tool-view.js';
 import { useTheme } from '../theme.js';
 
@@ -9,6 +10,7 @@ import { useTheme } from '../theme.js';
 
 function DiffRows({ rows }) {
   const { colors, fonts } = useTheme();
+  const { t } = useI18n();
   const bg = { '+': colors.diffAdd, '-': colors.diffDel };
   return (
     <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -19,7 +21,7 @@ function DiffRows({ rows }) {
               <View key={idx} style={{ height: 1, backgroundColor: colors.line, marginVertical: 6 }} />
             ) : (
               <Text key={idx} style={{ fontFamily: fonts.mono, fontSize: 11.5, color: colors.ink3, paddingVertical: 2, paddingHorizontal: 6 }}>
-                ⋯ {r.count} 行未改动
+                {t('⋯ {n} 行未改动', { n: r.count })}
               </Text>
             );
           }
@@ -62,6 +64,7 @@ const TODO_MARK = { completed: '☑', in_progress: '◐', pending: '☐' };
 
 export function ToolInputView({ name, input, maxHeight }) {
   const { colors, fonts, radius } = useTheme();
+  const { t } = useI18n();
   const view = useMemo(() => toolView(name, input), [name, input]);
   const [raw, setRaw] = useState(false);
 
@@ -182,7 +185,7 @@ export function ToolInputView({ name, input, maxHeight }) {
       ) : body}
       {view.kind !== 'json' ? (
         <TouchableOpacity onPress={() => setRaw((r) => !r)} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }} style={{ alignSelf: 'flex-end', marginTop: 6 }}>
-          <Text style={{ fontSize: 11.5, color: colors.ink3 }}>{raw ? '可读视图' : '原始参数'}</Text>
+          <Text style={{ fontSize: 11.5, color: colors.ink3 }}>{raw ? t('可读视图') : t('原始参数')}</Text>
         </TouchableOpacity>
       ) : null}
     </View>

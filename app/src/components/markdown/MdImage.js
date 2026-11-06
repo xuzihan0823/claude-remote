@@ -5,6 +5,8 @@ import { memo, useEffect, useState } from 'react';
 import { Image, Pressable, Text, TouchableOpacity, View, useWindowDimensions } from 'react-native';
 import { resolveImageSrc } from '../../../../web/core/md-image.js';
 import { isSafeHref } from '../../../../web/core/linkify.js';
+// 文案用模块级 t：本组件由 web/core/md-image.test.js 以源码挂载方式测试，不注入 i18n hook。
+import { useI18n } from '../../lib/i18n.js';
 import { openLink, shareLink } from '../../lib/links.js';
 import { Icon } from '../Icon.js';
 import { ImageViewer } from '../ImageViewer.js';
@@ -30,6 +32,7 @@ function remoteHost(uri) {
 }
 
 export const MdImage = memo(function MdImage({ href, alt, sessionId, ctx, inline }) {
+  const { t } = useI18n();
   const src = resolveImageSrc(href, { sessionId });
   const uri = src?.uri;
   const auto = shouldAutoLoad(src);
@@ -71,7 +74,7 @@ export const MdImage = memo(function MdImage({ href, alt, sessionId, ctx, inline
 
   if (!allowed) {
     const host = remoteHost(uri);
-    const label = alt ? `点击加载外部图片：${alt}` : '点击加载外部图片';
+    const label = alt ? t('点击加载外部图片：{alt}', { alt }) : t('点击加载外部图片');
     if (inline) {
       return (
         <Text
@@ -134,7 +137,7 @@ export const MdImage = memo(function MdImage({ href, alt, sessionId, ctx, inline
       <Pressable
         onPress={() => setOpen(true)}
         accessibilityRole="imagebutton"
-        accessibilityLabel={alt || '图片'}
+        accessibilityLabel={alt || t('图片')}
         style={{ marginVertical: inline ? 0 : 6, alignSelf: 'flex-start' }}
       >
         <Image
@@ -147,7 +150,7 @@ export const MdImage = memo(function MdImage({ href, alt, sessionId, ctx, inline
           }}
         />
       </Pressable>
-      <ImageViewer source={source} label={alt || '图片'} visible={open} onClose={() => setOpen(false)} />
+      <ImageViewer source={source} label={alt || t('图片')} visible={open} onClose={() => setOpen(false)} />
     </>
   );
 });
