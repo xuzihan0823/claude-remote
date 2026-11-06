@@ -165,6 +165,24 @@ export function connErrMsg(e) {
   if (e.code === 'network_timeout') return '连接超时（Mac 不可达）：检查 Mac 上 daemon 是否在跑，以及 Tailscale 或 relay 是否可用';
   return '无法连接 daemon（地址或网络错误）';
 }
+export function apiErrReason(e, fallback = '请求失败') {
+  const code = typeof e === 'string' ? e : e?.code;
+  const status = typeof e === 'object' && e ? e.status : 0;
+  if (code === 'session_not_found') return '会话不存在';
+  if (code === 'not_found' || status === 404) return '目标不存在';
+  if (code === 'network_timeout' || code === 'upstream_timeout' || code === 'idle_timeout' || status === 504) return '连接超时';
+  if (code === 'network_error') return '网络不可达';
+  if (code === 'device_offline' || code === 'device_disconnected') return '设备离线';
+  if (code === 'too_many_streams') return '连接繁忙';
+  if (code === 'upstream_reset' || code === 'upstream_protocol_error' || code === 'relay_closing' || status === 502 || status === 503) return '中继不可用';
+  if (code === 'payload_too_large' || status === 413) return '内容超过大小限制';
+  if (code === 'invalid_session_id' || code === 'invalid_before_seq' || code === 'invalid_query' || code === 'invalid_json' || code === 'bad_request' || status === 400) return '参数无效';
+  if (code === 'internal' || status >= 500) return '服务异常';
+  return fallback;
+}
+export function scopeErrMsg(scope, e, fallback = '请求失败') {
+  return `${scope}：${apiErrReason(e, fallback)}`;
+}
 
 export const sessionCache = new Map();
 export const pendingSessionMessages = new Map();

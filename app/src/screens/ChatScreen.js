@@ -4,7 +4,7 @@ import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSprin
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardChatScrollView, KeyboardStickyView } from 'react-native-keyboard-controller';
 import { useNavigation } from '@react-navigation/native';
-import { api, fetchSessions, pendingSessionMessages, sessionCache } from '../../../web/core/api.js';
+import { api, fetchSessions, pendingSessionMessages, scopeErrMsg, sessionCache } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
 import { getSessionMode, setSessionMode } from '../../../web/core/modes.js';
 import { emptyPermissionState, reducePermissionState, permissionStatusText, mergePermissionDenials } from '../../../web/core/permission-state.js';
@@ -85,9 +85,13 @@ export function ChatScreen({ route }) {
   const [permissionState, setPermissionState] = useState(emptyPermissionState);
   const permissionStateRef = useRef(permissionState);
   const updatePermissionState = useCallback((event) => {
-    const next = reducePermissionState(permissionStateRef.current, event);
+    const prev = permissionStateRef.current;
+    const next = reducePermissionState(prev, event);
     permissionStateRef.current = next;
     setPermissionState(next);
+    if (next.runId && next.requestedMode === 'auto' && next.effectiveMode === 'default' && (prev.runId !== next.runId || prev.effectiveMode !== 'default')) {
+      toast('权限模式：已转为标准审批', 'error');
+    }
   }, []);
   const [showJump, setShowJump] = useState(false);
   const [readingHistory, setReadingHistory] = useState(false);
@@ -183,7 +187,11 @@ export function ChatScreen({ route }) {
         setFirstSeq(d.firstSeq);
         setHasMore(d.hasMore);
       } catch (e) {
-        if (generation === loadGeneration.current) setLoadErr(e.code === 'session_not_found' ? '会话不存在' : `加载失败：${e.code}`);
+        if (generation === loadGeneration.current) {
+          const msg = scopeErrMsg('会话加载', e, '加载失败');
+          setLoadErr(msg);
+          if (e?.code !== 'unauthorized') toast(msg, 'error');
+        }
       } finally {
         if (generation === loadGeneration.current) setInitLoading(false);
       }
@@ -351,7 +359,7 @@ export function ChatScreen({ route }) {
       setHasMore(d.hasMore);
       addMsgs(d.messages);
     } catch (e) {
-      toast(`历史加载失败：${e.code}`, 'error');
+      if (e?.code !== 'unauthorized') toast(scopeErrMsg('历史消息', e, '加载失败'), 'error');
     } finally { loadingOlder.current = false; }
   }, [sessionId, hasMore, firstSeq, addMsgs]);
 
@@ -376,10 +384,12 @@ export function ChatScreen({ route }) {
         }
         const sorted = store.current.sorted;
         const i = findFocusIndex(sorted, focusSeq);
-        if (i < 0) { toast('没找到这条消息，可能已被改写', 'info'); return; }
+        if (i < 0) { toast('消息定位：未找到该消息', 'error'); return; }
         setFocusTarget({ key: msgKey(sorted[i]), nonce: focusNonce });
       } catch (e) {
-        if (!cancelled && generation === loadGeneration.current) toast(`定位失败：${e.code}`, 'error');
+        if (!cancelled && generation === loadGeneration.current && e?.code !== 'unauthorized') {
+          toast(scopeErrMsg('消息定位', e, '定位失败'), 'error');
+        }
       } finally { loadingOlder.current = false; }
     })();
     return () => { cancelled = true; };
@@ -494,7 +504,6 @@ export function ChatScreen({ route }) {
   const listFooter = (
     <View style={{ paddingVertical: 8 }}>
       {initLoading && !showPending ? <ActivityIndicator color={colors.ink2} /> : null}
-      {loadErr ? <Text style={{ textAlign: 'center', color: colors.danger, fontSize: 13 }}>{loadErr}</Text> : null}
       {!initLoading && !loadErr && !showPending && msgsDesc.length === 0 ? (
         <Text style={{ textAlign: 'center', color: colors.ink3, fontSize: 13 }}>（空会话）</Text>
       ) : null}
@@ -516,8 +525,8 @@ export function ChatScreen({ route }) {
         mode={mode}
         onModeChange={(m) => { setMode(m); setSessionMode(sessionId, m); }}
         showModeSelector
-        subtitle={permissionStatusText(permissionState)
-          ? <Text accessibilityLiveRegion="polite" style={{ color: permissionState.requestedMode === 'auto' && permissionState.effectiveMode === 'default' ? colors.danger : colors.ink2, fontSize: 12, marginTop: 4 }}>{permissionStatusText(permissionState)}</Text>
+        subtitle={permissionStatusText(permissionState) && !(permissionState.requestedMode === 'auto' && permissionState.effectiveMode === 'default')
+          ? <Text accessibilityLiveRegion="polite" style={{ color: colors.ink2, fontSize: 12, marginTop: 4 }}>{permissionStatusText(permissionState)}</Text>
           : mode === 'bypassPermissions' ? <Text style={{ color: colors.danger, fontSize: 11, marginTop: 4 }}>Bypass</Text> : null}
       />
 

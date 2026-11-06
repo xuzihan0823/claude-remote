@@ -11,8 +11,8 @@ globalThis.localStorage = {
 };
 const connection = await import('./api.js');
 const {
-  api, defaultModelDescription, fetchModels, fetchProjects, fetchSessions, getSessionModel, modelSelection, modelTriggerLabel, probeBase,
-  resetModelCache, saveConn, sessionCache, setSessionModel,
+  api, apiErrReason, defaultModelDescription, fetchModels, fetchProjects, fetchSessions, getSessionModel, modelSelection, modelTriggerLabel, probeBase,
+  resetModelCache, saveConn, scopeErrMsg, sessionCache, setSessionModel,
 } = connection;
 const { bus } = await import('./bus.js');
 after(() => {
@@ -144,4 +144,15 @@ test('default copy identifies user settings without promising the effective proj
   assert.equal(modelTriggerLabel(catalog, ''), '跟随项目默认');
   assert.equal(defaultModelDescription(catalog), '用户配置默认：provider/user-A；实际运行遵循当前项目配置');
   assert.equal(defaultModelDescription(null), '实际运行遵循当前项目配置');
+});
+
+test('scopeErrMsg labels the error location and maps raw error codes to concise Chinese reasons', () => {
+  assert.equal(scopeErrMsg('会话加载', { code: 'session_not_found' }, '加载失败'), '会话加载：会话不存在');
+  assert.equal(scopeErrMsg('会话加载', { code: 'network_timeout' }, '加载失败'), '会话加载：连接超时');
+  assert.equal(scopeErrMsg('历史消息', { code: 'upstream_timeout' }, '加载失败'), '历史消息：连接超时');
+  assert.equal(scopeErrMsg('历史消息', { code: 'network_error' }, '加载失败'), '历史消息：网络不可达');
+  assert.equal(scopeErrMsg('消息定位', { code: 'device_offline' }, '定位失败'), '消息定位：设备离线');
+  assert.equal(scopeErrMsg('消息定位', { status: 502, code: 'http_502' }, '定位失败'), '消息定位：中继不可用');
+  assert.equal(scopeErrMsg('会话加载', { status: 500, code: 'internal' }, '加载失败'), '会话加载：服务异常');
+  assert.equal(apiErrReason(new Error('unexpected'), '定位失败'), '定位失败');
 });

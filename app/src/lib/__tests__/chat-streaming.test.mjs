@@ -14,6 +14,7 @@ if (!globalThis.localStorage) {
   };
 }
 const { effortLabel, effortUsable, getSessionEffort, setSessionEffort } = await import('../../../../web/core/effort.js');
+const { scopeErrMsg } = await import('../../../../web/core/api.js');
 const screenSource = readFileSync(new URL('../../screens/ChatScreen.js', import.meta.url), 'utf8');
 const composerSource = readFileSync(new URL('../../components/composer/ChatComposer.js', import.meta.url), 'utf8');
 const newComposerSource = readFileSync(new URL('../../components/composer/NewChatComposer.js', import.meta.url), 'utf8');
@@ -84,7 +85,7 @@ function mount(source, start, end, exposed, initialProps, dependencies) {
 
 function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: false }), dependencies = {}) {
   const instance = mount(screenSource, 'export function ChatScreen({ route }) {', '  const kbOffset =',
-    'pending, onSendFailed, drafts, store, runActive, activeRunId, status, addMsgs, onSending, onSent, loadErr, initLoading, firstSeq, hasMore, permissionState, mode, setMode', {}, {
+    'pending, onSendFailed, drafts, store, runActive, activeRunId, status, addMsgs, onSending, onSent, loadErr, initLoading, firstSeq, hasMore, loadOlder, permissionState, mode, setMode', {}, {
       route: { params: { sessionId: 'session' } },
       useNavigation: () => ({}), useTheme: () => ({ colors: {} }), useSafeAreaInsets: () => ({}),
       sessionCache: new Map(), pendingSessionMessages: new Map(), getSessionMode: () => 'default',
@@ -94,7 +95,7 @@ function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: fals
       emptyPermissionState, reducePermissionState,
       toast() {}, setSessionMode() {}, PERMISSION_MODES: ['default'],
       haptics: { success() {} },
-      newClientMessageId, reconcilePending, sendFailureState,
+      newClientMessageId, reconcilePending, sendFailureState, scopeErrMsg,
       ...dependencies,
     });
   instance.render();
@@ -348,19 +349,26 @@ test('actual ChatScreen: old HTTP recovery cannot overwrite a new run or a newer
 
 test('actual ChatScreen: failed initial loading is repaired by reconnect, including paging', async () => {
   let fail = true;
+  const toasts = [];
   const page = screen(async () => {
     if (fail) throw { code: 'network_error' };
     return { messages: [user, answer], firstSeq: 1, hasMore: true };
+  }, {
+    toast: (msg, kind) => toasts.push({ msg, kind }),
   });
   page.effects();
   await new Promise(setImmediate);
-  assert.match(page.render().loadErr, /network_error/);
+  assert.equal(page.render().loadErr, '会话加载：网络不可达');
+  assert.deepEqual(toasts, [{ msg: '会话加载：网络不可达', kind: 'error' }]);
   fail = false;
   await page.emit('ws-open');
   assert.equal(page.render().loadErr, '');
   assert.equal(page.render().initLoading, false);
   assert.equal(page.render().firstSeq, 1);
   assert.equal(page.render().hasMore, true);
+  fail = true;
+  await page.render().loadOlder();
+  assert.deepEqual(toasts.at(-1), { msg: '历史消息：网络不可达', kind: 'error' });
   page.unmount();
 });
 
