@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { Appearance } from 'react-native';
 import { bus } from '../../../web/core/bus.js';
+import { applyLocale } from './i18n.js';
 import { createPrefsStore } from './prefs-store.js';
 
 export {
@@ -22,6 +23,7 @@ export function applyAppearance(v = store.get('appearance'), { animate = false }
 const store = createPrefsStore({
   onChange(next, name) {
     if (name === 'appearance') applyAppearance(next.appearance, { animate: true });
+    if (name === 'locale') applyLocale(next.locale);
     bus.emit('prefs', next);
   },
 });

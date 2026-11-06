@@ -7,6 +7,7 @@ import { DeviceDetailScreen } from './DeviceDetailScreen.js';
 import { AddDeviceScreen } from './AddDeviceScreen.js';
 import { AppearanceScreen } from './AppearanceScreen.js';
 import { FontSizeScreen } from './FontSizeScreen.js';
+import { LanguageScreen } from './LanguageScreen.js';
 import { DefaultModelScreen } from './DefaultModelScreen.js';
 import { PermissionModeScreen } from './PermissionModeScreen.js';
 import { QuickStartScreen } from './QuickStartScreen.js';
@@ -24,6 +25,7 @@ export function SettingsNavigator() {
       <Stack.Screen name="AddDevice" component={AddDeviceScreen} />
       <Stack.Screen name="Appearance" component={AppearanceScreen} />
       <Stack.Screen name="FontSize" component={FontSizeScreen} />
+      <Stack.Screen name="Language" component={LanguageScreen} />
       <Stack.Screen name="DefaultModel" component={DefaultModelScreen} />
       <Stack.Screen name="PermissionMode" component={PermissionModeScreen} />
       <Stack.Screen name="QuickStart" component={QuickStartScreen} />

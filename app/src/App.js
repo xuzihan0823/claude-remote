@@ -19,7 +19,8 @@ import {
 import { api } from '../../web/core/api.js';
 import { bus, toast, useBus } from '../../web/core/bus.js';
 import { candidateBases, currentDeviceId, displayName, getDevice, loadDevices, syncBases, updateDevice, upsertDevice } from '../../web/core/devices.js';
-import { applyAppearance } from './lib/prefs.js';
+import { applyAppearance, getPref } from './lib/prefs.js';
+import { applyLocale } from './lib/i18n.js';
 import { ws } from '../../web/core/ws.js';
 import { parseDeepLink } from './lib/deep-link.js';
 import { ConnActions } from './lib/conn-context.js';
@@ -41,6 +42,7 @@ SplashScreen.preventAutoHideAsync().catch(() => { /* noop */ });
 try { SplashScreen.setOptions({ duration: 0, fade: false }); } catch { /* 旧版本无此 API */ }
 const SPLASH_MAX_MS = 2500;
 applyAppearance(); // 设置里选的浅色 / 深色要在首帧前生效
+applyLocale(getPref('locale')); // 语言同理：首帧就要是用户选的语言（默认跟随系统）
 loadDevices(); // 旧版单连接数据迁移成设备列表 // 网络慢时最多等这么久，之后照常显示「连接中」
 ws.setAutoReselect(true); // 连接失败 / 半开时由 App 重新选通道（reselect）
 
