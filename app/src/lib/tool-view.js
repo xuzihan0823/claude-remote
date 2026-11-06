@@ -187,3 +187,13 @@ export function toolHeadline(name, input) {
   }
   return null;
 }
+
+/** 工具执行出错时折叠行上的首行摘要。 */
+export function toolErrorHeadline(text) {
+  const first = String(text ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!first) return '';
+  return first.length > 48 ? `${first.slice(0, 48)}…` : first;
+}

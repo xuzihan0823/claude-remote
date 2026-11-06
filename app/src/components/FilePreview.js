@@ -138,9 +138,9 @@ export function FilePreview({ sessionId, path, onClose }) {
 
   const share = useCallback(async (target, info) => {
     try {
-      if (!(await Sharing.isAvailableAsync())) { toast('当前设备不支持分享', 'error'); return; }
+      if (!(await Sharing.isAvailableAsync())) { toast('文件分享：设备不支持', 'error'); return; }
       await Sharing.shareAsync(target.uri, { mimeType: info.mime.split(';')[0], dialogTitle: info.name });
-    } catch { toast('保存失败', 'error'); }
+    } catch { toast('文件保存：保存失败', 'error'); }
   }, []);
 
   const download = useCallback(async (info, { shareAfter = false } = {}) => {

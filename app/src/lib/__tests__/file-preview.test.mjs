@@ -20,7 +20,9 @@ test('fileContentRequest：令牌只在请求头，路径编码后进查询参�
 
 test('错误码转成文案，未知错误有兜底', () => {
   assert.equal(fileErrorText('outside_workspace'), '文件不在项目目录内');
-  assert.equal(fileErrorText('network_error'), '无法读取文件');
+  assert.equal(fileErrorText('network_error'), '网络不可达');
+  assert.equal(fileErrorText('network_timeout'), '连接超时');
+  assert.equal(fileErrorText('unknown_code'), '无法读取文件');
 });
 
 test('PDF 只有 iOS 能预览，其余类型不受平台影响', () => {

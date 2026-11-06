@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { api, token, fetchModels, getSessionModel, modelSelection, setSessionModel } from '../../../../web/core/api.js';
+import { api, token, fetchModels, getSessionModel, modelSelection, scopeErrMsg, setSessionModel } from '../../../../web/core/api.js';
 import { newClientMessageId, sendFailureState } from '../../../../web/core/message-delivery.js';
 import { toast } from '../../../../web/core/bus.js';
 import { effortLabel, effortUsable, getSessionEffort, setSessionEffort } from '../../../../web/core/effort.js';
@@ -126,7 +126,7 @@ export function ChatComposer({
         toast('运行已结束', 'info');
       } else if (e.code !== 'unauthorized') {
         haptics.error();
-        toast(`停止失败：${e.code}`, 'error');
+        toast(scopeErrMsg('停止运行', e, '停止失败'), 'error');
       }
     }
   }, [sessionId, activeRunId, isRunning, stopping, onStopped, onStatusConflict, onRunMismatch]);
@@ -151,14 +151,14 @@ export function ChatComposer({
       if (e.code === 'terminal_alive') {
         onStatusConflict?.('terminal-driving');
         haptics.error();
-        toast('终端里的 Claude 还开着这个会话，请先在终端退出（/exit）', 'error');
+        toast('解除占用：请先在终端输入 /exit', 'error');
       } else if (e.code === 'run_mismatch') {
         onRunMismatch?.(e.data?.activeRunId ?? null, e.data?.status || 'daemon-driving');
         haptics.error();
-        toast('Claude 正在运行，无法解除占用', 'error');
+        toast('解除占用：Claude 正在运行', 'error');
       } else if (e.code !== 'unauthorized') {
         haptics.error();
-        toast(`解除失败：${e.code}`, 'error');
+        toast(scopeErrMsg('解除占用', e, '解除失败'), 'error');
       }
     }
   }, [sessionId, onStopped, onRunMismatch, onStatusConflict]);
@@ -170,11 +170,11 @@ export function ChatComposer({
   const doSend = useCallback(async () => {
     if (!hasContent || !canSend) return;
     if (modelSelection(catalog, modelOverride).status === 'unavailable') {
-      toast('所选模型已不可用，请重新选择', 'error');
+      toast('消息发送：所选模型不可用', 'error');
       return;
     }
     if (!effortOk) {
-      toast(`当前模型不支持思考程度「${effortLabel(effort)}」，请重新选择`, 'error');
+      toast(`消息发送：不支持思考程度「${effortLabel(effort)}」`, 'error');
       return;
     }
     const generation = sendGeneration.current;
@@ -211,20 +211,22 @@ export function ChatComposer({
         onSendFailed?.(e, context, posted);
         if (e.status === 409) {
           onStatusConflict?.(e.data?.status || null);
-          const why = e.data?.status === 'terminal-driving' ? '会话正在终端上使用'
+          const why = e.data?.status === 'terminal-driving' ? '终端正在使用该会话'
             : e.data?.status === 'daemon-driving' ? 'Claude 正在运行' : '会话被占用';
-          toast(`${why}，发送被拒`, 'error');
+          toast(`消息发送：${why}`, 'error');
         } else if (e.status === 413) {
-          toast(tooLargeMessage(e), 'error');
+          toast(tooLargeMessage(e, { hasFiles: delivery.files.length > 0 }), 'error');
+        } else if (e.code === 'attachment_read_failed') {
+          toast(e.file ? `附件读取：无法读取「${e.file}」` : '附件读取：无法读取文件', 'error');
         } else if (e.code === 'unknown_model') {
-          toast('该模型已不可用，请重新选择', 'error');
+          toast('消息发送：所选模型不可用', 'error');
           fetchModels().catch(() => {});
         } else if (e.code === 'invalid_effort') {
-          toast('思考程度参数无效，请重新选择', 'error');
+          toast('消息发送：思考程度参数无效', 'error');
         } else if (e.code === 'connection_changed') {
           toast('连接已切换，正在核对原消息状态', 'info');
         } else if (e.code !== 'unauthorized') {
-          toast(sendFailureState(e, posted) === 'unconfirmed' ? '发送状态不明，正在核对历史消息' : `发送失败：${e.code}`, 'error');
+          toast(sendFailureState(e, posted) === 'unconfirmed' ? '消息发送：状态未确认，正在核对' : scopeErrMsg('消息发送', e, '发送失败'), 'error');
         }
       } finally { sendLock.current = false; setSendBusy(false); setUploadProgress(null); }
     };

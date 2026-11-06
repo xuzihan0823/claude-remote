@@ -4,7 +4,7 @@ import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSprin
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardChatScrollView, KeyboardStickyView } from 'react-native-keyboard-controller';
 import { useNavigation } from '@react-navigation/native';
-import { api, fetchSessions, pendingSessionMessages, scopeErrMsg, sessionCache } from '../../../web/core/api.js';
+import { api, fetchSessions, pendingSessionMessages, runErrMsg, scopeErrMsg, sessionCache } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
 import { getSessionMode, setSessionMode } from '../../../web/core/modes.js';
 import { emptyPermissionState, reducePermissionState, permissionStatusText, mergePermissionDenials } from '../../../web/core/permission-state.js';
@@ -284,7 +284,7 @@ export function ChatScreen({ route }) {
         haptics.success();
       }
       applyRunState('idle');
-      if (e.state === 'error') toast(`运行出错：${e.error || '未知错误'}`, 'error');
+      if (e.state === 'error' && !/^aborted$/i.test(String(e.error || '').trim())) toast(runErrMsg(e.error), 'error');
     }
   }, [sessionId, updateDrafts, applyRunState]);
   // ---- resync：daemon 侧链视图失效，清空全量重拉

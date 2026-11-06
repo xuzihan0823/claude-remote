@@ -150,24 +150,30 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      let perm;
       try {
-        let perm = await MediaLibrary.getPermissionsAsync(false, ['photo']);
+        perm = await MediaLibrary.getPermissionsAsync(false, ['photo']);
         if (!perm.granted && perm.canAskAgain) {
           perm = await MediaLibrary.requestPermissionsAsync(false, ['photo']);
         }
-        if (cancelled) return;
-        if (!perm.granted) {
-          setPermState('denied');
-          setLoading(false);
-          return;
-        }
-        setPermState('granted');
-        await fetchPage(true);
-      } catch (e) {
+      } catch {
         if (!cancelled) {
-          toast(`读取相册失败：${e?.message || e}`, 'error');
-          setPermState('denied');
+          toast('相册：读取失败', 'error');
+          setLoading(false);
         }
+        return;
+      }
+      if (cancelled) return;
+      if (!perm?.granted) {
+        setPermState('denied');
+        setLoading(false);
+        return;
+      }
+      setPermState('granted');
+      try {
+        await fetchPage(true);
+      } catch {
+        if (!cancelled) toast('相册：读取失败', 'error');
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -226,9 +232,9 @@ export function PhotoGridPanel({ width, height, onBack, onAllPhotos, onConfirm }
         resolved.push(item);
       }
       onConfirm(resolved);
-    } catch (e) {
+    } catch {
       haptics.error();
-      toast(`照片处理失败：${e?.message || e}`, 'error');
+      toast('照片处理：转换失败', 'error');
       setSubmitting(false);
     }
   }, [selectedIds, submitting, onConfirm]);

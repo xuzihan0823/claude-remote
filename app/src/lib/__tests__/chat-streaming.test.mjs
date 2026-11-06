@@ -14,7 +14,7 @@ if (!globalThis.localStorage) {
   };
 }
 const { effortLabel, effortUsable, getSessionEffort, setSessionEffort } = await import('../../../../web/core/effort.js');
-const { scopeErrMsg } = await import('../../../../web/core/api.js');
+const { runErrMsg, scopeErrMsg } = await import('../../../../web/core/api.js');
 const screenSource = readFileSync(new URL('../../screens/ChatScreen.js', import.meta.url), 'utf8');
 const composerSource = readFileSync(new URL('../../components/composer/ChatComposer.js', import.meta.url), 'utf8');
 const newComposerSource = readFileSync(new URL('../../components/composer/NewChatComposer.js', import.meta.url), 'utf8');
@@ -95,7 +95,7 @@ function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: fals
       emptyPermissionState, reducePermissionState,
       toast() {}, setSessionMode() {}, PERMISSION_MODES: ['default'],
       haptics: { success() {} },
-      newClientMessageId, reconcilePending, sendFailureState, scopeErrMsg,
+      newClientMessageId, reconcilePending, sendFailureState, runErrMsg, scopeErrMsg,
       ...dependencies,
     });
   instance.render();
@@ -107,8 +107,10 @@ const stream = { sessionId: 'session', key: 'msg:0', offset: 0, text: '好的', 
 
 test('actual ChatScreen: replies vibrate once on completion, without feedback for streaming, history, other sessions or stale runs', async () => {
   const feedback = [];
+  const toasts = [];
   const page = screen(async () => ({ messages: [user, answer], firstSeq: 1, hasMore: false }), {
     haptics: { success: () => feedback.push('success') },
+    toast: (msg, kind) => toasts.push([msg, kind]),
   });
   page.effects();
   await new Promise(setImmediate);
@@ -126,10 +128,11 @@ test('actual ChatScreen: replies vibrate once on completion, without feedback fo
   page.emit('ws:run', { sessionId: 'session', state: 'started', runId: 'B' });
   page.emit('ws:run', { sessionId: 'session', state: 'done', runId: 'old' });
   page.emit('ws:run', { sessionId: 'session', state: 'error', runId: 'B', error: 'aborted' });
+  assert.deepEqual(toasts, []);
   page.emit('ws:run', { sessionId: 'session', state: 'started', runId: 'C' });
   page.emit('ws:run', { sessionId: 'session', state: 'error', runId: 'C', error: 'network_error' });
+  assert.deepEqual(toasts, [['模型运行：连接中断', 'error']]);
   assert.deepEqual(feedback, ['success']);
-  page.emit('ws:run', { sessionId: 'session', state: 'started', runId: 'D' });
   page.emit('ws:session-state', { sessionId: 'session', status: 'idle', activeRunId: null });
   page.emit('ws:run', { sessionId: 'session', state: 'done', runId: 'D' });
   assert.deepEqual(feedback, ['success', 'success'], 'idle snapshot may arrive before completion');
@@ -188,7 +191,7 @@ function composer(api, callbacks = {}, deps = {}) {
       getSessionModel: () => '', setSessionModel: () => {}, modelSelection: () => ({ status: 'default' }),
       fetchModels: async () => {},
       getSessionEffort, setSessionEffort, effortLabel, effortUsable,
-      token: 'test-token', newClientMessageId, sendFailureState,
+      token: 'test-token', newClientMessageId, sendFailureState, scopeErrMsg,
       api,
       uploadAttachments: async (files) => files, withAttachmentNote: (text) => text || '附件',
       haptics: { stop() {}, confirm() {}, tap() {}, selection() {}, success() {}, error() {} }, toast() {},
@@ -216,7 +219,7 @@ test('actual ChatComposer: terminal_alive keeps the session locked and explains 
   assert.equal(stopped, 0);
   assert.equal(instance.render().canSend, false);
   assert.deepEqual(statuses, ['terminal-driving']);
-  assert.deepEqual(events, ['error', ['终端里的 Claude 还开着这个会话，请先在终端退出（/exit）', 'error']]);
+  assert.deepEqual(events, ['error', ['解除占用：请先在终端输入 /exit', 'error']]);
 });
 
 test('actual ChatComposer: a stale release rejection cannot affect another session', async () => {
