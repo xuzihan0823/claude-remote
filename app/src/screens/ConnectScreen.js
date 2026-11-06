@@ -108,8 +108,6 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
                 <Animated.Text entering={EnterFade.duration(250)} style={{ color: statusColor, fontSize: 13.5 }}>
                   {phase === 'success' || phase === 'leaving' ? '✓ ' : ''}{statusText}
                 </Animated.Text>
-              ) : error ? (
-                <Text style={{ color: colors.danger, fontSize: 13.5, textAlign: 'center' }}>{error}</Text>
               ) : null}
             </View>
           </View>

@@ -65,7 +65,7 @@ export function DeviceDetailScreen({ navigation, route }) {
   };
 
   const removeAddress = (b) => {
-    if (d.bases.length <= 1) { toast('至少保留一个地址', 'info'); return; }
+    if (d.bases.length <= 1) { toast('地址管理：至少保留一个地址', 'info'); return; }
     Alert.alert('删除这个地址？', hostOf(b), [
       { text: '取消', style: 'cancel' },
       { text: '删除', style: 'destructive', onPress: () => { updateDevice(d.id, { bases: d.bases.filter((x) => x !== b) }); changed(); } },

@@ -50,3 +50,14 @@ export function approvalErrMsg(e) {
   }
   return scopeErrMsg('审批提交', e, '提交失败');
 }
+
+export function connErrMsg(e) {
+  const code = e?.code;
+  const status = e?.status || 0;
+  if (code === 'unauthorized' || status === 401) return '设备连接：令牌不正确';
+  if (code === 'device_offline' || code === 'device_disconnected') return '设备连接：Mac 端离线';
+  if (code === 'too_many_streams') return '设备连接：连接繁忙';
+  if (code === 'network_timeout' || code === 'upstream_timeout' || code === 'idle_timeout' || status === 504) return '设备连接：连接超时';
+  if (code === 'upstream_reset' || code === 'upstream_protocol_error' || code === 'relay_closing' || status === 502 || status === 503) return '设备连接：中继不可用';
+  return '设备连接：无法连接（请检查地址或网络）';
+}

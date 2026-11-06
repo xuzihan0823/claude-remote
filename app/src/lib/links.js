@@ -7,7 +7,7 @@ import { isSafeHref, resolveHref } from '../../../web/core/linkify.js';
 export function openLink(href) {
   if (!isSafeHref(href)) return;
   const target = resolveHref(href, baseUrl);
-  Linking.openURL(target).catch(() => toast('无法打开链接', 'error'));
+  Linking.openURL(target).catch(() => toast('链接打开：无法打开该链接', 'error'));
 }
 
 export function shareLink(href) {

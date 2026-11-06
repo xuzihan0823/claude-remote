@@ -6,7 +6,7 @@ globalThis.localStorage ??= {
   getItem: (key) => values.get(key) ?? null,
   setItem: (key, value) => values.set(key, String(value)),
 };
-const { probeBases, isRelayBase, DIRECT_GRACE_MS, PROBE_TIMEOUT_MS } = await import('./api.js');
+const { connErrMsg, probeBase, probeBases, isRelayBase, DIRECT_GRACE_MS, PROBE_TIMEOUT_MS } = await import('./api.js');
 
 const DIRECT_A = 'http://100.64.1.2:8787';
 const DIRECT_B = 'http://192.168.1.5:8787';
@@ -145,4 +145,17 @@ test('空候选与重复地址：空列表报 network_error，重复只探测一
   r.net.calls.get(DIRECT_A).ok();
   await flush();
   assert.deepEqual(r.outcome, { base: DIRECT_A });
+});
+
+test('probeBase 解析 relay JSON 错误码且 connErrMsg 输出简明位置与原因', async () => {
+  await assert.rejects(
+    probeBase(RELAY, 'tok', {
+      fetchImpl: async () => new Response(JSON.stringify({ error: 'device_offline' }), { status: 503 }),
+    }),
+    (e) => e.code === 'device_offline' && connErrMsg(e) === '设备连接：Mac 端离线',
+  );
+  assert.equal(connErrMsg({ code: 'unauthorized' }), '设备连接：令牌不正确');
+  assert.equal(connErrMsg({ code: 'network_timeout' }), '设备连接：连接超时');
+  assert.equal(connErrMsg({ status: 502, code: 'http_502' }), '设备连接：中继不可用');
+  assert.equal(connErrMsg({ code: 'network_error' }), '设备连接：无法连接（请检查地址或网络）');
 });
