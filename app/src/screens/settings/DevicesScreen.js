@@ -4,6 +4,7 @@ import { normalizeBase } from '../../../../web/core/api.js';
 import { hostOf } from '../../../../web/core/devices.js';
 import { useConnActions } from '../../lib/conn-context.js';
 import { useDevices } from '../../lib/useDevices.js';
+import { useI18n } from '../../lib/i18n.js';
 import { haptics } from '../../lib/haptics.js';
 import { QrScanner } from '../../components/QrScanner.js';
 import { useTheme } from '../../theme.js';
@@ -12,6 +13,7 @@ import { agoText } from './labels.js';
 import { DeviceFields, finishNewDevice } from './AddDeviceScreen.js';
 
 export function DevicesScreen({ navigation }) {
+  const { t } = useI18n();
   const { colors } = useTheme();
   const { switchDevice, tryConnectBases } = useConnActions();
   const { list, current } = useDevices();
@@ -39,10 +41,10 @@ export function DevicesScreen({ navigation }) {
     if (!ok) setSwitching(null);
   };
 
-  const onScan = async ({ token: t, bases }) => {
+  const onScan = async ({ token, bases }) => {
     setScanOpen(false);
     setScanBusy(true);
-    const ok = await tryConnectBases(bases, t, { beforeCommit: () => haptics.success() });
+    const ok = await tryConnectBases(bases, token, { beforeCommit: () => haptics.success() });
     if (ok) finishNewDevice('');
     else { setScanBusy(false); haptics.error(); }
   };
@@ -50,18 +52,18 @@ export function DevicesScreen({ navigation }) {
   const canSubmit = !!base.trim() && !!tok.trim() && !busy;
   const submitManual = async () => {
     const b = normalizeBase(base);
-    const t = tok.trim();
-    if (!b || !t || busy) return;
+    const token = tok.trim();
+    if (!b || !token || busy) return;
     setManualBusy(true);
-    const ok = await tryConnectBases([b], t, { manual: true, beforeCommit: () => haptics.success() });
+    const ok = await tryConnectBases([b], token, { manual: true, beforeCommit: () => haptics.success() });
     if (ok) finishNewDevice(name.trim());
     else { setManualBusy(false); haptics.error(); }
   };
 
   return (
-    <SettingsPage title="设备" keyboard>
+    <SettingsPage title={t('设备')} keyboard>
       {list.length ? (
-        <Group title="已配对" footer="点设备直接切换，点右侧 ⓘ 查看详情、改名或移除">
+        <Group title={t('已配对')} footer={t('点设备直接切换，点右侧 ⓘ 查看详情、改名或移除')}>
           {list.map((d) => {
             const on = d.id === current;
             return (
@@ -70,7 +72,7 @@ export function DevicesScreen({ navigation }) {
                 icon="laptop"
                 iconColor={on ? colors.ok : colors.ink3}
                 label={d.name}
-                sub={switching === d.id ? '连接中…' : on ? `${hostOf(d.lastBase || d.bases[0])} · 已连接` : `上次连接 ${agoText(d.lastConnectedAt) || '未知'}`}
+                sub={switching === d.id ? t('连接中…') : on ? t('{host} · 已连接', { host: hostOf(d.lastBase || d.bases[0]) }) : t('上次连接 {time}', { time: agoText(d.lastConnectedAt) || t('未知') })}
                 checked={on ? true : undefined}
                 disabled={busy}
                 onPress={on ? undefined : () => doSwitch(d.id)}
@@ -80,24 +82,24 @@ export function DevicesScreen({ navigation }) {
           })}
         </Group>
       ) : null}
-      <Group title="添加" footer={manualOpen ? '连接成功后会自动切到这台设备' : undefined}>
+      <Group title={t('添加')} footer={manualOpen ? t('连接成功后会自动切到这台设备') : undefined}>
         <Row
           icon="qr"
-          label="扫描配对二维码"
-          sub={scanBusy ? '连接中…' : '在 Mac 上运行 cr pair'}
+          label={t('扫描配对二维码')}
+          sub={scanBusy ? t('连接中…') : t('在 Mac 上运行 cr pair')}
           disabled={busy}
           onPress={() => setScanOpen(true)}
         />
         <Row
           icon="key"
-          label="手动输入地址和 Token"
+          label={t('手动输入地址和 Token')}
           chevron={manualOpen ? 'chevronUp' : 'chevron'}
           disabled={busy}
           onPress={toggleManual}
         />
         <Collapse open={manualOpen}>
           <DeviceFields name={name} setName={setName} base={base} setBase={setBase} tok={tok} setTok={setTok} onSubmit={submitManual} autoFocus />
-          <Row label={manualBusy ? '连接中…' : '连接并保存'} tone="accent" center disabled={!canSubmit} onPress={submitManual} />
+          <Row label={manualBusy ? t('连接中…') : t('连接并保存')} tone="accent" center disabled={!canSubmit} onPress={submitManual} />
         </Collapse>
       </Group>
 

@@ -9,6 +9,7 @@ export const DEFAULT_PREFS = {
   showThinking: true,
   toolsExpanded: false,
   defaultModel: '', // 新对话默认模型；'' = 跟随 Mac
+  locale: 'system', // system | zh | en
 };
 
 export const FONT_SCALES = [0.88, 0.94, 1, 1.08, 1.16];
@@ -24,6 +25,7 @@ const VALID = {
   showThinking: (v) => typeof v === 'boolean',
   toolsExpanded: (v) => typeof v === 'boolean',
   defaultModel: (v) => typeof v === 'string',
+  locale: (v) => ['system', 'zh', 'en'].includes(v),
 };
 
 /** 读出的值逐项校验，坏值 / 未知项回落默认，避免旧版本或手改的数据把界面弄坏。 */

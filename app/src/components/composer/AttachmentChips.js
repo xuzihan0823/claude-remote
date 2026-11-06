@@ -1,5 +1,6 @@
 import { Image, ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import { useTheme } from '../../theme.js';
+import { useI18n } from '../../lib/i18n.js';
 import { fmtBytes, truncate } from '../../lib/format.js';
 import { Icon } from '../Icon.js';
 
@@ -8,6 +9,7 @@ const hitSlop = { top: 6, bottom: 6, left: 6, right: 6 };
 
 // 附件列表：图片显示为大缩略图（右上角圆形 ✕），其他文件为名称 + 大小的 chip。横向滚动。
 export function AttachmentChips({ files, onRemove }) {
+  const { t } = useI18n();
   const { colors, fonts } = useTheme();
   if (!files || files.length === 0) return null;
   return (
@@ -28,7 +30,7 @@ export function AttachmentChips({ files, onRemove }) {
           <TouchableOpacity
             onPress={() => onRemove(i)}
             hitSlop={hitSlop}
-            accessibilityLabel="移除附件"
+            accessibilityLabel={t('移除附件')}
             style={{
               position: 'absolute', top: 6, right: 6, width: 26, height: 26, borderRadius: 13,
               backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center',
@@ -58,7 +60,7 @@ export function AttachmentChips({ files, onRemove }) {
           <TouchableOpacity
             onPress={() => onRemove(i)}
             hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
-            accessibilityLabel="移除附件"
+            accessibilityLabel={t('移除附件')}
             style={{ marginLeft: 6 }}
           >
             <Text style={{ color: colors.ink2, fontSize: 12 }}>✕</Text>

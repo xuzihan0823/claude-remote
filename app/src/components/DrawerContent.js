@@ -10,6 +10,7 @@ import { Spark } from './Spark.js';
 import { relTime, STATUS_LABEL, statusColor } from '../lib/format.js';
 import { useProjects } from '../lib/projects-context.js';
 import { shortPath } from '../lib/projects.js';
+import { useI18n } from '../lib/i18n.js';
 import { useProjectSessionGroups } from '../lib/use-project-session-groups.js';
 import { useSessionSearch } from '../lib/use-session-search.js';
 import { useDevices } from '../lib/useDevices.js';
@@ -29,6 +30,7 @@ function Highlight({ text, query, style, hlStyle }) {
 
 export function DrawerContent({ navigation, state }) {
   const { colors, fonts } = useTheme();
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const projects = useProjects();
   const list = useProjectSessionGroups(state);
@@ -57,13 +59,19 @@ export function DrawerContent({ navigation, state }) {
     const selected = s.sessionId === list.selectedSessionId;
     const dot = statusColor(colors, s.status) || colors.ink3;
     const field = s.match?.field;
+    const title = s.title || t('空会话');
     return (
       <Pressable
         onPress={() => { Keyboard.dismiss(); goChat(s.sessionId, s.match?.field === 'content' ? s.match.seq : undefined)(); }}
         testID={`search-row-${s.sessionId}`}
         accessibilityRole="button"
         accessibilityState={{ selected }}
-        accessibilityLabel={`${s.title || '空会话'}，${MATCH_LABEL[field] || ''}命中：${s.match?.snippet || ''}，${relTime(s.lastActiveAt)}`}
+        accessibilityLabel={t('{title}，{field}命中：{snippet}，{time}', {
+          title,
+          field: t(MATCH_LABEL[field] || ''),
+          snippet: s.match?.snippet || '',
+          time: relTime(s.lastActiveAt),
+        })}
         style={({ pressed }) => ({
           minHeight: 56, paddingVertical: 10, paddingHorizontal: 10, borderRadius: 10, borderCurve: 'continuous',
           backgroundColor: pressed || selected ? colors.glassPressed : 'transparent',
@@ -71,13 +79,13 @@ export function DrawerContent({ navigation, state }) {
       >
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           {field === 'title'
-            ? <Highlight text={s.title || '(空会话)'} query={query} style={{ flex: 1, color: colors.inkStrong, fontSize: 15 }} hlStyle={{ color: colors.accent, fontWeight: '600' }} />
-            : <Text numberOfLines={1} style={{ flex: 1, color: colors.inkStrong, fontSize: 15 }}>{s.title || '(空会话)'}</Text>}
+            ? <Highlight text={title} query={query} style={{ flex: 1, color: colors.inkStrong, fontSize: 15 }} hlStyle={{ color: colors.accent, fontWeight: '600' }} />
+            : <Text numberOfLines={1} style={{ flex: 1, color: colors.inkStrong, fontSize: 15 }}>{title}</Text>}
           <View style={{ width: 7, height: 7, borderRadius: 3.5, marginLeft: 10, backgroundColor: dot }} />
         </View>
         {field && field !== 'title' ? (
           <Highlight
-            text={`${MATCH_LABEL[field] || ''} · ${s.match.snippet}`}
+            text={`${t(MATCH_LABEL[field] || '')} · ${s.match.snippet}`}
             query={query}
             style={{ marginTop: 3, color: colors.ink2, fontSize: 12.5, lineHeight: 17 }}
             hlStyle={{ color: colors.accent, fontWeight: '600' }}
@@ -94,12 +102,12 @@ export function DrawerContent({ navigation, state }) {
   const searchFooter = (st.fullLoading || st.truncated || st.error) ? (
     st.error ? (
       <TouchableOpacity onPress={search.retry} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 10 }}>
-        <Text style={{ color: colors.danger, fontSize: 12.5 }}>{st.error} · 点击重试</Text>
+        <Text style={{ color: colors.danger, fontSize: 12.5 }}>{t('{error} · 点击重试', { error: st.error })}</Text>
       </TouchableOpacity>
     ) : (
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 12, paddingHorizontal: 10 }}>
         {st.fullLoading ? <ActivityIndicator size="small" color={colors.ink2} /> : null}
-        <Text style={{ color: colors.ink2, fontSize: 12 }}>{st.fullLoading ? '正在搜索对话正文…' : '历史太多，只搜了最近的部分'}</Text>
+        <Text style={{ color: colors.ink2, fontSize: 12 }}>{st.fullLoading ? t('正在搜索对话正文…') : t('历史太多，只搜了最近的部分')}</Text>
       </View>
     )
   ) : null;
@@ -113,7 +121,9 @@ export function DrawerContent({ navigation, state }) {
             onPress={() => list.toggle(group.id)}
             testID={`drawer-project-${group.id}`}
             accessibilityRole="button"
-            accessibilityLabel={`${group.title}，${group.sessionCount} 个对话${group.cwd ? `，工作目录 ${group.cwd}` : ''}`}
+            accessibilityLabel={group.cwd
+              ? t('{title}，{count} 个对话，工作目录 {cwd}', { title: group.title, count: group.sessionCount, cwd: group.cwd })
+              : t('{title}，{count} 个对话', { title: group.title, count: group.sessionCount })}
             accessibilityState={{ expanded: group.expanded }}
             style={({ pressed }) => ({
               flex: 1, minWidth: 0, minHeight: 44, paddingHorizontal: 10, paddingVertical: 9,
@@ -133,8 +143,8 @@ export function DrawerContent({ navigation, state }) {
               onPress={go(() => navigation.navigate('Main', { screen: 'Home', params: { fromCwd: group.cwd, nonce: Date.now() }, pop: true }))}
               testID={`drawer-project-new-${group.id}`}
               accessibilityRole="button"
-              accessibilityLabel={`在 ${group.title} 新建对话`}
-              accessibilityHint={`工作目录 ${shortPath(group.cwd)}，已有草稿会保留`}
+              accessibilityLabel={t('在 {title} 新建对话', { title: group.title })}
+              accessibilityHint={t('工作目录 {cwd}，已有草稿会保留', { cwd: shortPath(group.cwd) })}
               style={({ pressed }) => ({
                 width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 10,
                 backgroundColor: pressed ? colors.glassPressed : 'transparent',
@@ -149,9 +159,9 @@ export function DrawerContent({ navigation, state }) {
     if (item.type === 'footer') {
       const error = group.error || group.moreError;
       const busy = group.loading || group.loadingMore;
-      const label = error ? `${error} · 点击重试` : group.hasMore
-        ? `加载更早的对话（${group.sessions.length} / ${group.total}）`
-        : group.sessions.length ? '' : '这个项目还没有会话';
+      const label = error ? t('{error} · 点击重试', { error }) : group.hasMore
+        ? t('加载更早的对话（{loaded} / {total}）', { loaded: group.sessions.length, total: group.total })
+        : group.sessions.length ? '' : t('这个项目还没有会话');
       if (busy) return <ActivityIndicator style={{ minHeight: 44, justifyContent: 'center' }} color={colors.ink2} />;
       if (!label) return null;
       if (!error && !group.hasMore) return <Text style={{ paddingVertical: 14, paddingLeft: 34, color: colors.ink2, fontSize: 12 }}>{label}</Text>;
@@ -160,7 +170,7 @@ export function DrawerContent({ navigation, state }) {
           onPress={() => group.error ? list.retry(group.id) : list.loadMore(group.id)}
           testID={`drawer-project-more-${group.id}`}
           accessibilityRole="button"
-          accessibilityLabel={`${group.title}，${label}`}
+          accessibilityLabel={t('{title}，{label}', { title: group.title, label })}
           style={{ minHeight: 44, justifyContent: 'center', paddingVertical: 10, paddingLeft: 34, paddingRight: 12 }}
         >
           <Text style={{ color: error ? colors.danger : colors.ink2, fontSize: 12.5 }}>{label}</Text>
@@ -177,7 +187,12 @@ export function DrawerContent({ navigation, state }) {
         testID={`session-row-${s.sessionId}`}
         accessibilityRole="button"
         accessibilityState={{ selected }}
-        accessibilityLabel={`${s.title || '空会话'}，${s.cwd || '未归类'}，${STATUS_LABEL[s.status] || '状态未知'}，${relTime(s.lastActiveAt)}`}
+        accessibilityLabel={t('{title}，{cwd}，{status}，{time}', {
+          title: s.title || t('空会话'),
+          cwd: s.cwd || t('未归类'),
+          status: t(STATUS_LABEL[s.status] || '状态未知'),
+          time: relTime(s.lastActiveAt),
+        })}
         style={({ pressed }) => ({
           minHeight: 52, marginLeft: 24, paddingVertical: 10, paddingHorizontal: 10,
           borderRadius: 10, borderCurve: 'continuous',
@@ -186,7 +201,7 @@ export function DrawerContent({ navigation, state }) {
       >
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <Text numberOfLines={1} ellipsizeMode="tail" style={{ flex: 1, color: colors.inkStrong, fontSize: 15, letterSpacing: -0.1 }}>
-            {s.title || '(空会话)'}
+            {s.title || t('空会话')}
           </Text>
           <View style={{ width: 7, height: 7, borderRadius: 3.5, marginLeft: 10, backgroundColor: dot }} />
         </View>
@@ -210,7 +225,7 @@ export function DrawerContent({ navigation, state }) {
           <Pressable
             onPress={projects.refresh}
             testID="drawer-refresh"
-            accessibilityLabel="刷新会话列表"
+            accessibilityLabel={t('刷新会话列表')}
             accessibilityRole="button"
             style={({ pressed }) => ({
               width: 44,
@@ -234,21 +249,21 @@ export function DrawerContent({ navigation, state }) {
         <TextInput
           value={query}
           onChangeText={onQuery}
-          placeholder="搜索对话"
+          placeholder={t('搜索对话')}
           placeholderTextColor={colors.ink2}
           returnKeyType="search"
           autoCorrect={false}
           autoCapitalize="none"
           clearButtonMode="while-editing"
           testID="drawer-search"
-          accessibilityLabel="搜索对话"
+          accessibilityLabel={t('搜索对话')}
           style={{ flex: 1, color: colors.inkStrong, fontSize: 15, paddingVertical: 0 }}
         />
       </View>
 
       {projects.catalogError && !projects.catalogLoaded && !searching ? (
-        <TouchableOpacity onPress={projects.refresh} accessibilityRole="button" accessibilityLabel={`${projects.catalogError}，重试`} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 18 }}>
-          <Text style={{ color: colors.danger, fontSize: 13 }}>{projects.catalogError} · 点击重试</Text>
+        <TouchableOpacity onPress={projects.refresh} accessibilityRole="button" accessibilityLabel={t('{error}，重试', { error: projects.catalogError })} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 18 }}>
+          <Text style={{ color: colors.danger, fontSize: 13 }}>{t('{error} · 点击重试', { error: projects.catalogError })}</Text>
         </TouchableOpacity>
       ) : null}
       {searching ? (
@@ -263,7 +278,7 @@ export function DrawerContent({ navigation, state }) {
           ListFooterComponent={searchFooter}
           ListEmptyComponent={st.loading ? <ActivityIndicator style={{ padding: 16 }} color={colors.ink2} />
             : st.fullLoading || st.error ? null
-              : <Text style={{ padding: 16, color: colors.ink2, fontSize: 13, textAlign: 'center' }}>没有找到相关对话</Text>}
+              : <Text style={{ padding: 16, color: colors.ink2, fontSize: 13, textAlign: 'center' }}>{t('没有找到相关对话')}</Text>}
         />
       ) : (
       <FlatList
@@ -275,7 +290,7 @@ export function DrawerContent({ navigation, state }) {
         ListEmptyComponent={!projects.catalogLoaded ? (
           projects.catalogError ? null : <ActivityIndicator style={{ padding: 16 }} color={colors.ink2} />
         ) : (
-          <Text style={{ padding: 16, color: colors.ink2, fontSize: 13, textAlign: 'center' }}>没有会话</Text>
+          <Text style={{ padding: 16, color: colors.ink2, fontSize: 13, textAlign: 'center' }}>{t('没有会话')}</Text>
         )}
       />
       )}
@@ -299,7 +314,7 @@ export function DrawerContent({ navigation, state }) {
             onPress={goSettings}
             accessibilityRole="button"
             testID="drawer-settings"
-            accessibilityLabel={curDevice ? `设置，当前设备 ${curDevice.name}` : '设置'}
+            accessibilityLabel={curDevice ? t('设置，当前设备 {device}', { device: curDevice.name }) : t('设置')}
             style={({ pressed }) => ({
               height: 50,
               borderRadius: 25,
@@ -313,7 +328,7 @@ export function DrawerContent({ navigation, state }) {
           >
             <Icon name="settings" size={19} color={colors.ink} />
             <Text numberOfLines={1} style={{ flexShrink: 1, color: colors.inkStrong, fontSize: 14, fontWeight: '600' }}>
-              {curDevice ? curDevice.name : '设置'}
+              {curDevice ? curDevice.name : t('设置')}
             </Text>
             <View style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: connDotColor }} />
           </Pressable>
@@ -323,7 +338,7 @@ export function DrawerContent({ navigation, state }) {
           onPress={goNew}
           accessibilityRole="button"
           testID="drawer-new-chat"
-          accessibilityLabel="新对话"
+          accessibilityLabel={t('新对话')}
           style={({ pressed }) => ({
             height: 50,
             borderRadius: 25,
@@ -338,7 +353,7 @@ export function DrawerContent({ navigation, state }) {
         >
           <Icon name="plus" size={18} strokeWidth={2.1} color="#FFFFFF" />
           <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '600' }}>
-            新对话
+            {t('新对话')}
           </Text>
         </Pressable>
       </View>

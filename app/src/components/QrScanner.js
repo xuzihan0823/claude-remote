@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Linking, Modal, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useI18n } from '../lib/i18n.js';
 import { parseDeepLink } from '../lib/deep-link.js';
 
 // App 内扫码配对：读 Mac 上 `cr` 配对页（按 p）的二维码，内容是 claude-remote://setup?... 深链。
@@ -23,6 +24,7 @@ function Corners({ color }) {
 
 /** onResult({ token, bases }) 在识别到有效配对码时调用一次，随后弹窗关闭。 */
 export function QrScanner({ visible, onClose, onResult }) {
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const [hint, setHint] = useState('');
   const [found, setFound] = useState(false);
@@ -53,18 +55,24 @@ export function QrScanner({ visible, onClose, onResult }) {
   const accent = '#D97757';
   let body;
   if (!cam) {
-    body = <Text style={{ color: '#fff', textAlign: 'center', lineHeight: 22 }}>当前安装包没有相机模块，需要重新编译 App。{'\n'}也可以用系统相机扫码，或手动输入地址。</Text>;
+    body = (
+      <Text style={{ color: '#fff', textAlign: 'center', lineHeight: 22 }}>
+        {t('当前安装包没有相机模块，需要重新编译 App。')}
+        {'\n'}
+        {t('也可以用系统相机扫码，或手动输入地址。')}
+      </Text>
+    );
   } else if (!permission) {
     body = null;
   } else if (!permission.granted) {
     body = (
       <View style={{ alignItems: 'center', gap: 14 }}>
-        <Text style={{ color: '#fff', textAlign: 'center', lineHeight: 22 }}>需要相机权限才能扫码</Text>
+        <Text style={{ color: '#fff', textAlign: 'center', lineHeight: 22 }}>{t('需要相机权限才能扫码')}</Text>
         <TouchableOpacity
           onPress={() => (permission.canAskAgain ? requestPermission() : Linking.openSettings())}
           style={{ backgroundColor: accent, borderRadius: 22, paddingHorizontal: 22, paddingVertical: 11 }}
         >
-          <Text style={{ color: '#fff', fontSize: 15, fontWeight: '500' }}>{permission.canAskAgain ? '允许使用相机' : '去设置里打开'}</Text>
+          <Text style={{ color: '#fff', fontSize: 15, fontWeight: '500' }}>{permission.canAskAgain ? t('允许使用相机') : t('去设置里打开')}</Text>
         </TouchableOpacity>
       </View>
     );
@@ -89,13 +97,13 @@ export function QrScanner({ visible, onClose, onResult }) {
         <View style={{ width: 40, height: 5, borderRadius: 3, backgroundColor: '#5a5854' }} />
         <View style={{ width: '100%', flexDirection: 'row', justifyContent: 'flex-end', paddingHorizontal: 20 }}>
           <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Text style={{ color: '#cfccc6', fontSize: 15 }}>取消</Text>
+            <Text style={{ color: '#cfccc6', fontSize: 15 }}>{t('取消')}</Text>
           </TouchableOpacity>
         </View>
-        <Text style={{ color: '#fff', fontSize: 17, fontWeight: '500', marginTop: 18 }}>对准 Mac 上的二维码</Text>
-        <Text style={{ color: '#a9a59d', fontSize: 13, marginTop: 6 }}>在 Mac 上运行 cr，按 p 显示配对二维码</Text>
+        <Text style={{ color: '#fff', fontSize: 17, fontWeight: '500', marginTop: 18 }}>{t('对准 Mac 上的二维码')}</Text>
+        <Text style={{ color: '#a9a59d', fontSize: 13, marginTop: 6 }}>{t('在 Mac 上运行 cr，按 p 显示配对二维码')}</Text>
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 30 }}>{body}</View>
-        <Text style={{ color: found ? '#6BAA6A' : '#e08f78', fontSize: 13.5, minHeight: 20 }}>{found ? '✓ 已识别' : hint}</Text>
+        <Text style={{ color: found ? '#6BAA6A' : '#e08f78', fontSize: 13.5, minHeight: 20 }}>{found ? `✓ ${t('已识别')}` : t(hint)}</Text>
       </View>
     </Modal>
   );

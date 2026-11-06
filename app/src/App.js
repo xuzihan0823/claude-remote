@@ -19,7 +19,8 @@ import {
 import { api } from '../../web/core/api.js';
 import { bus, toast, useBus } from '../../web/core/bus.js';
 import { candidateBases, currentDeviceId, displayName, getDevice, loadDevices, syncBases, updateDevice, upsertDevice } from '../../web/core/devices.js';
-import { applyAppearance } from './lib/prefs.js';
+import { applyAppearance, getPref } from './lib/prefs.js';
+import { applyLocale, t } from './lib/i18n.js';
 import { ws } from '../../web/core/ws.js';
 import { parseDeepLink } from './lib/deep-link.js';
 import { ConnActions } from './lib/conn-context.js';
@@ -41,6 +42,7 @@ SplashScreen.preventAutoHideAsync().catch(() => { /* noop */ });
 try { SplashScreen.setOptions({ duration: 0, fade: false }); } catch { /* 旧版本无此 API */ }
 const SPLASH_MAX_MS = 2500;
 applyAppearance(); // 设置里选的浅色 / 深色要在首帧前生效
+applyLocale(getPref('locale')); // 语言同理：首帧就要是用户选的语言（默认跟随系统）
 loadDevices(); // 旧版单连接数据迁移成设备列表 // 网络慢时最多等这么久，之后照常显示「连接中」
 ws.setAutoReselect(true); // 连接失败 / 半开时由 App 重新选通道（reselect）
 
@@ -99,7 +101,7 @@ export default function App() {
     localStorage.removeItem(TOKEN_KEY);
     setAuth('need');
     setAuthErr('');
-    toast('登录状态：令牌已失效，请重新配对', 'error');
+    toast(t('登录状态：令牌已失效，请重新配对'), 'error');
   }, []);
   useBus('logout', () => {
     ws.stop();
@@ -201,7 +203,7 @@ export default function App() {
     const d = getDevice(id);
     if (!d) return false;
     const ok = await tryConnectBases(candidateBases(d), d.token);
-    if (ok) toast(`已切换到 ${getDevice(id)?.name || d.name}`, 'info');
+    if (ok) toast(t('已切换到 {name}', { name: getDevice(id)?.name || d.name }), 'info');
     return ok;
   }, [tryConnectBases]);
 
@@ -271,7 +273,7 @@ export default function App() {
   const handleUrl = useCallback((url) => {
     if (!url || !url.startsWith('claude-remote:')) return;
     const link = parseDeepLink(url);
-    if (!link) { toast('链接打开：无法识别的配对链接', 'error'); return; }
+    if (!link) { toast(t('链接打开：无法识别的配对链接'), 'error'); return; }
     if (link.type === 'setup') { setPairReq({ token: link.token, bases: link.bases }); return; }
     pendingLinkRef.current = link;
     flushLink();
@@ -287,7 +289,7 @@ export default function App() {
     setPairBusy(true);
     const ok = await tryConnectBases(pairReq.bases, pairReq.token);
     setPairBusy(false);
-    if (ok) { setPairReq(null); toast(`已连接 ${connHost()}`, 'info'); }
+    if (ok) { setPairReq(null); toast(t('已连接 {host}', { host: connHost() }), 'info'); }
   }, [pairReq, pairBusy, tryConnectBases]);
 
   const navTheme = {

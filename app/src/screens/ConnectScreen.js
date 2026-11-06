@@ -11,6 +11,7 @@ import { FadeIn } from '../components/FadeIn.js';
 import { Icon } from '../components/Icon.js';
 import { QrScanner } from '../components/QrScanner.js';
 import { haptics } from '../lib/haptics.js';
+import { useI18n } from '../lib/i18n.js';
 import { introDelay, setHandoff, takeIntro } from '../lib/intro.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -25,6 +26,7 @@ const hostOf = (base) => String(base || '').replace(/^[a-z]+:\/\//i, '').replace
 // 切到首页之前调用，用来播放上面的成功衔接。
 export function ConnectScreen({ busy, error, onSubmit, onScan }) {
   const { colors, fonts } = useTheme();
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const reduceMotion = useReducedMotion();
   // 冷启动带 token 自动重连时（busy）不抢开屏，留给首页绽放
@@ -69,8 +71,8 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
   const submitScan = ({ token: tok, bases }) => run(hostOf(bases?.[0]), (opts) => onScan(bases, tok, opts));
 
   const statusText = phase === 'success' || phase === 'leaving'
-    ? `已连接 ${target}`.trim()
-    : `正在连接${target ? ` ${target}` : ''}…`;
+    ? (target ? t('已连接 {host}', { host: target }) : t('已连接'))
+    : (target ? t('正在连接 {host}…', { host: target }) : t('正在连接…'));
   const statusColor = phase === 'success' || phase === 'leaving' ? colors.ok : colors.ink2;
   const titleHidden = phase === 'leaving';
 
@@ -100,7 +102,7 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
             </FadeIn>
             {view === 'choose' ? (
               <FadeIn play={intro} delay={650 + d0}>
-                <Text style={{ color: colors.ink2, fontSize: 15, marginTop: 8 }}>连接你 Mac 上的 Claude Code</Text>
+                <Text style={{ color: colors.ink2, fontSize: 15, marginTop: 8 }}>{t('连接你 Mac 上的 Claude Code')}</Text>
               </FadeIn>
             ) : null}
             <View style={{ minHeight: 44, justifyContent: 'center' }}>
@@ -123,7 +125,7 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
                 style={{ flexDirection: 'row', gap: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accent, borderRadius: 26, paddingVertical: 15 }}
               >
                 <Icon name="scan" size={20} color="#fff" />
-                <Text style={{ color: '#fff', fontSize: 16, fontWeight: '500' }}>扫码连接</Text>
+                <Text style={{ color: '#fff', fontSize: 16, fontWeight: '500' }}>{t('扫码连接')}</Text>
               </TouchableOpacity>
             </FadeIn>
             <FadeIn play={intro} delay={880 + d0} dy={14}>
@@ -133,7 +135,7 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
                 accessibilityRole="button"
                 style={{ alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line, borderRadius: 26, paddingVertical: 14 }}
               >
-                <Text style={{ color: colors.ink, fontSize: 15.5 }}>输入地址和令牌</Text>
+                <Text style={{ color: colors.ink, fontSize: 15.5 }}>{t('输入地址和令牌')}</Text>
               </TouchableOpacity>
             </FadeIn>
           </Animated.View>
@@ -142,10 +144,10 @@ export function ConnectScreen({ busy, error, onSubmit, onScan }) {
         {showForm && view === 'manual' ? (
           <Animated.View entering={EnterFade.duration(250)} exiting={ExitFade.duration(200)} style={{ marginTop: 8 }}>
             <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line, borderRadius: 20, padding: 18 }}>
-              <ConnForm initBase={baseUrl} initToken="" busy={false} submitLabel="连接" onSubmit={submitManual} />
+              <ConnForm initBase={baseUrl} initToken="" busy={false} submitLabel={t('连接')} onSubmit={submitManual} />
             </View>
             <TouchableOpacity onPress={() => setView('choose')} style={{ alignSelf: 'center', paddingVertical: 14 }} hitSlop={{ top: 6, bottom: 6, left: 10, right: 10 }}>
-              <Text style={{ color: colors.ink2, fontSize: 14 }}>← 返回扫码</Text>
+              <Text style={{ color: colors.ink2, fontSize: 14 }}>← {t('返回扫码')}</Text>
             </TouchableOpacity>
           </Animated.View>
         ) : null}

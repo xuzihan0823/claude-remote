@@ -4,12 +4,14 @@ import { Icon } from './Icon.js';
 import { useTheme } from '../theme.js';
 import { fmtBytes } from '../lib/format.js';
 import { fetchFileMeta, fileErrorText } from '../lib/file-preview.js';
+import { useI18n } from '../lib/i18n.js';
 
 const KIND_LABEL = { html: '网页', image: '图片', text: '文本', markdown: 'Markdown', pdf: 'PDF', none: '文件' };
 const KIND_ICON = { image: 'image' };
 
 export function FileCard({ sessionId, path, onOpen }) {
   const { colors, fonts } = useTheme();
+  const { t } = useI18n();
   const [meta, setMeta] = useState(null);
   const [error, setError] = useState(null);
 
@@ -25,11 +27,11 @@ export function FileCard({ sessionId, path, onOpen }) {
 
   const name = meta?.name || path.split('/').pop();
   const detail = error ? fileErrorText(error)
-    : meta ? `${fmtBytes(meta.sizeBytes)} · ${KIND_LABEL[meta.previewKind] || KIND_LABEL.none}` : '正在读取文件信息';
+    : meta ? `${fmtBytes(meta.sizeBytes)} · ${t(KIND_LABEL[meta.previewKind] || KIND_LABEL.none)}` : t('正在读取文件信息');
   return (
     <TouchableOpacity
       accessibilityRole="button"
-      accessibilityLabel={`打开文件 ${name}`}
+      accessibilityLabel={t('打开文件 {name}', { name })}
       disabled={Boolean(error)}
       onPress={() => onOpen(path)}
       style={{ flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 56, paddingHorizontal: 12, paddingVertical: 8,

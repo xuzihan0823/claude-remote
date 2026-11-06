@@ -1,5 +1,6 @@
 // 手机端附件：选择结果归一 + 上传（新建会话与已有会话共用）。不依赖 RN，可在 node 下测试。
 import { api, ApiError, baseUrl, token } from '../../../web/core/api.js';
+import { t } from './i18n.js';
 
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // 与 daemon UPLOAD_LIMIT_BYTES 一致
 
@@ -173,6 +174,6 @@ export async function uploadAttachments(files, endpoint, { onProgress } = {}) {
 
 /** 413 的提示文案：带上是哪个文件。 */
 export function tooLargeMessage(e, { hasFiles = true } = {}) {
-  if (e?.file) return `附件上传：「${e.file}」超过 25MB`;
-  return hasFiles ? '附件上传：文件超过 25MB' : '消息发送：消息内容过长';
+  if (e?.file) return t('附件上传：「{name}」超过 25MB', { name: e.file });
+  return hasFiles ? t('附件上传：文件超过 25MB') : t('消息发送：消息内容过长');
 }

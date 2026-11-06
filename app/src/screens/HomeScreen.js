@@ -16,6 +16,7 @@ import { useReducedMotion } from 'react-native-reanimated';
 import { BloomSpark } from '../components/Spark.js';
 import { FadeIn } from '../components/FadeIn.js';
 import { introDelay, takeHandoff, takeIntro } from '../lib/intro.js';
+import { useI18n } from '../lib/i18n.js';
 import { NewChatComposer } from '../components/composer/NewChatComposer.js';
 import { useTheme } from '../theme.js';
 
@@ -23,11 +24,12 @@ import { useTheme } from '../theme.js';
 // 新建目标 cwd 来自共享项目上下文（显式选择 / 抽屉所选项目 / 从会话继承），不取 projects[0]。
 export function HomeScreen() {
   const { colors } = useTheme();
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const route = useRoute();
   const hour = new Date().getHours();
-  const greet = hour < 5 ? '夜深了。' : hour < 12 ? '早上好。' : hour < 18 ? '下午好。' : '晚上好。';
+  const greet = hour < 5 ? t('夜深了。') : hour < 12 ? t('早上好。') : hour < 18 ? t('下午好。') : t('晚上好。');
 
   // 冷启动第一次进入首页时播放开屏：芒星原位绽放，其余元素依次渐入（系统开了「减弱动态效果」则跳过）
   const reduceMotion = useReducedMotion();
@@ -53,7 +55,7 @@ export function HomeScreen() {
   const owner = projectForCwd(catalog.projects, target);
   const ownerTitle = owner ? projectTitles(catalog.projects).get(owner.id) : '';
   const cwdLabel = !target ? '' : isHome
-    ? '主目录 (~)'
+    ? t('主目录 (~)')
     : owner && owner.cwds.length > 1
       ? `${ownerTitle} · ${pathTail(target, 1)}`
       : ownerTitle || pathTail(target);
@@ -92,7 +94,7 @@ export function HomeScreen() {
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, maxWidth: '100%' }}>
             <Icon name="folder" size={13} color={target && cwdKnown ? colors.ink3 : colors.danger} />
             <Text numberOfLines={1} ellipsizeMode="middle" style={{ flexShrink: 1, color: target && cwdKnown ? colors.ink2 : colors.danger, fontSize: 12.5 }}>
-              {!target ? '未选择工作目录' : cwdKnown ? cwdLabel : `${cwdLabel}（不可用）`}
+              {!target ? t('未选择工作目录') : cwdKnown ? cwdLabel : t('{cwd}（不可用）', { cwd: cwdLabel })}
             </Text>
           </View>
         ) : null}
@@ -105,7 +107,7 @@ export function HomeScreen() {
           <Text style={{ color: colors.inkStrong, fontSize: 32, fontWeight: '400', letterSpacing: -0.8 }}>{greet}</Text>
         </FadeIn>
         <FadeIn play={intro} delay={700 + d0}>
-          <Text style={{ color: colors.ink2, fontSize: 15, marginTop: 12 }}>在手机上，继续你的工作。</Text>
+          <Text style={{ color: colors.ink2, fontSize: 15, marginTop: 12 }}>{t('在手机上，继续你的工作。')}</Text>
         </FadeIn>
       </ScrollView>
 

@@ -3,11 +3,13 @@ import { Keyboard, Text, TouchableOpacity, View } from 'react-native';
 import { modelSelection, modelTriggerLabel } from '../../../../web/core/api.js';
 import { GlassMenu } from '../GlassMenu.js';
 import { buildModelMenuItems } from './ModelSheet.js';
+import { useI18n } from '../../lib/i18n.js';
 import { useTheme } from '../../theme.js';
 import { haptics } from '../../lib/haptics.js';
 
 // 模型胶囊：点击在按钮上方弹出液态玻璃菜单选模型，收起时以水滴形态缩回胶囊。
 export function ModelPicker({ value, onChange, catalog, onOpen }) {
+  const { t } = useI18n();
   const { colors } = useTheme();
   const anchorRef = useRef(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -31,7 +33,7 @@ export function ModelPicker({ value, onChange, catalog, onOpen }) {
     Keyboard.dismiss();
   };
 
-  const items = buildModelMenuItems({ value, catalog, onPick: pick });
+  const items = buildModelMenuItems({ value, catalog, onPick: pick, t });
 
   return (
     <View ref={anchorRef} collapsable={false} style={{ flexShrink: 1 }}>
@@ -39,7 +41,7 @@ export function ModelPicker({ value, onChange, catalog, onOpen }) {
         testID="model-picker-trigger"
         onPress={openMenu}
         accessibilityRole="button"
-        accessibilityLabel={`选择模型，当前${triggerMain}`}
+        accessibilityLabel={t('选择模型，当前{name}', { name: triggerMain })}
         accessibilityState={{ expanded: menuOpen }}
         style={{
           borderRadius: 22,
@@ -61,7 +63,7 @@ export function ModelPicker({ value, onChange, catalog, onOpen }) {
       <GlassMenu
         visible={menuOpen}
         anchor={menuAnchor}
-        title="选择模型"
+        title={t('选择模型')}
         items={items}
         placement="above"
         width={268}

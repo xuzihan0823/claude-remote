@@ -1,3 +1,4 @@
+import { t } from './i18n.js';
 import { mergeSessions, projectForCwd, projectTitles } from './projects.js';
 import { createSessionPager } from './session-pager.js';
 
@@ -35,7 +36,7 @@ export function createProjectSessionGroups(fetchPage, publish, { now = Date.now 
       title: counts.get(titles.get(p.id)) > 1 ? `${p.name} · ${p.id}` : titles.get(p.id),
     }));
     if (catalog.unclassifiedCount > 0 || pendingRows().some((s) => !s.cwd) || owner(focus.meta) === '') {
-      groups.push({ id: '', title: '未归类', sessionCount: catalog.unclassifiedCount, cwds: [] });
+      groups.push({ id: '', title: t('未归类'), sessionCount: catalog.unclassifiedCount, cwds: [] });
     }
     return groups;
   };

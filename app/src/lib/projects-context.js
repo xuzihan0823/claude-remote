@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { AppState } from 'react-native';
 import { fetchProjects, scopeErrMsg } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
+import { t } from './i18n.js';
 import {
   ALL_PROJECTS, normalizeCatalog, parsePref, pathTail,
   prefKey, resolveTarget,
@@ -50,7 +51,7 @@ export function ProjectsProvider({ base, children }) {
       setCatalogError('');
     } catch (e) {
       if (g !== gen.current || seq !== catalogSeq.current || e?.code === 'unauthorized') return;
-      const msg = scopeErrMsg('项目列表', e, '加载失败');
+      const msg = scopeErrMsg(t('项目列表'), e, t('加载失败'));
       setCatalogError(msg);
       toast(msg, 'error');
     }
@@ -96,7 +97,7 @@ export function ProjectsProvider({ base, children }) {
     const p = id ? cur.catalog.projects.find((x) => x.id === id) : null;
     if (!p?.cwd || p.cwds.includes(cur.target)) return;
     if (draftActive.current) {
-      if (cur.target) toast(`草稿仍发往 ${pathTail(cur.target)}，可在输入框上方更换`, 'info');
+      if (cur.target) toast(t('草稿仍发往 {path}，可在输入框上方更换', { path: pathTail(cur.target) }), 'info');
       return;
     }
     setTarget(p.cwd);
@@ -106,7 +107,7 @@ export function ProjectsProvider({ base, children }) {
     const next = cwd || '';
     if (next === state.current.target) return;
     setTarget(next);
-    if (draftActive.current) toast(next ? `新对话目标已切换到 ${pathTail(next)}，草稿已保留` : '此会话没有工作目录，请为草稿选择目标', 'info');
+    if (draftActive.current) toast(next ? t('新对话目标已切换到 {path}，草稿已保留', { path: pathTail(next) }) : t('此会话没有工作目录，请为草稿选择目标'), 'info');
   }, [setTarget]);
 
   const prepareNewChat = useCallback(() => {

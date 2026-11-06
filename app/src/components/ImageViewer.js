@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { Image, Modal, Pressable, ScrollView, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useI18n } from '../lib/i18n.js';
 import { Icon } from './Icon.js';
 
 export function ZoomableImage({ source, label, onPress }) {
+  const { t } = useI18n();
   const [size, setSize] = useState(null);
   return (
     <View style={{ flex: 1, backgroundColor: '#000' }} onLayout={(e) => setSize(e.nativeEvent.layout)}>
@@ -17,7 +19,7 @@ export function ZoomableImage({ source, label, onPress }) {
           showsHorizontalScrollIndicator={false}
           showsVerticalScrollIndicator={false}
         >
-          <Pressable onPress={onPress} disabled={!onPress} accessibilityRole={onPress ? 'button' : 'image'} accessibilityLabel={onPress ? '关闭图片' : label}>
+          <Pressable onPress={onPress} disabled={!onPress} accessibilityRole={onPress ? 'button' : 'image'} accessibilityLabel={onPress ? t('关闭图片') : label}>
             <Image source={source} resizeMode="contain" accessibilityLabel={label} style={{ width: size.width, height: size.height }} />
           </Pressable>
         </ScrollView>
@@ -27,13 +29,14 @@ export function ZoomableImage({ source, label, onPress }) {
 }
 
 export function ImageViewer({ source, label, visible, onClose }) {
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   return (
     <Modal visible={visible} animationType="fade" statusBarTranslucent onRequestClose={onClose}>
       <ZoomableImage source={source} label={label} onPress={onClose} />
       <TouchableOpacity
         accessibilityRole="button"
-        accessibilityLabel="关闭"
+        accessibilityLabel={t('关闭')}
         onPress={onClose}
         hitSlop={8}
         style={{ position: 'absolute', top: insets.top + 8, right: 16, width: 40, height: 40, borderRadius: 20,

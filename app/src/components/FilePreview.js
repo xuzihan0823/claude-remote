@@ -9,6 +9,7 @@ import { Icon } from './Icon.js';
 import { ZoomableImage } from './ImageViewer.js';
 import { MarkdownView } from './markdown/MarkdownView.js';
 import { fmtBytes } from '../lib/format.js';
+import { useI18n } from '../lib/i18n.js';
 import { openLink } from '../lib/links.js';
 import { useTheme } from '../theme.js';
 import {
@@ -57,6 +58,7 @@ function SandboxedPage({ uri, html }) {
 
 function TextContent({ text, truncated }) {
   const { colors, fonts } = useTheme();
+  const { t } = useI18n();
   const chunks = useMemo(() => textChunks(text), [text]);
   return (
     <FlatList
@@ -66,7 +68,7 @@ function TextContent({ text, truncated }) {
         <Text selectable style={{ color: colors.ink, fontFamily: fonts.mono, fontSize: 13, lineHeight: 19 }}>{item}</Text>
       )}
       contentContainerStyle={{ padding: 16 }}
-      ListFooterComponent={truncated ? <Notice text="只显示前 1MB，完整内容请保存后查看" /> : null}
+      ListFooterComponent={truncated ? <Notice text={t('只显示前 1MB，完整内容请保存后查看')} /> : null}
     />
   );
 }
@@ -78,6 +80,7 @@ function Notice({ text }) {
 
 function Content({ kind, file, name }) {
   const { colors } = useTheme();
+  const { t } = useI18n();
   const [text, setText] = useState(null);
   const truncated = (file.size ?? 0) > TEXT_PREVIEW_BYTES;
   const readsText = kind === 'text' || kind === 'markdown';
@@ -91,7 +94,7 @@ function Content({ kind, file, name }) {
   if (kind === 'html') {
     return (
       <>
-        <Notice text="只支持单文件 HTML，同目录的图片和脚本无法加载" />
+        <Notice text={t('只支持单文件 HTML，同目录的图片和脚本无法加载')} />
         <SandboxedPage uri={file.uri} html />
       </>
     );
@@ -102,7 +105,7 @@ function Content({ kind, file, name }) {
     return (
       <ScrollView contentContainerStyle={{ padding: 16 }}>
         <MarkdownView text={text} />
-        {truncated ? <Notice text="只显示前 1MB，完整内容请保存后查看" /> : null}
+        {truncated ? <Notice text={t('只显示前 1MB，完整内容请保存后查看')} /> : null}
       </ScrollView>
     );
   }
@@ -126,6 +129,7 @@ function ActionButton({ label, onPress }) {
 // phase: loading 取文件信息 / ready 等用户确认下载 / downloading / done / error
 export function FilePreview({ sessionId, path, onClose }) {
   const { colors } = useTheme();
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const [phase, setPhase] = useState('loading');
   const [meta, setMeta] = useState(null);
@@ -138,9 +142,9 @@ export function FilePreview({ sessionId, path, onClose }) {
 
   const share = useCallback(async (target, info) => {
     try {
-      if (!(await Sharing.isAvailableAsync())) { toast('文件分享：设备不支持', 'error'); return; }
+      if (!(await Sharing.isAvailableAsync())) { toast(t('文件分享：设备不支持'), 'error'); return; }
       await Sharing.shareAsync(target.uri, { mimeType: info.mime.split(';')[0], dialogTitle: info.name });
-    } catch { toast('文件保存：保存失败', 'error'); }
+    } catch { toast(t('文件保存：保存失败'), 'error'); }
   }, []);
 
   const download = useCallback(async (info, { shareAfter = false } = {}) => {
@@ -169,7 +173,7 @@ export function FilePreview({ sessionId, path, onClose }) {
     } catch {
       removeTemp(dir);
       if (!current.alive) return;
-      setError('下载失败，请重试');
+      setError(t('下载失败，请重试'));
       setPhase('error');
     }
   }, [sessionId, share]);
@@ -201,7 +205,7 @@ export function FilePreview({ sessionId, path, onClose }) {
     <Modal visible animationType="slide" statusBarTranslucent onRequestClose={onClose}>
       <View style={{ flex: 1, backgroundColor: colors.bg, paddingTop: insets.top, paddingBottom: insets.bottom }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', minHeight: 52, paddingHorizontal: 8, borderBottomWidth: 1, borderBottomColor: colors.line }}>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel="关闭预览" onPress={onClose}
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel={t('关闭预览')} onPress={onClose}
             style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
             <Icon name="close" size={20} color={colors.ink} />
           </TouchableOpacity>
@@ -209,7 +213,7 @@ export function FilePreview({ sessionId, path, onClose }) {
             {meta?.name || path.split('/').pop()}
           </Text>
           {phase === 'done' ? (
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel="保存或分享" onPress={() => share(file, meta)}
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={t('保存或分享')} onPress={() => share(file, meta)}
               style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
               <Icon name="share" size={20} color={colors.ink} />
             </TouchableOpacity>
@@ -224,19 +228,19 @@ export function FilePreview({ sessionId, path, onClose }) {
           <Centered>
             <Text style={{ color: colors.ink, fontSize: 15, textAlign: 'center' }}>{meta.name}</Text>
             <Text style={{ color: colors.ink2, fontSize: 13, textAlign: 'center' }}>
-              {fmtBytes(meta.sizeBytes)} · {large ? '文件较大，确认后再下载' : '这个文件无法预览'}
+              {fmtBytes(meta.sizeBytes)} · {large ? t('文件较大，确认后再下载') : t('这个文件无法预览')}
             </Text>
-            <ActionButton label="下载" onPress={() => download(meta, { shareAfter: !large })} />
+            <ActionButton label={t('下载')} onPress={() => download(meta, { shareAfter: !large })} />
           </Centered>
         ) : null}
         {phase === 'downloading' ? (
           <Centered>
-            <Text style={{ color: colors.ink2, fontSize: 13 }}>正在下载 {Math.round(progress * 100)}%</Text>
+            <Text style={{ color: colors.ink2, fontSize: 13 }}>{t('正在下载 {n}%', { n: Math.round(progress * 100) })}</Text>
             <View style={{ alignSelf: 'stretch', height: 4, borderRadius: 2, backgroundColor: colors.line, overflow: 'hidden' }}>
               <View style={{ width: `${Math.round(progress * 100)}%`, height: 4, backgroundColor: colors.accent }} />
             </View>
             <TouchableOpacity accessibilityRole="button" onPress={onClose} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 16 }}>
-              <Text style={{ color: colors.ink2, fontSize: 15 }}>取消</Text>
+              <Text style={{ color: colors.ink2, fontSize: 15 }}>{t('取消')}</Text>
             </TouchableOpacity>
           </Centered>
         ) : null}
@@ -246,7 +250,7 @@ export function FilePreview({ sessionId, path, onClose }) {
         {phase === 'done' && kind === 'none' ? (
           <Centered>
             <Text style={{ color: colors.ink, fontSize: 15, textAlign: 'center' }}>{meta.name}</Text>
-            <ActionButton label="保存" onPress={() => share(file, meta)} />
+            <ActionButton label={t('保存')} onPress={() => share(file, meta)} />
           </Centered>
         ) : null}
       </View>

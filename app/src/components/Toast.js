@@ -4,12 +4,14 @@ import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSprin
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useBus } from '../../../web/core/bus.js';
 import { useTheme } from '../theme.js';
+import { useI18n } from '../lib/i18n.js';
 import { Icon } from './Icon.js';
 
 const INFO_DURATION_MS = 3200;
 const ERROR_DURATION_MS = 4800;
 
 function ToastCapsule({ item, colors, fonts, onDismiss }) {
+  const { t } = useI18n();
   const isError = item.kind === 'error';
   const reduceMotion = useReducedMotion();
   const p = useSharedValue(reduceMotion ? 1 : 0);
@@ -62,7 +64,7 @@ function ToastCapsule({ item, colors, fonts, onDismiss }) {
           onPress={() => onDismiss(item.id)}
           hitSlop={10}
           accessibilityRole="button"
-          accessibilityLabel="关闭错误提示"
+          accessibilityLabel={t('关闭错误提示')}
           style={({ pressed }) => ({
             width: 22,
             height: 22,

@@ -1,5 +1,6 @@
 // 文件预览的纯逻辑：请求地址、类型判断、WebView 导航规则。不依赖 RN，可在 node 下测试。
 import { api, baseUrl, token } from '../../../web/core/api.js';
+import { t } from './i18n.js';
 
 export const TEXT_PREVIEW_BYTES = 1024 * 1024;
 export const ASK_BEFORE_DOWNLOAD_BYTES = 50 * 1024 * 1024;
@@ -18,7 +19,7 @@ const ERROR_TEXT = {
   device_disconnected: '设备离线',
 };
 
-export const fileErrorText = (code) => ERROR_TEXT[code] || '无法读取文件';
+export const fileErrorText = (code) => t(ERROR_TEXT[code] || '无法读取文件');
 
 const filePath = (sessionId, kind, path) =>
   `/api/sessions/${encodeURIComponent(sessionId)}/files/${kind}?path=${encodeURIComponent(path)}`;

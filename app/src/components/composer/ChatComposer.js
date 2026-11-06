@@ -7,6 +7,7 @@ import { toast } from '../../../../web/core/bus.js';
 import { effortLabel, effortUsable, getSessionEffort, setSessionEffort } from '../../../../web/core/effort.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useEffortLevels } from '../../lib/useEffortLevels.js';
+import { useI18n } from '../../lib/i18n.js';
 import { useTheme } from '../../theme.js';
 import { Icon } from '../Icon.js';
 import { ComposerActions } from './ComposerActions.js';
@@ -32,6 +33,7 @@ export function ChatComposer({
   sessionId, status, isRunning, activeRunId, mode, onModeChange, onSent, onStopped, onStatusConflict,
   onRunMismatch, onSending, onSendFailed,
 }) {
+  const { t } = useI18n();
   const { colors, dark } = useTheme();
   const insets = useSafeAreaInsets();
   const catalog = useModelCatalog();
@@ -59,7 +61,7 @@ export function ChatComposer({
   const effortMenuItem = {
     key: 'effort',
     icon: 'brain',
-    label: '思考程度',
+    label: t('思考程度'),
     detail: effortLabel(effort),
     detailTone: effortOk ? undefined : 'danger',
     onPress: openEffort,
@@ -85,10 +87,10 @@ export function ChatComposer({
   const terminalLocked = status === 'terminal-driving' && !isRunning && !sendBusy;
   const hasContent = draft.trim() !== '' || files.length > 0;
   const disabledReason = sendBusy ? (uploadProgress && uploadProgress.done < uploadProgress.total
-      ? `上传附件 ${uploadProgress.done + 1}/${uploadProgress.total}…` : '发送中…')
-    : status === 'terminal-driving' ? '终端占用中'
-    : status === 'daemon-driving' ? 'Claude 正在运行…'
-    : status == null ? '状态获取中…' : '';
+      ? t('上传附件 {done}/{total}…', { done: uploadProgress.done + 1, total: uploadProgress.total }) : t('发送中…'))
+    : status === 'terminal-driving' ? t('终端占用中')
+    : status === 'daemon-driving' ? t('Claude 正在运行…')
+    : status == null ? t('状态获取中…') : '';
 
   const stopRun = useCallback(async () => {
     if (!isRunning || stopping) return;
@@ -105,31 +107,31 @@ export function ChatComposer({
       haptics.stop();
       if (r?.status === 'aborted') {
         // 200 只表示停止已受理，真正空闲以对应 run 的终态/status 帧为准
-        toast('正在停止当前运行…', 'info');
+        toast(t('正在停止当前运行…'), 'info');
         return;
       }
       setStopping(false);
       onStopped?.();
       if (r?.sessionStatus) onStatusConflict?.(r.sessionStatus);
-      toast('运行已结束', 'info');
+      toast(t('运行已结束'), 'info');
     } catch (e) {
       if (context !== stopContext.current || activeRunIdRef.current !== requestedRunId) return;
       if (e.code === 'run_mismatch') {
         setStopping(false);
         onRunMismatch?.(e.data?.activeRunId ?? null, e.data?.status || 'daemon-driving');
-        toast('当前已是新一轮运行', 'info');
+        toast(t('当前已是新一轮运行'), 'info');
         return;
       }
       setStopping(false);
       if (e.code === 'no_active_run' || e.code === 'already_finished') {
         onStopped?.();
-        toast('运行已结束', 'info');
+        toast(t('运行已结束'), 'info');
       } else if (e.code !== 'unauthorized') {
         haptics.error();
         toast(scopeErrMsg('停止运行', e, '停止失败'), 'error');
       }
     }
-  }, [sessionId, activeRunId, isRunning, stopping, onStopped, onStatusConflict, onRunMismatch]);
+  }, [sessionId, activeRunId, isRunning, stopping, onStopped, onStatusConflict, onRunMismatch, t]);
 
   // 终端占用误判（如上一轮报错后 CLI 收尾写入）时的手动出口：daemon 无 run 时 abort = 解除占用
   const releaseSession = useCallback(async () => {
@@ -141,27 +143,27 @@ export function ChatComposer({
       if (r?.status === 'aborted') {
         onRunMismatch?.(r.runId, 'daemon-driving');
         setStopping(true);
-        toast('正在停止当前运行…', 'info');
+        toast(t('正在停止当前运行…'), 'info');
       } else {
         onStopped?.();
-        toast('已解除占用', 'info');
+        toast(t('已解除占用'), 'info');
       }
     } catch (e) {
       if (context !== stopContext.current) return;
       if (e.code === 'terminal_alive') {
         onStatusConflict?.('terminal-driving');
         haptics.error();
-        toast('解除占用：请先在终端输入 /exit', 'error');
+        toast(t('解除占用：请先在终端输入 /exit'), 'error');
       } else if (e.code === 'run_mismatch') {
         onRunMismatch?.(e.data?.activeRunId ?? null, e.data?.status || 'daemon-driving');
         haptics.error();
-        toast('解除占用：Claude 正在运行', 'error');
+        toast(t('解除占用：Claude 正在运行'), 'error');
       } else if (e.code !== 'unauthorized') {
         haptics.error();
         toast(scopeErrMsg('解除占用', e, '解除失败'), 'error');
       }
     }
-  }, [sessionId, onStopped, onRunMismatch, onStatusConflict]);
+  }, [sessionId, onStopped, onRunMismatch, onStatusConflict, t]);
 
   const sendLock = useRef(false);
   const sendGeneration = useRef(0);
@@ -170,16 +172,16 @@ export function ChatComposer({
   const doSend = useCallback(async () => {
     if (!hasContent || !canSend) return;
     if (modelSelection(catalog, modelOverride).status === 'unavailable') {
-      toast('消息发送：所选模型不可用', 'error');
+      toast(t('消息发送：所选模型不可用'), 'error');
       return;
     }
     if (!effortOk) {
-      toast(`消息发送：不支持思考程度「${effortLabel(effort)}」`, 'error');
+      toast(t('消息发送：不支持思考程度「{level}」', { level: effortLabel(effort) }), 'error');
       return;
     }
     const generation = sendGeneration.current;
     const requestToken = token;
-    const delivery = { clientMessageId: newClientMessageId(), text: draft.trim() || '请查看我上传的附件。', files: [...files], body: null };
+    const delivery = { clientMessageId: newClientMessageId(), text: draft.trim() || t('请查看我上传的附件。'), files: [...files], body: null };
     const send = async () => {
       if (sendLock.current || generation !== sendGeneration.current || requestToken !== token) return;
       sendLock.current = true;
@@ -211,22 +213,22 @@ export function ChatComposer({
         onSendFailed?.(e, context, posted);
         if (e.status === 409) {
           onStatusConflict?.(e.data?.status || null);
-          const why = e.data?.status === 'terminal-driving' ? '终端正在使用该会话'
-            : e.data?.status === 'daemon-driving' ? 'Claude 正在运行' : '会话被占用';
-          toast(`消息发送：${why}`, 'error');
+          const why = e.data?.status === 'terminal-driving' ? t('终端正在使用该会话')
+            : e.data?.status === 'daemon-driving' ? t('Claude 正在运行') : t('会话被占用');
+          toast(t('消息发送：{reason}', { reason: why }), 'error');
         } else if (e.status === 413) {
           toast(tooLargeMessage(e, { hasFiles: delivery.files.length > 0 }), 'error');
         } else if (e.code === 'attachment_read_failed') {
-          toast(e.file ? `附件读取：无法读取「${e.file}」` : '附件读取：无法读取文件', 'error');
+          toast(e.file ? t('附件读取：无法读取「{file}」', { file: e.file }) : t('附件读取：无法读取文件'), 'error');
         } else if (e.code === 'unknown_model') {
-          toast('消息发送：所选模型不可用', 'error');
+          toast(t('消息发送：所选模型不可用'), 'error');
           fetchModels().catch(() => {});
         } else if (e.code === 'invalid_effort') {
-          toast('消息发送：思考程度参数无效', 'error');
+          toast(t('消息发送：思考程度参数无效'), 'error');
         } else if (e.code === 'connection_changed') {
-          toast('连接已切换，正在核对原消息状态', 'info');
+          toast(t('连接已切换，正在核对原消息状态'), 'info');
         } else if (e.code !== 'unauthorized') {
-          toast(sendFailureState(e, posted) === 'unconfirmed' ? '消息发送：状态未确认，正在核对' : scopeErrMsg('消息发送', e, '发送失败'), 'error');
+          toast(sendFailureState(e, posted) === 'unconfirmed' ? t('消息发送：状态未确认，正在核对') : scopeErrMsg('消息发送', e, '发送失败'), 'error');
         }
       } finally { sendLock.current = false; setSendBusy(false); setUploadProgress(null); }
     };
@@ -234,7 +236,7 @@ export function ChatComposer({
     setDraft('');
     setFiles([]);
     await send();
-  }, [draft, files, hasContent, canSend, sessionId, catalog, modelOverride, effort, effortOk, mode, onSent, onStatusConflict, onSending, onSendFailed]);
+  }, [draft, files, hasContent, canSend, sessionId, catalog, modelOverride, effort, effortOk, mode, onSent, onStatusConflict, onSending, onSendFailed, t]);
 
   const onContentSizeChange = (e) => {
     const h = Math.min(Math.max(Math.ceil(e.nativeEvent.contentSize.height), 36), 132);
@@ -267,9 +269,9 @@ export function ChatComposer({
           multiline
           // 始终可编辑：不可编辑会让 iOS 收起键盘，发送那一刻整页重排（跳动）。能否发送由发送按钮控制
           editable
-          placeholder={canSend ? '回复 Claude…' : disabledReason}
+          placeholder={canSend ? t('回复 Claude…') : disabledReason}
           placeholderTextColor={colors.ink2}
-          accessibilityLabel="消息"
+          accessibilityLabel={t('输入消息')}
           keyboardAppearance={dark ? 'dark' : 'light'}
           onContentSizeChange={onContentSizeChange}
           style={{
@@ -309,7 +311,7 @@ export function ChatComposer({
               disabled={stopping}
               accessibilityRole="button"
               accessibilityState={{ disabled: stopping, busy: stopping }}
-              accessibilityLabel={stopping ? '正在停止' : '停止生成'}
+              accessibilityLabel={stopping ? t('正在停止') : t('停止生成')}
               style={{
                 width: 44, height: 44, borderRadius: 22,
                 backgroundColor: colors.inkStrong,
@@ -327,7 +329,7 @@ export function ChatComposer({
               disabled={!canSend || !hasContent}
               accessibilityRole="button"
               accessibilityState={{ disabled: !canSend || !hasContent }}
-              accessibilityLabel="发送"
+              accessibilityLabel={t('发送')}
               style={{
                 width: 44, height: 44, borderRadius: 22,
                 backgroundColor: colors.inkStrong,

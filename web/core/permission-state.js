@@ -1,3 +1,5 @@
+import { t } from './i18n.js';
+
 export function emptyPermissionState() {
   return { runId: null, requestedMode: null, effectiveMode: null, denials: [], notices: [], endedRuns: [] };
 }
@@ -32,11 +34,15 @@ export function reducePermissionState(state, event) {
 }
 
 const names = { default: '标准审批', acceptEdits: '自动编辑', plan: '规划', auto: '自动审核', bypassPermissions: 'Bypass' };
+function modeName(mode) { return names[mode] ? t(names[mode]) : mode; }
 export function permissionStatusText(state) {
   if (!state.runId || !state.requestedMode) return '';
-  if (!state.effectiveMode) return `${names[state.requestedMode] || state.requestedMode}，正在确认`;
-  if (state.requestedMode === 'auto' && state.effectiveMode === 'default') return '本轮已转为标准审批；CLI 未启用或已退出自动审核';
-  return `本轮：${names[state.effectiveMode] || `未知模式（${state.effectiveMode}）`}`;
+  if (!state.effectiveMode) return t('{mode}，正在确认', { mode: modeName(state.requestedMode) });
+  if (state.requestedMode === 'auto' && state.effectiveMode === 'default') return t('本轮已转为标准审批；CLI 未启用或已退出自动审核');
+  const effective = names[state.effectiveMode]
+    ? modeName(state.effectiveMode)
+    : t('未知模式（{mode}）', { mode: state.effectiveMode });
+  return t('本轮：{mode}', { mode: effective });
 }
 
 export function mergePermissionDenials(messages, denials) {
@@ -65,8 +71,8 @@ const DENIAL_TEXT_MAP = {
 function formatDenialLine(line) {
   if (!line) return '';
   const trimmed = String(line).trim();
-  if (DENIAL_TEXT_MAP[trimmed]) return DENIAL_TEXT_MAP[trimmed];
-  if (/^approval channel failed closed(?::|$)/i.test(trimmed)) return '审批通道异常中断';
+  if (DENIAL_TEXT_MAP[trimmed]) return t(DENIAL_TEXT_MAP[trimmed]);
+  if (/^approval channel failed closed(?::|$)/i.test(trimmed)) return t('审批通道异常中断');
   return String(line);
 }
 

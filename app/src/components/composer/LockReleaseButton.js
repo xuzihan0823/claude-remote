@@ -3,6 +3,7 @@ import { ActivityIndicator, Pressable, View } from 'react-native';
 import Animated, { Easing, runOnJS, useAnimatedProps, useSharedValue, withTiming } from 'react-native-reanimated';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { toast } from '../../../../web/core/bus.js';
+import { useI18n } from '../../lib/i18n.js';
 import { haptics } from '../../lib/haptics.js';
 import { useTheme } from '../../theme.js';
 
@@ -15,6 +16,7 @@ const HOLD_MS = 1200;
 
 // 终端占用时的解锁键：按住让红圈绕锁走满一圈才解除，松手即回退，避免误触抢走终端里正在用的会话
 export function LockReleaseButton({ onRelease }) {
+  const { t } = useI18n();
   const { colors } = useTheme();
   const progress = useSharedValue(0);
   const [busy, setBusy] = useState(false);
@@ -45,13 +47,13 @@ export function LockReleaseButton({ onRelease }) {
     <Pressable
       onPressIn={holdStart}
       onPressOut={holdEnd}
-      onPress={() => { if (!busy) toast('按住锁直到红圈走满，解除终端占用', 'info'); }}
+      onPress={() => { if (!busy) toast(t('按住锁直到红圈走满，解除终端占用'), 'info'); }}
       onLongPress={() => {}}
       delayLongPress={300}
       disabled={busy}
       accessibilityRole="button"
-      accessibilityLabel="解除终端占用"
-      accessibilityHint="按住直到圆圈走满"
+      accessibilityLabel={t('解除终端占用')}
+      accessibilityHint={t('按住直到圆圈走满')}
       accessibilityState={{ busy }}
       accessibilityActions={[{ name: 'activate' }]}
       onAccessibilityAction={() => { if (!busy) release(); }}

@@ -19,6 +19,8 @@ const screenSource = readFileSync(new URL('../../screens/ChatScreen.js', import.
 const composerSource = readFileSync(new URL('../../components/composer/ChatComposer.js', import.meta.url), 'utf8');
 const newComposerSource = readFileSync(new URL('../../components/composer/NewChatComposer.js', import.meta.url), 'utf8');
 const approvalSource = readFileSync(new URL('../../components/ApprovalLayer.js', import.meta.url), 'utf8');
+// 测试里 t() 只做参数插值、不翻译，断言仍按中文模板校验。
+const fakeT = (text, params) => (params ? String(text).replace(/\{(\w+)\}/g, (m, k) => (params[k] == null ? m : String(params[k]))) : text);
 // Execute the component's actual state/event code, excluding native rendering and imports.
 function mount(source, start, end, exposed, initialProps, dependencies) {
   const slots = [];
@@ -88,6 +90,7 @@ function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: fals
     'pending, onSendFailed, drafts, store, runActive, activeRunId, status, addMsgs, onSending, onSent, loadErr, initLoading, firstSeq, hasMore, loadOlder, permissionState, mode, setMode', {}, {
       route: { params: { sessionId: 'session' } },
       useNavigation: () => ({}), useTheme: () => ({ colors: {} }), useSafeAreaInsets: () => ({}),
+      useI18n: () => ({ t: fakeT }),
       sessionCache: new Map(), pendingSessionMessages: new Map(), getSessionMode: () => 'default',
       api, fetchSessions: async () => {}, ws: { subscribe() {}, unsubscribe() {} },
       msgKey: (m) => `${m.seq}:${m.blockIndex || 0}`, cmpMsg: (a, b) => a.seq - b.seq || (a.blockIndex || 0) - (b.blockIndex || 0),
@@ -188,6 +191,7 @@ function composer(api, callbacks = {}, deps = {}) {
     'stopRun, releaseSession, stopping, canSend, doSend, draft, setDraft, setFiles, pickModel, pickEffort, effort, modelOverride', initial, {
       useTheme: () => ({ colors: {} }), useSafeAreaInsets: () => ({}), useModelCatalog: () => ({}),
       useEffortLevels: () => ({ options: null, reload: () => {} }),
+      useI18n: () => ({ t: fakeT }),
       getSessionModel: () => '', setSessionModel: () => {}, modelSelection: () => ({ status: 'default' }),
       fetchModels: async () => {},
       getSessionEffort, setSessionEffort, effortLabel, effortUsable,
@@ -501,6 +505,7 @@ test('actual NewChatComposer: sends effort on creation and stores it for the new
       useSafeAreaInsets: () => ({ bottom: 0, left: 0, right: 0 }),
       useModelCatalog: () => ({ models: [{ id: 'opus', alias: 'opus' }], loaded: true }),
       usePref: () => '', token: 'test-token',
+      useI18n: () => ({ t: fakeT }),
       useEffortLevels: () => ({ options: { levels: ['low', 'high', 'max'], verified: true }, reload: () => {} }),
       modelSelection: () => ({ status: 'ok' }),
       effortLabel,
@@ -572,6 +577,7 @@ test('actual ApprovalLayer: duplicate live events and pending sync notify once b
   const layer = mount(approvalSource, 'export function ApprovalLayer() {', '  if (items.length === 0)',
     'items, syncPending', {}, {
       useTheme: () => ({ fonts: {} }), useSafeAreaInsets: () => ({}),
+      useI18n: () => ({ t: fakeT }),
       api: async () => ({ interactions: [interaction] }),
       haptics: { attention: () => reminders++ }, toast() {},
     });

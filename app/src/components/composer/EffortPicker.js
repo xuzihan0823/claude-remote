@@ -21,6 +21,7 @@ import {
 } from '../../../../web/core/effort.js';
 import { Icon } from '../Icon.js';
 import { NativeBlurView } from '../ProgressiveBlur.js';
+import { useI18n } from '../../lib/i18n.js';
 import { useTheme } from '../../theme.js';
 import { haptics } from '../../lib/haptics.js';
 
@@ -48,6 +49,7 @@ function Dot({ x, at, colors }) {
 // 离散滑块：按住任意位置跟手拖动，松手吸附到最近档位；经过档位时轻触感反馈。
 // x 是滑钮中心相对最左档位的位移，单位 px。
 function EffortSlider({ count, index, label, onPreview, onCommit }) {
+  const { t } = useI18n();
   const { colors } = useTheme();
   const [width, setWidth] = useState(0);
   const span = Math.max(width - TRACK_H, 0);
@@ -109,7 +111,7 @@ function EffortSlider({ count, index, label, onPreview, onCommit }) {
           onLayout={(e) => setWidth(e.nativeEvent.layout.width)}
           accessible
           accessibilityRole="adjustable"
-          accessibilityLabel="思考程度"
+          accessibilityLabel={t('思考程度')}
           accessibilityValue={{ text: label }}
           accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
           onAccessibilityAction={({ nativeEvent }) => {
@@ -149,6 +151,7 @@ function OverlayHost({ onClose, children }) {
 // 打开后是模糊背景上的滑块浮层（键盘在时骑在键盘上方），最左一档为「跟随默认」，点空白处关闭。
 // 网关确认过档位时只列支持的档位；未确认时列出全部五档。
 export function EffortPicker({ open, onOpen, onClose, effort, options, onPick }) {
+  const { t } = useI18n();
   const { colors, dark } = useTheme();
   const insets = useSafeAreaInsets();
   const usable = effortUsable(options, effort);
@@ -185,8 +188,8 @@ export function EffortPicker({ open, onOpen, onClose, effort, options, onPick })
   };
 
   const hint = options?.verified
-    ? (levels.length ? '' : '当前模型不支持调整思考程度')
-    : options ? '未能从网关确认该模型支持的档位' : '';
+    ? (levels.length ? '' : t('当前模型不支持调整思考程度'))
+    : options ? t('未能从网关确认该模型支持的档位') : '';
 
   return (
     <>
@@ -195,7 +198,9 @@ export function EffortPicker({ open, onOpen, onClose, effort, options, onPick })
           testID="effort-chip"
           onPress={onOpen}
           accessibilityRole="button"
-          accessibilityLabel={`思考程度：${effortLabel(effort)}${usable ? '' : '，当前模型不支持'}`}
+          accessibilityLabel={usable
+            ? t('思考程度：{level}', { level: effortLabel(effort) })
+            : t('思考程度：{level}，当前模型不支持', { level: effortLabel(effort) })}
           style={{
             minHeight: 44,
             paddingHorizontal: 12,
@@ -224,7 +229,7 @@ export function EffortPicker({ open, onOpen, onClose, effort, options, onPick })
                 testID="effort-backdrop"
                 onPress={onClose}
                 accessibilityRole="button"
-                accessibilityLabel="关闭思考程度"
+                accessibilityLabel={t('关闭思考程度')}
                 style={[StyleSheet.absoluteFill, { backgroundColor: AnimatedBlur ? (dark ? 'rgba(0,0,0,0.35)' : 'rgba(250,249,245,0.35)') : colors.bg, opacity: AnimatedBlur ? 1 : 0.92 }]}
               />
               <KeyboardStickyView
@@ -232,7 +237,7 @@ export function EffortPicker({ open, onOpen, onClose, effort, options, onPick })
                 style={{ position: 'absolute', left: 16, right: 16, bottom: insets.bottom + BOTTOM_GAP }}
               >
                 <Animated.View accessibilityViewIsModal style={[{ alignItems: 'center' }, panelStyle]}>
-                  <Text style={{ color: colors.ink2, fontSize: 13, fontWeight: '500', letterSpacing: 0.5 }}>思考程度</Text>
+                  <Text style={{ color: colors.ink2, fontSize: 13, fontWeight: '500', letterSpacing: 0.5 }}>{t('思考程度')}</Text>
                   <Animated.Text
                     key={shown || 'default'}
                     entering={FadeIn.duration(140)}
@@ -242,7 +247,7 @@ export function EffortPicker({ open, onOpen, onClose, effort, options, onPick })
                     {effortLabel(shown)}
                   </Animated.Text>
                   <Text style={{ color: shownOk ? colors.ink2 : colors.danger, fontSize: 13.5, marginTop: 4, marginBottom: 18, textAlign: 'center' }}>
-                    {shownOk ? EFFORT_DESCRIPTIONS[shown] : '当前模型不支持这一档，请重新选择'}
+                    {shownOk ? t(EFFORT_DESCRIPTIONS[shown]) : t('当前模型不支持这一档，请重新选择')}
                   </Text>
                   {levels.length ? (
                     <View style={{ alignSelf: 'stretch' }}>

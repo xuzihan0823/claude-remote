@@ -1,6 +1,8 @@
 // 项目目录的纯逻辑（无 RN 依赖，可用 node --test 直接测）。
 // 浏览筛选值：null = 全部，'' = 未归类，其余 = 项目 id（仓库根完整路径）。
 
+import { t } from './i18n.js';
+
 export const ALL_PROJECTS = null;
 export const UNCLASSIFIED = '';
 export const SESSION_PAGE = 50;
@@ -63,8 +65,8 @@ export function isKnownCwd(projects, cwd) {
 }
 
 export function filterLabel(catalog, projectId) {
-  if (projectId === ALL_PROJECTS) return '全部对话';
-  if (projectId === UNCLASSIFIED) return '未归类';
+  if (projectId === ALL_PROJECTS) return t('全部对话');
+  if (projectId === UNCLASSIFIED) return t('未归类');
   const p = catalog.projects.find((x) => x.id === projectId);
   return p ? projectTitles(catalog.projects).get(p.id) : pathTail(projectId, 1) || projectId;
 }

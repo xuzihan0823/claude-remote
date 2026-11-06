@@ -5,6 +5,7 @@ import { bus, toast } from '../../../../web/core/bus.js';
 import { baseChannel, candidateBases, channelPrefOf, getDevice, hostOf, removeDeviceAction, syncBases, updateDevice } from '../../../../web/core/devices.js';
 import { useConnActions } from '../../lib/conn-context.js';
 import { useDevices } from '../../lib/useDevices.js';
+import { useI18n } from '../../lib/i18n.js';
 import { haptics } from '../../lib/haptics.js';
 import { QrScanner } from '../../components/QrScanner.js';
 import { useTheme } from '../../theme.js';
@@ -19,6 +20,7 @@ const PREF_OPTIONS = [
 ];
 
 export function DeviceDetailScreen({ navigation, route }) {
+  const { t } = useI18n();
   const { colors } = useTheme();
   const { switchDevice, tryConnectBases, reselect } = useConnActions();
   const { list, current } = useDevices();
@@ -39,7 +41,7 @@ export function DeviceDetailScreen({ navigation, route }) {
     return () => { alive = false; };
   }, [isCurrent]);
 
-  if (!d) return <SettingsPage title="设备" />;
+  if (!d) return <SettingsPage title={t('设备')} />;
 
   const changed = () => bus.emit('devices');
   const reconnect = async (next) => {
@@ -51,24 +53,24 @@ export function DeviceDetailScreen({ navigation, route }) {
   };
 
   const rename = () => {
-    Alert.prompt('设备名称', undefined, [
-      { text: '取消', style: 'cancel' },
-      { text: '保存', onPress: (v) => { if (v && v.trim()) { updateDevice(d.id, { name: v }); changed(); } } },
+    Alert.prompt(t('设备名称'), undefined, [
+      { text: t('取消'), style: 'cancel' },
+      { text: t('保存'), onPress: (v) => { if (v && v.trim()) { updateDevice(d.id, { name: v }); changed(); } } },
     ], 'plain-text', d.name);
   };
 
   const addAddress = () => {
-    Alert.prompt('添加地址', '例如 http://192.168.1.23:8787', [
-      { text: '取消', style: 'cancel' },
-      { text: '添加', onPress: (v) => { if (v && v.trim()) { updateDevice(d.id, { bases: [...d.bases, v.trim()] }); changed(); } } },
+    Alert.prompt(t('添加地址'), t('例如 http://192.168.1.23:8787'), [
+      { text: t('取消'), style: 'cancel' },
+      { text: t('添加'), onPress: (v) => { if (v && v.trim()) { updateDevice(d.id, { bases: [...d.bases, v.trim()] }); changed(); } } },
     ], 'plain-text', 'http://');
   };
 
   const removeAddress = (b) => {
-    if (d.bases.length <= 1) { toast('地址管理：至少保留一个地址', 'info'); return; }
-    Alert.alert('删除这个地址？', hostOf(b), [
-      { text: '取消', style: 'cancel' },
-      { text: '删除', style: 'destructive', onPress: () => { updateDevice(d.id, { bases: d.bases.filter((x) => x !== b) }); changed(); } },
+    if (d.bases.length <= 1) { toast(t('地址管理：至少保留一个地址'), 'info'); return; }
+    Alert.alert(t('删除这个地址？'), hostOf(b), [
+      { text: t('取消'), style: 'cancel' },
+      { text: t('删除'), style: 'destructive', onPress: () => { updateDevice(d.id, { bases: d.bases.filter((x) => x !== b) }); changed(); } },
     ]);
   };
 
@@ -80,10 +82,10 @@ export function DeviceDetailScreen({ navigation, route }) {
   };
 
   const remove = () => {
-    Alert.alert(`移除「${d.name}」？`, '会清除这台 Mac 的地址和 Token，之后需要重新配对。', [
-      { text: '取消', style: 'cancel' },
+    Alert.alert(t('移除「{name}」？', { name: d.name }), t('会清除这台 Mac 的地址和 Token，之后需要重新配对。'), [
+      { text: t('取消'), style: 'cancel' },
       {
-        text: '移除',
+        text: t('移除'),
         style: 'destructive',
         onPress: async () => {
           const act = removeDeviceAction(d.id);
@@ -106,7 +108,7 @@ export function DeviceDetailScreen({ navigation, route }) {
     const ok = await tryConnectBases(synced ? candidateBases(synced) : bases, tok, { beforeCommit: () => haptics.success() });
     if (!ok) haptics.error();
     setBusy(false);
-    if (ok) toast('已重新配对', 'info');
+    if (ok) toast(t('已重新配对'), 'info');
   };
 
   const pref = channelPrefOf(d);
@@ -121,30 +123,30 @@ export function DeviceDetailScreen({ navigation, route }) {
   const prefAvailable = (key) => key === 'auto' || (key === 'relay' ? hasRelay : hasDirect);
 
   const status = isCurrent
-    ? (health === null ? { label: '检查中…', dot: colors.ink3 } : health ? { label: '已连接', dot: colors.ok } : { label: '连不上', dot: colors.danger })
-    : { label: '未连接', dot: colors.ink3 };
+    ? (health === null ? { label: t('检查中…'), dot: colors.ink3 } : health ? { label: t('已连接'), dot: colors.ok } : { label: t('连不上'), dot: colors.danger })
+    : { label: t('未连接'), dot: colors.ink3 };
   const info = (isCurrent && health) ? health : (d.info || {});
 
   return (
     <SettingsPage title={d.name}>
-      <Group title="状态">
-        <Row icon="pulse" label={status.label} dot={status.dot} value={isCurrent && latency != null && health ? `${latency} ms` : (!isCurrent && d.lastConnectedAt ? `上次 ${agoText(d.lastConnectedAt)}` : undefined)} />
-        {isCurrent && health ? <Row icon="globe" label="通道" value={CHANNEL_LABELS[baseChannel(baseUrl)]} /> : null}
+      <Group title={t('状态')}>
+        <Row icon="pulse" label={status.label} dot={status.dot} value={isCurrent && latency != null && health ? `${latency} ms` : (!isCurrent && d.lastConnectedAt ? t('上次 {time}', { time: agoText(d.lastConnectedAt) }) : undefined)} />
+        {isCurrent && health ? <Row icon="globe" label={t('通道')} value={t(CHANNEL_LABELS[baseChannel(baseUrl)])} /> : null}
         <Row icon="info" label="daemon" value={info.version ? `v${info.version}` : '-'} />
         <Row icon="spark" label="Claude CLI" value={info.claudeCliVersion || '-'} />
       </Group>
 
-      <Group title="设备">
-        <Row icon="tag" label="名称" value={d.name} onPress={rename} />
+      <Group title={t('设备')}>
+        <Row icon="tag" label={t('名称')} value={d.name} onPress={rename} />
         <Row icon="key" label="Token" value={`••••${String(d.token).slice(-4)}`} onPress={() => navigation.navigate('AddDevice', { deviceId: d.id })} />
       </Group>
 
-      <Group title="通道偏好" footer={hasRelay ? undefined : '这台 Mac 还没有 relay 地址。在 Mac 上执行 cr relay add 后，连上一次就会自动出现。'}>
+      <Group title={t('通道偏好')} footer={hasRelay ? undefined : t('这台 Mac 还没有 relay 地址。在 Mac 上执行 cr relay add 后，连上一次就会自动出现。')}>
         {PREF_OPTIONS.map((o) => (
           <Row
             key={o.key}
-            label={o.label}
-            sub={o.sub}
+            label={t(o.label)}
+            sub={t(o.sub)}
             checked={pref === o.key}
             disabled={busy || (!prefAvailable(o.key) && pref !== o.key)}
             onPress={() => setPref(o.key)}
@@ -152,28 +154,28 @@ export function DeviceDetailScreen({ navigation, route }) {
         ))}
       </Group>
 
-      <Group title="地址" footer={'同时尝试所有地址，按通道偏好选择。长按地址可删除。'}>
+      <Group title={t('地址')} footer={t('同时尝试所有地址，按通道偏好选择。长按地址可删除。')}>
         {d.bases.map((b) => (
           <Row
             key={b}
             icon="globe"
             label={hostOf(b)}
-            value={`${CHANNEL_LABELS[baseChannel(b)]}${b === d.lastBase ? ' · 上次使用' : ''}`}
+            value={[t(CHANNEL_LABELS[baseChannel(b)]), b === d.lastBase ? t('上次使用') : null].filter(Boolean).join(' · ')}
             onLongPress={() => removeAddress(b)}
           />
         ))}
-        <Row label="添加地址" tone="accent" onPress={addAddress} chevron={false} />
+        <Row label={t('添加地址')} tone="accent" onPress={addAddress} chevron={false} />
       </Group>
 
       <Group>
         {isCurrent
-          ? <Row icon="refresh" label={busy ? '连接中…' : '重新连接'} disabled={busy} onPress={() => reconnect(getDevice(d.id))} />
-          : <Row icon="laptop" label={busy ? '连接中…' : '切换到这台设备'} tone="accent" disabled={busy} onPress={doSwitch} />}
-        <Row icon="qr" label="重新扫码配对" disabled={busy} onPress={() => setScanOpen(true)} />
+          ? <Row icon="refresh" label={busy ? t('连接中…') : t('重新连接')} disabled={busy} onPress={() => reconnect(getDevice(d.id))} />
+          : <Row icon="laptop" label={busy ? t('连接中…') : t('切换到这台设备')} tone="accent" disabled={busy} onPress={doSwitch} />}
+        <Row icon="qr" label={t('重新扫码配对')} disabled={busy} onPress={() => setScanOpen(true)} />
       </Group>
 
-      <Group footer="会清除这台 Mac 的地址和 Token">
-        <Row label="移除此设备" tone="danger" center onPress={remove} />
+      <Group footer={t('会清除这台 Mac 的地址和 Token')}>
+        <Row label={t('移除此设备')} tone="danger" center onPress={remove} />
       </Group>
 
       <QrScanner visible={scanOpen} onClose={() => setScanOpen(false)} onResult={onScan} />

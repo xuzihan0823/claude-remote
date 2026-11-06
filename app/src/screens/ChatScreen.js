@@ -22,6 +22,7 @@ import { TypingDots } from '../components/TypingDots.js';
 import { ChatComposer } from '../components/composer/ChatComposer.js';
 import { useTheme } from '../theme.js';
 import { haptics } from '../lib/haptics.js';
+import { useI18n } from '../lib/i18n.js';
 
 // 移植 web/ui/screens/chat.js。列表用 inverted FlatList：
 // - 数据倒序（最新在 index 0）。贴底时倒置列表天然「新内容把旧内容往上顶」；
@@ -35,6 +36,7 @@ const MVCP_READING = { minIndexForVisible: 0 };
 // 刚发出的气泡从输入框方向弹起；回显后由同尺寸的正式消息原位替换
 function PendingBubble({ item, canRetry, sessionId }) {
   const { colors } = useTheme();
+  const { t } = useI18n();
   const { text, state } = item;
   const labels = { sending: '发送中', accepted: '已发送', failed: '发送失败', unconfirmed: '状态不明，请确认后重试' };
   const reduceMotion = useReducedMotion();
@@ -50,10 +52,10 @@ function PendingBubble({ item, canRetry, sessionId }) {
     <Animated.View style={[{ transformOrigin: 'right bottom' }, style]}>
       <MessageRow m={{ role: 'user', text }} sessionId={sessionId} sending={state === 'sending'} />
       <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>
-        <Text accessibilityLiveRegion="polite" style={{ color: state === 'failed' ? colors.danger : colors.ink2, fontSize: 12 }}>{labels[state]}</Text>
+        <Text accessibilityLiveRegion="polite" style={{ color: state === 'failed' ? colors.danger : colors.ink2, fontSize: 12 }}>{t(labels[state])}</Text>
         {(state === 'failed' || state === 'unconfirmed') && item.retry ? (
-          <TouchableOpacity disabled={!canRetry} onPress={item.retry} accessibilityRole="button" accessibilityLabel="重试发送" style={{ minHeight: 44, justifyContent: 'center', opacity: canRetry ? 1 : 0.5 }}>
-            <Text style={{ color: colors.accent, fontSize: 13 }}>重试</Text>
+          <TouchableOpacity disabled={!canRetry} onPress={item.retry} accessibilityRole="button" accessibilityLabel={t('重试发送')} style={{ minHeight: 44, justifyContent: 'center', opacity: canRetry ? 1 : 0.5 }}>
+            <Text style={{ color: colors.accent, fontSize: 13 }}>{t('重试')}</Text>
           </TouchableOpacity>
         ) : null}
       </View>
@@ -67,6 +69,7 @@ export function ChatScreen({ route }) {
   const focusNonce = route.params.focusNonce;
   const navigation = useNavigation();
   const { colors } = useTheme();
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
 
   const store = useRef({ map: new Map(), sorted: [] });
@@ -90,7 +93,7 @@ export function ChatScreen({ route }) {
     permissionStateRef.current = next;
     setPermissionState(next);
     if (next.runId && next.requestedMode === 'auto' && next.effectiveMode === 'default' && (prev.runId !== next.runId || prev.effectiveMode !== 'default')) {
-      toast('权限模式：已转为标准审批', 'error');
+      toast(t('权限模式：已转为标准审批'), 'error');
     }
   }, []);
   const [showJump, setShowJump] = useState(false);
@@ -384,7 +387,7 @@ export function ChatScreen({ route }) {
         }
         const sorted = store.current.sorted;
         const i = findFocusIndex(sorted, focusSeq);
-        if (i < 0) { toast('消息定位：未找到该消息', 'error'); return; }
+        if (i < 0) { toast(t('消息定位：未找到该消息'), 'error'); return; }
         setFocusTarget({ key: msgKey(sorted[i]), nonce: focusNonce });
       } catch (e) {
         if (!cancelled && generation === loadGeneration.current && e?.code !== 'unauthorized') {
@@ -505,11 +508,11 @@ export function ChatScreen({ route }) {
     <View style={{ paddingVertical: 8 }}>
       {initLoading && !showPending ? <ActivityIndicator color={colors.ink2} /> : null}
       {!initLoading && !loadErr && !showPending && msgsDesc.length === 0 ? (
-        <Text style={{ textAlign: 'center', color: colors.ink3, fontSize: 13 }}>（空会话）</Text>
+        <Text style={{ textAlign: 'center', color: colors.ink3, fontSize: 13 }}>{t('（空会话）')}</Text>
       ) : null}
       {hasMore ? (
         <TouchableOpacity onPress={loadOlder} style={{ padding: 8 }}>
-          <Text style={{ textAlign: 'center', color: colors.ink2, fontSize: 13 }}>↑ 加载更早消息</Text>
+          <Text style={{ textAlign: 'center', color: colors.ink2, fontSize: 13 }}>{t('↑ 加载更早消息')}</Text>
         </TouchableOpacity>
       ) : null}
     </View>
@@ -560,7 +563,7 @@ export function ChatScreen({ route }) {
             <Pressable
               onPress={jumpToBottom}
               accessibilityRole="button"
-              accessibilityLabel="跳到底部"
+              accessibilityLabel={t('跳到底部')}
               style={({ pressed }) => ({
                 width: 44,
                 height: 44,

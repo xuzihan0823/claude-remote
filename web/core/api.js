@@ -1,4 +1,5 @@
 import { bus } from './bus.js';
+import { t } from './i18n.js';
 
 export const TOKEN_KEY = 'bridge_token';
 export const BASE_KEY = 'bridge_base';
@@ -209,8 +210,8 @@ export function resetModelCache() {
   bus.emit('models-cached', modelCache);
 }
 export function modelValue(model) { return model.alias || model.id || ''; }
-export function modelLabel(model) { return model.displayName || model.alias || model.id || '未命名模型'; }
-export function modelMainName(model) { return model.id || model.alias || '未命名模型'; }
+export function modelLabel(model) { return model.displayName || model.alias || model.id || t('未命名模型'); }
+export function modelMainName(model) { return model.id || model.alias || t('未命名模型'); }
 export function findModel(models, value) {
   if (!value) return null;
   return models.find((m) => m.alias === value || m.id === value) || null;
@@ -232,9 +233,9 @@ export function modelSelection(catalog, value) {
 export function modelTriggerLabel(catalog, value) {
   const { status, model } = modelSelection(catalog, value);
   if (status === 'ok') return modelMainName(model);
-  if (status === 'unavailable') return `${value}（不可用）`;
+  if (status === 'unavailable') return t('{value}（不可用）', { value });
   if (status === 'unverified') return value;
-  return '跟随项目默认';
+  return t('跟随项目默认');
 }
 
 // 每个会话记住手机上为它选的模型：续聊不带 model 时会回到项目默认模型，
@@ -260,5 +261,7 @@ export function resolveDefaultName(catalog) {
 
 export function defaultModelDescription(catalog) {
   const name = resolveDefaultName(catalog);
-  return `${name ? `用户配置默认：${name}；` : ''}实际运行遵循当前项目配置`;
+  return name
+    ? t('用户配置默认：{name}；实际运行遵循当前项目配置', { name })
+    : t('实际运行遵循当前项目配置');
 }

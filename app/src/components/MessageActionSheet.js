@@ -8,6 +8,7 @@ import { Icon } from './Icon.js';
 import { NativeBlurView } from './ProgressiveBlur.js';
 import { copyText } from '../lib/clipboard.js';
 import { haptics } from '../lib/haptics.js';
+import { useI18n } from '../lib/i18n.js';
 import { usePref } from '../lib/prefs.js';
 import { useTheme } from '../theme.js';
 
@@ -32,6 +33,7 @@ function MenuRow({ label, icon, onPress }) {
 // iOS 的 <Text selectable> 只能整段拷贝，只读 TextInput 底层是 UITextView，才支持任意范围选择。
 export function MessageActionSheet({ text, onClose }) {
   const { colors, dark } = useTheme();
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const { height: screenH } = useWindowDimensions();
   const scale = usePref('fontScale');
@@ -42,7 +44,7 @@ export function MessageActionSheet({ text, onClose }) {
   const copy = async () => {
     if (!(await copyText(text))) return;
     haptics.success();
-    toast('已复制', 'info');
+    toast(t('已复制'), 'info');
     onClose();
   };
   const share = () => {
@@ -55,7 +57,7 @@ export function MessageActionSheet({ text, onClose }) {
       {NativeBlurView ? (
         <NativeBlurView intensity={28} tint={dark ? 'dark' : 'light'} style={StyleSheet.absoluteFill} />
       ) : null}
-      <Pressable accessibilityRole="button" accessibilityLabel="关闭" onPress={onClose}
+      <Pressable accessibilityRole="button" accessibilityLabel={t('关闭')} onPress={onClose}
         style={[StyleSheet.absoluteFill, { backgroundColor: dark ? 'rgba(0,0,0,0.45)' : 'rgba(20,16,12,0.22)' }]} />
       <View pointerEvents="box-none"
         style={{ flex: 1, justifyContent: 'center', gap: 10, paddingHorizontal: 16, paddingTop: insets.top + 12, paddingBottom: insets.bottom + 12 }}>
@@ -72,10 +74,10 @@ export function MessageActionSheet({ text, onClose }) {
         </Animated.View>
         {selecting ? (
           <Animated.View key="done" entering={FadeIn.duration(160)} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Text style={{ color: colors.ink2, fontSize: 13, marginLeft: 4 }}>长按文字，拖动两端选择</Text>
+            <Text style={{ color: colors.ink2, fontSize: 13, marginLeft: 4 }}>{t('长按文字，拖动两端选择')}</Text>
             <Pressable accessibilityRole="button" onPress={onClose}>
               <GlassSurface variant="pill" style={{ borderRadius: 22, minHeight: 44, paddingHorizontal: 22, justifyContent: 'center' }}>
-                <Text style={{ color: colors.inkStrong, fontSize: 15, fontWeight: '600' }}>完成</Text>
+                <Text style={{ color: colors.inkStrong, fontSize: 15, fontWeight: '600' }}>{t('完成')}</Text>
               </GlassSurface>
             </Pressable>
           </Animated.View>
@@ -83,9 +85,9 @@ export function MessageActionSheet({ text, onClose }) {
           <Animated.View key="menu" entering={FadeInDown.springify().damping(22).stiffness(280)} style={{ width: MENU_WIDTH }}>
             <GlassSurface style={{ borderRadius: 24, paddingVertical: 6 }}>
               <View accessibilityRole="menu">
-                <MenuRow label="复制" icon="copy" onPress={copy} />
-                <MenuRow label="选择文本" icon="textSelect" onPress={() => { haptics.selection(); setSelecting(true); }} />
-                <MenuRow label="分享" icon="share" onPress={share} />
+                <MenuRow label={t('复制')} icon="copy" onPress={copy} />
+                <MenuRow label={t('选择文本')} icon="textSelect" onPress={() => { haptics.selection(); setSelecting(true); }} />
+                <MenuRow label={t('分享')} icon="share" onPress={share} />
               </View>
             </GlassSurface>
           </Animated.View>
