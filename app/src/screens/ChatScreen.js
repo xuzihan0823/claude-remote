@@ -7,7 +7,7 @@ import { useNavigation } from '@react-navigation/native';
 import { api, fetchSessions, pendingSessionMessages, sessionCache } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
 import { getSessionMode, setSessionMode } from '../../../web/core/modes.js';
-import { emptyPermissionState, reducePermissionState, permissionStatusText, mergePermissionDenials } from '../../../web/core/permission-state.js';
+import { emptyPermissionState, reducePermissionState, mergePermissionDenials } from '../../../web/core/permission-state.js';
 import { ws } from '../../../web/core/ws.js';
 import { applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys } from '../../../web/core/stream-drafts.js';
 import { findFocusIndex, loadUntilSeq } from '../../../web/core/search.js';
@@ -516,9 +516,6 @@ export function ChatScreen({ route }) {
         mode={mode}
         onModeChange={(m) => { setMode(m); setSessionMode(sessionId, m); }}
         showModeSelector
-        subtitle={permissionStatusText(permissionState)
-          ? <Text accessibilityLiveRegion="polite" style={{ color: permissionState.requestedMode === 'auto' && permissionState.effectiveMode === 'default' ? colors.danger : colors.ink2, fontSize: 12, marginTop: 4 }}>{permissionStatusText(permissionState)}</Text>
-          : mode === 'bypassPermissions' ? <Text style={{ color: colors.danger, fontSize: 11, marginTop: 4 }}>Bypass</Text> : null}
       />
 
       <View style={{ flex: 1 }}>
