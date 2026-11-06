@@ -41,4 +41,7 @@ test('denial attaches to one tool result, migrates from use, and never matches s
   assert.equal(mergePermissionDenials([use, result], [{ ...denial, agentId: 'child' }]).unmatched.length, 1);
   assert.equal(denialText({ message: 'Denied', decisionReason: 'Denied' }), 'Denied');
   assert.equal(deniedToolResultText({ decisionReason: 'Rule', message: 'Denied' }, 'Denied'), 'Rule\nDenied');
+  assert.equal(denialText({ decisionReason: 'Interaction cancelled', message: 'Permission denied: request cancelled' }), '审批已取消');
+  assert.equal(denialText({ message: 'Interaction timed out' }), '审批超时未处理');
+  assert.equal(denialText({ message: 'approval channel failed closed: socket hang up' }), '审批通道异常中断');
 });

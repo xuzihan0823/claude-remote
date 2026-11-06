@@ -53,7 +53,7 @@ test('出错给提示，不抛', async () => {
   const search = createSessionSearch(async () => { const e = new Error('x'); e.code = 'network_error'; throw e; }, () => {}, t);
   search.setQuery('x');
   t.flush(); await tick();
-  assert.equal(search.state.error, '网络不可达');
+  assert.equal(search.state.error, '对话搜索：网络不可达');
   assert.equal(search.state.loading, false);
 });
 

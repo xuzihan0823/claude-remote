@@ -51,10 +51,29 @@ export function mergePermissionDenials(messages, denials) {
   return { messages: messages.map((message) => attached.has(message) ? { ...message, permissionDenial: attached.get(message) } : message), unmatched };
 }
 
+const DENIAL_TEXT_MAP = {
+  'User denied this action': '已手动拒绝该操作',
+  'Permission denied: request cancelled': '审批已取消',
+  'Interaction cancelled': '审批已取消',
+  'Interaction timed out': '审批超时未处理',
+  'Interaction denied after process restart': '服务重启，审批已失效',
+  'Permission denied: no confirmed Gateway decision': '未收到有效的审批确认',
+  'Invalid permission decision': '审批结果无效',
+  'Question was not answered': '问题未作答',
+};
+
+function formatDenialLine(line) {
+  if (!line) return '';
+  const trimmed = String(line).trim();
+  if (DENIAL_TEXT_MAP[trimmed]) return DENIAL_TEXT_MAP[trimmed];
+  if (/^approval channel failed closed(?::|$)/i.test(trimmed)) return '审批通道异常中断';
+  return String(line);
+}
+
 export function denialText(denial) {
-  return [...new Set([denial.decisionReason, denial.message].filter(Boolean))].join('\n');
+  return [...new Set([denial.decisionReason, denial.message].map(formatDenialLine).filter(Boolean))].join('\n');
 }
 
 export function deniedToolResultText(denial, result) {
-  return [...new Set([denial.decisionReason, denial.message, result].filter(Boolean))].join('\n');
+  return [...new Set([denial.decisionReason, denial.message, result].map(formatDenialLine).filter(Boolean))].join('\n');
 }

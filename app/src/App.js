@@ -98,7 +98,8 @@ export default function App() {
     clearToken();
     localStorage.removeItem(TOKEN_KEY);
     setAuth('need');
-    setAuthErr('token 已失效，请重新输入');
+    setAuthErr('');
+    toast('登录状态：令牌已失效，请重新配对', 'error');
   }, []);
   useBus('logout', () => {
     ws.stop();
@@ -136,7 +137,7 @@ export default function App() {
       ws.start();
     } else if (authRef.current !== 'ok') {
       setAuth('need');
-      setAuthErr(msg);
+      setAuthErr('');
     }
     toast(msg, 'error');
     return false;
@@ -255,7 +256,7 @@ export default function App() {
   const handleUrl = useCallback((url) => {
     if (!url || !url.startsWith('claude-remote:')) return;
     const link = parseDeepLink(url);
-    if (!link) { toast('无法识别的链接', 'error'); return; }
+    if (!link) { toast('链接打开：无法识别的配对链接', 'error'); return; }
     if (link.type === 'setup') { setPairReq({ token: link.token, bases: link.bases }); return; }
     pendingLinkRef.current = link;
     flushLink();

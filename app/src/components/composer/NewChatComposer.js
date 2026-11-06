@@ -7,7 +7,7 @@ import { usePref } from '../../lib/prefs.js';
 import { haptics } from '../../lib/haptics.js';
 import { toast } from '../../../../web/core/bus.js';
 import { setSessionMode } from '../../../../web/core/modes.js';
-import { token, fetchModels, modelSelection, setSessionModel } from '../../../../web/core/api.js';
+import { token, fetchModels, modelSelection, scopeErrMsg, setSessionModel } from '../../../../web/core/api.js';
 import { effortLabel, effortUsable, setSessionEffort } from '../../../../web/core/effort.js';
 import { useModelCatalog } from '../../lib/useModelCatalog.js';
 import { useEffortLevels } from '../../lib/useEffortLevels.js';
@@ -66,11 +66,11 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
     const text = draft.trim() || (files.length ? '请查看我上传的附件。' : '');
     if (!text || !cwd || !cwdKnown || busy) return;
     if (modelSelection(catalog, model).status === 'unavailable') {
-      toast('所选模型已不可用，请重新选择', 'error');
+      toast('新建会话：所选模型不可用', 'error');
       return;
     }
     if (!effortOk) {
-      toast(`当前模型不支持思考程度「${effortLabel(effort)}」，请重新选择`, 'error');
+      toast(`新建会话：不支持思考程度「${effortLabel(effort)}」`, 'error');
       return;
     }
     setBusy(true);
@@ -98,13 +98,14 @@ export function NewChatComposer({ cwd, cwdLabel, cwdKnown = true, onPickCwd, onD
       createRequest.current = null;
     } catch (e) {
       if (e.code !== 'connection_changed' && e.code !== 'unauthorized') haptics.error();
-      if (e.status === 409) toast('所选项目当前不可创建新会话', 'error');
-      else if (e.status === 413) toast(tooLargeMessage(e), 'error');
-      else if (e.code === 'unknown_model') { toast('该模型已不可用，请重新选择', 'error'); fetchModels().catch(() => {}); }
-      else if (e.code === 'invalid_effort') toast('思考程度参数无效，请重新选择', 'error');
-      else if (e.code === 'unknown_cwd') toast('该项目已不可用，请刷新后重试', 'error');
+      if (e.status === 409) toast('新建会话：当前目录不可创建会话', 'error');
+      else if (e.status === 413) toast(e?.file || files.length > 0 ? tooLargeMessage(e, { hasFiles: true }) : '新建会话：消息内容过长', 'error');
+      else if (e.code === 'attachment_read_failed') toast(e.file ? `附件读取：无法读取「${e.file}」` : '附件读取：无法读取文件', 'error');
+      else if (e.code === 'unknown_model') { toast('新建会话：所选模型不可用', 'error'); fetchModels().catch(() => {}); }
+      else if (e.code === 'invalid_effort') toast('新建会话：思考程度参数无效', 'error');
+      else if (e.code === 'unknown_cwd') toast('新建会话：工作目录不可用', 'error');
       else if (e.code === 'connection_changed') toast('连接已切换，请在当前连接重新发送', 'info');
-      else if (e.code !== 'unauthorized') toast(`新建失败：${e.code}`, 'error');
+      else if (e.code !== 'unauthorized') toast(scopeErrMsg('新建会话', e, '创建失败'), 'error');
     } finally { setBusy(false); }
   }, [draft, cwd, cwdKnown, catalog, model, effort, effortOk, mode, busy, files, onCreated]);
 

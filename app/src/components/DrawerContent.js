@@ -246,7 +246,7 @@ export function DrawerContent({ navigation, state }) {
         />
       </View>
 
-      {projects.catalogError && !searching ? (
+      {projects.catalogError && !projects.catalogLoaded && !searching ? (
         <TouchableOpacity onPress={projects.refresh} accessibilityRole="button" accessibilityLabel={`${projects.catalogError}，重试`} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 18 }}>
           <Text style={{ color: colors.danger, fontSize: 13 }}>{projects.catalogError} · 点击重试</Text>
         </TouchableOpacity>

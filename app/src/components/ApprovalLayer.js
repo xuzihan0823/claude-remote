@@ -10,7 +10,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { KeyboardStickyView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { api, sessionCache } from '../../../web/core/api.js';
+import { api, approvalErrMsg, sessionCache } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
 import { truncate } from '../lib/format.js';
 import { haptics } from '../lib/haptics.js';
@@ -131,7 +131,7 @@ function ApprovalCard({ item, onDecide }) {
       else {
         onDecide(it.interactionId, 'rollback');
         if (e.code !== 'unauthorized') haptics.error();
-        if (e.code !== 'unauthorized') toast(`提交失败：${e.code}`, 'error');
+        if (e.code !== 'unauthorized') toast(approvalErrMsg(e), 'error');
       }
     } finally {
       setBusy(false);

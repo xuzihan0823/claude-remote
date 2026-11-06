@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { NavigationContainerRefContext } from '@react-navigation/native';
 import { fetchSessions, sessionCache } from '../../../web/core/api.js';
-import { useBus } from '../../../web/core/bus.js';
+import { toast, useBus } from '../../../web/core/bus.js';
 import { createProjectSessionGroups, drawerFocus, OPTIMISTIC_TTL } from './project-session-groups.js';
 import { useProjects } from './projects-context.js';
 
@@ -25,7 +25,15 @@ export function useProjectSessionGroups(navigationState) {
   }, [navigation, navigationState]);
 
   useEffect(() => {
-    controller.current = createProjectSessionGroups(fetchSessions, setSnapshot);
+    const prevErrors = new Map();
+    controller.current = createProjectSessionGroups(fetchSessions, (next) => {
+      for (const g of next.groups) {
+        const err = g.error || g.moreError || '';
+        if (err && prevErrors.get(g.id) !== err) toast(err, 'error');
+        prevErrors.set(g.id, err);
+      }
+      setSnapshot(next);
+    });
     return () => { controller.current.dispose(); controller.current = null; };
   }, []);
 

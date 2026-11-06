@@ -100,7 +100,10 @@ export async function probeBase(base, tok, opts = {}) {
   try {
     const res = await fetchImpl(`${base}/api/health`, { headers: { Authorization: `Bearer ${tok}` }, signal: ctrl.signal });
     if (res.status === 401) throw new ApiError(401, 'unauthorized');
-    if (!res.ok) throw new ApiError(res.status, `http_${res.status}`);
+    if (!res.ok) {
+      const data = typeof res.json === 'function' ? await res.json().catch(() => ({})) : {};
+      throw new ApiError(res.status, data?.error || `http_${res.status}`, data);
+    }
   } catch (e) {
     if (e instanceof ApiError) throw e;
     throw new ApiError(0, timedOut ? 'network_timeout' : 'network_error');
@@ -160,11 +163,7 @@ export function probeBases(bases, tok, opts = {}) {
     }
   });
 }
-export function connErrMsg(e) {
-  if (e.code === 'unauthorized') return 'token 不正确';
-  if (e.code === 'network_timeout') return '连接超时（Mac 不可达）：检查 Mac 上 daemon 是否在跑，以及 Tailscale 或 relay 是否可用';
-  return '无法连接 daemon（地址或网络错误）';
-}
+export { apiErrReason, approvalErrMsg, connErrMsg, runErrMsg, scopeErrMsg } from './errors.js';
 
 export const sessionCache = new Map();
 export const pendingSessionMessages = new Map();

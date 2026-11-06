@@ -14,7 +14,7 @@ import { FilePreview } from './FilePreview.js';
 import { Icon, toolIconName } from './Icon.js';
 import { Spark } from './Spark.js';
 import { fmtClock, toolSummary } from '../lib/format.js';
-import { toolHeadline } from '../lib/tool-view.js';
+import { toolErrorHeadline, toolHeadline } from '../lib/tool-view.js';
 import { denialText, deniedToolResultText } from '../../../web/core/permission-state.js';
 import { ToolInputView } from './ToolInputView.js';
 import { useTheme } from '../theme.js';
@@ -298,12 +298,12 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
   }
   if (m.kind === 'tool_result') {
     const chars = (m.text || '').length;
+    const errSub = m.isError ? toolErrorHeadline(m.text) : '';
     return (
       <Block
         icon={<Icon name={m.isError || denial ? 'close' : 'check'} size={15} color={m.isError || denial ? colors.danger : colors.ok} strokeWidth={2.1} />}
         title={denial ? '操作已拒绝' : m.isError ? '工具出错' : '工具结果'}
-        sub={denial ? denial.toolName : `${chars} 字符`}
-        err={m.isError || !!denial}
+        sub={denial ? denial.toolName : (errSub || `${chars} 字符`)}
         defaultOpen={toolsExpanded}
         live={live}
       >
