@@ -51,8 +51,22 @@
 - 部署：宿主 Caddy 共用 8443 按域名分流，relay 以 systemd `claude-remote-relay` 运行（机器无 Docker、内存 768MB、80 端口被占）。公网验证通过：token 200/401、配对端点 403、WS ping/pong、relay 重启后 Mac 约 1s 重连。
 - relay 协议与多通道的设计要点已整理进 `docs/architecture.md`。
 
+### 2026-11-06·cr 控制台易用性（详情翻历史 / 提示分层）
+
+- 会话详情用绝对行下标锚定窗口：PgUp/PgDn 翻历史，翻上去后新消息不再把正在看的内容顶走，翻回底部恢复跟随；标题栏显示“已上翻 N 行”。
+- 主界面底部提示只留常用键（↑↓ / ⏎ / / / a / ? / q），`o` 接管、`p` 配对、`l` 日志、`r` 重启、`s` 启停、`c` 设置、`g` 刷新收进 `?`；帮助页按「会话列表 / 会话详情 / 审批 / daemon / 命令行等价」分组。
+- `cr --help` 增加一句：控制台里同样的操作都有快捷键（按 ? 查看），子命令更适合脚本和一次性查看。
+- 验证：cli 测试 54 通过（新增 2 个用例：翻历史不被新消息顶走并回到底部、底部提示与帮助页分组）、`pnpm --filter @claude-remote/cli typecheck` 与 `pnpm typecheck:root` 通过；未做真实终端手工按键验证。
+
 ## 踩坑
 
 - 真机首次安装报 `kAMDMobileImageMounterDeviceLocked`：手机锁屏导致，解锁即可，不用换 Xcode。
 - 国内服务器上未备案域名（含 sslip.io）访问 80 端口会被阻断，sslip.io 兜底在国内不可用。
 - 本仓库多个 worktree 共用 stash 列表，临时保存文件别用 `git stash`。
+
+### 2026-11-06·relay 配置热加载
+
+- `cr relay add/remove/on/off` 不再重启 daemon：daemon 新增仅本机的 `POST /api/relay/reload`，重读配置文件里的 `RELAY_*`，`RelayManager` 按地址 diff 增删 connector，参数未变的连接原样保留，成功后广播 `{"type":"channels"}`。
+- 手机收到 `channels` 后重新拉 `connect-info` 并 `syncBases`，新增/删除 relay 不必再完整连接一次。
+- 旧 daemon 没有这个接口时 cr 退回原来的重启路径；daemon 没在运行时只保存配置，下次启动生效。
+- 验证：daemon 测试 191 通过（含热加载接口与管理器用例），daemon、cli 两包 typecheck 通过。未在真机和真实 relay 上验证热加载与通道同步。

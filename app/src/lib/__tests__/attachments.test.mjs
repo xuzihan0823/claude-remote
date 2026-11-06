@@ -107,3 +107,15 @@ test('toggleSelectedId：保持点选顺序、支持取消勾选与数量上限'
   const removed = toggleSelectedId(state.next, 'a', 2);
   assert.deepEqual(removed, { next: ['b'], overLimit: false });
 });
+
+test('uploadAttachments：本地读取失败抛 attachment_read_failed，tooLargeMessage 区分附件与正文超限', async () => {
+  saveConn('http://mac:8788', 't');
+  globalThis.fetch = async () => { throw new Error('ENOENT'); };
+  await assert.rejects(
+    uploadAttachments([{ uri: 'file:///missing', name: 'missing.pdf', size: 10 }], '/api/upload'),
+    (e) => e.code === 'attachment_read_failed' && e.file === 'missing.pdf',
+  );
+  assert.equal(tooLargeMessage({ file: 'big.mov' }), '附件上传：「big.mov」超过 25MB');
+  assert.equal(tooLargeMessage({}, { hasFiles: true }), '附件上传：文件超过 25MB');
+  assert.equal(tooLargeMessage({}, { hasFiles: false }), '消息发送：消息内容过长');
+});

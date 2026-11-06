@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { diffLines, foldContext, toolHeadline, toolView } from '../tool-view.js';
+import { diffLines, foldContext, toolErrorHeadline, toolHeadline, toolView } from '../tool-view.js';
 
 const ops = (rows) => rows.map((r) => (r.op === '…' ? `…${r.count}` : `${r.op}${r.text}`));
 
@@ -61,4 +61,10 @@ test('Bash / TodoWrite / 其它工具', () => {
   assert.deepEqual(toolView('Unknown', { x: 1 }), { kind: 'json' });
   assert.deepEqual(toolView('Edit', null), { kind: 'json' });
   assert.equal(toolHeadline('Read', { file_path: 'a' }), null);
+});
+
+test('toolErrorHeadline：提取首行非空报错并限制长度', () => {
+  assert.equal(toolErrorHeadline('\n  Exit code 1\nstack line 2'), 'Exit code 1');
+  assert.equal(toolErrorHeadline(''), '');
+  assert.equal(toolErrorHeadline('x'.repeat(60)), `${'x'.repeat(48)}…`);
 });

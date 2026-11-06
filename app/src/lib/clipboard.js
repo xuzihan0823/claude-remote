@@ -11,13 +11,13 @@ try {
 
 export async function copyText(text) {
   if (!C) {
-    toast('当前安装包不支持复制，请更新 App', 'error');
+    toast('文本复制：当前安装包不支持复制', 'error');
     return false;
   }
   try {
     return await C.setStringAsync(text);
   } catch {
-    toast('复制失败', 'error');
+    toast('文本复制：复制失败', 'error');
     return false;
   }
 }

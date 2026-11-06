@@ -180,11 +180,21 @@ export function snapshotRelayLine(
 
 export type RestartResult = { kind: "restarted" } | { kind: "unhealthy" } | { kind: "skipped"; note: string };
 
+export type ReloadResult =
+  | { kind: "reloaded" }
+  /** 旧 daemon 没有热加载接口（或请求不是本机）：退回重启。 */
+  | { kind: "unsupported" }
+  /** 配置已写入，但 daemon 没在运行：下次启动时生效。 */
+  | { kind: "inactive"; note: string }
+  | { kind: "invalid"; message: string };
+
 export interface RelayDeps {
   envFile: string;
   out: (line: string) => void;
   fetch: typeof fetch;
   restart: () => Promise<RestartResult>;
+  /** 让运行中的 daemon 重读 relay 配置；缺省或返回 unsupported 时退回 restart。 */
+  reload?: () => Promise<ReloadResult>;
   connectInfo: () => Promise<ConnectInfo>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -232,14 +242,25 @@ async function waitForRelay(deps: RelayDeps, expect: Expectation): Promise<WaitR
 }
 
 async function applyRelay(deps: RelayDeps, expect: Expectation): Promise<number> {
-  const restarted = await deps.restart();
-  if (restarted.kind === "skipped") {
-    deps.out(restarted.note);
+  const reload: ReloadResult = deps.reload === undefined ? { kind: "unsupported" } : await deps.reload();
+  if (reload.kind === "inactive") {
+    deps.out(reload.note);
     return 0;
   }
-  if (restarted.kind === "unhealthy") {
-    deps.out("✗ 重启后 daemon 没有响应，看看日志：cr logs");
+  if (reload.kind === "invalid") {
+    deps.out(`✗ relay 配置无效：${reload.message}（cr logs 看详情）`);
     return 1;
+  }
+  if (reload.kind === "unsupported") {
+    const restarted = await deps.restart();
+    if (restarted.kind === "skipped") {
+      deps.out(restarted.note);
+      return 0;
+    }
+    if (restarted.kind === "unhealthy") {
+      deps.out("✗ 重启后 daemon 没有响应，看看日志：cr logs");
+      return 1;
+    }
   }
   const result = await waitForRelay(deps, expect);
   switch (result.kind) {

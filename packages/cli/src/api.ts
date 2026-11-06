@@ -86,6 +86,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
+    /** 服务端附带的说明（如 invalid_relay_config 的原因）。 */
+    readonly detail?: string,
   ) {
     super(`HTTP ${status} ${code}`);
   }
@@ -117,7 +119,8 @@ export class Api {
     }
     if (!res.ok) {
       const code = (parsed as { error?: unknown }).error;
-      throw new ApiError(res.status, typeof code === "string" ? code : "http_error");
+      const detail = (parsed as { message?: unknown }).message;
+      throw new ApiError(res.status, typeof code === "string" ? code : "http_error", typeof detail === "string" ? detail : undefined);
     }
     return parsed as T;
   }
@@ -128,6 +131,11 @@ export class Api {
 
   connectInfo(): Promise<ConnectInfo> {
     return this.#request("GET", "/api/connect-info");
+  }
+
+  /** 仅本机：让 daemon 重读 relay 配置（不重启）。旧版本 daemon 没有这个接口，返回 404。 */
+  reloadRelay(): Promise<{ relays: RelayStatus[] }> {
+    return this.#request("POST", "/api/relay/reload");
   }
 
   async sessions(limit = 200): Promise<{ sessions: SessionSummary[]; total: number }> {

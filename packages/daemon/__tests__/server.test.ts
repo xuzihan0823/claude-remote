@@ -17,7 +17,7 @@ import type { QueryFactory } from "@claude-remote/agent-bridge";
 import { ConfigError, loadConfig, type DaemonConfig } from "../src/config.js";
 import { readModelCatalog } from "../src/model-config.js";
 import { ApprovalBridge, TurnRunner, type ActivityGate, type Notifier } from "../src/run/index.js";
-import { DaemonServer } from "../src/server.js";
+import { DaemonServer, type RelayStatus } from "../src/server.js";
 import { ActivityTracker, type ActivityTrackerOptions } from "../src/watch/activity.js";
 import { CliExitReleaser, readLiveCliSessions } from "../src/watch/cli-presence.js";
 import { SessionWatcher } from "../src/watch/watcher.js";
@@ -121,6 +121,7 @@ interface Harness {
 async function startHarness(
   isCliAlive: (sessionId: string) => Promise<boolean> = async () => false,
   trackerOptions: ActivityTrackerOptions = {},
+  reloadRelays?: () => Promise<RelayStatus[]>,
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "claude-remote-it-"));
   const settingsPath = join(root, "settings.json");
@@ -172,6 +173,7 @@ async function startHarness(
     isCliAlive,
     modelCatalog: () => readModelCatalog(settingsPath),
     effortOptions: async () => ({ levels: ["low", "high", "max"], verified: true }),
+    ...(reloadRelays === undefined ? {} : { reloadRelays }),
   });
   await server.listen();
   const { port } = server.address();
@@ -1376,4 +1378,52 @@ test("auto downgrade and structured denial recover after snapshot without creati
   idle.send({ type: "subscribe", sessionId: SESSION_ID });
   assert.deepEqual(await idle.waitFor((f) => f.type === "session-state"), { type: "session-state", sessionId: SESSION_ID, status: "idle", activeRunId: null });
   assert.equal(idle.frames.some((f) => f.type === "permission-denied" || f.type === "agent-notice"), false);
+});
+
+test("relay 热加载：无 token 401；带 token 200 并广播 channels", async (t) => {
+  let calls = 0;
+  const statuses: RelayStatus[] = [{ state: "connected", base: "https://relay.example.com/d/abc", since: 1 }];
+  const h = await startHarness(async () => false, {}, async () => {
+    calls += 1;
+    return statuses;
+  });
+  t.after(() => h.dispose());
+
+  const anon = await fetch(`${h.base}/api/relay/reload`, { method: "POST" });
+  assert.equal(anon.status, 401);
+  assert.deepEqual(await anon.json(), { error: "unauthorized" });
+
+  const sink = new FrameSink(h.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+
+  const res = await fetch(`${h.base}/api/relay/reload`, authed({ method: "POST" }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { relays: statuses });
+  assert.equal(calls, 1);
+  await sink.waitFor((frame) => frame.type === "channels");
+});
+
+test("relay 热加载：代理转发的请求 403；未接线时 404", async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+
+  const proxied = await fetch(`${h.base}/api/relay/reload`, authed({ method: "POST", headers: { "x-forwarded-for": "203.0.113.7" } }));
+  assert.equal(proxied.status, 403);
+  assert.deepEqual(await proxied.json(), { error: "loopback_only" });
+
+  const missing = await fetch(`${h.base}/api/relay/reload`, authed({ method: "POST" }));
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { error: "not_supported" });
+});
+
+test("relay 热加载：配置非法返回 400 并带上原因", async (t) => {
+  const h = await startHarness(async () => false, {}, async () => {
+    throw new Error("RELAY_SECRET must be at least 32 printable ASCII characters");
+  });
+  t.after(() => h.dispose());
+
+  const res = await fetch(`${h.base}/api/relay/reload`, authed({ method: "POST" }));
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "invalid_relay_config", message: "RELAY_SECRET must be at least 32 printable ASCII characters" });
 });

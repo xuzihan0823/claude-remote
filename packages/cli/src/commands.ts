@@ -54,6 +54,8 @@ export const HELP = `cr — Claude Remote 控制台
   cr show <id>          最近消息（id 可写前缀）
   cr open <id>          在当前终端 claude --resume 接着聊
   cr uninstall          移除 launchd 服务（不删数据）
+
+控制台里这些操作都有快捷键（进去按 ? 查看）；子命令更适合脚本和一次性查看。
 `;
 
 function touch(file: string): void {
@@ -227,6 +229,20 @@ export async function cmdRelay(ctx: Context, args: string[]): Promise<void> {
     out: (line) => console.log(line),
     fetch,
     restart: () => restartForRelay(ctx),
+    reload: async () => {
+      if (api === undefined) return { kind: "inactive", note: "已保存。没有找到 BRIDGE_TOKEN，启动 daemon 后生效" };
+      try {
+        await api.reloadRelay();
+        return { kind: "reloaded" };
+      } catch (error) {
+        if (error instanceof ApiError) {
+          // 旧 daemon 没有这个接口，或 daemon 只监听非回环地址：退回重启
+          if (error.status === 404 || error.status === 403) return { kind: "unsupported" };
+          if (error.status === 400) return { kind: "invalid", message: error.detail ?? error.code };
+        }
+        return { kind: "inactive", note: "已保存。daemon 没在运行：下次启动（打开 cr）时生效" };
+      }
+    },
     connectInfo: () => {
       if (api === undefined) return Promise.reject(new Error("没有找到 BRIDGE_TOKEN，先运行 cr setup"));
       return api.connectInfo();

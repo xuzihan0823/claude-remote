@@ -11,8 +11,8 @@ globalThis.localStorage = {
 };
 const connection = await import('./api.js');
 const {
-  api, defaultModelDescription, fetchModels, fetchProjects, fetchSessions, getSessionModel, modelSelection, modelTriggerLabel, probeBase,
-  resetModelCache, saveConn, sessionCache, setSessionModel,
+  api, apiErrReason, approvalErrMsg, defaultModelDescription, fetchModels, fetchProjects, fetchSessions, getSessionModel, modelSelection, modelTriggerLabel, probeBase,
+  resetModelCache, runErrMsg, saveConn, scopeErrMsg, sessionCache, setSessionModel,
 } = connection;
 const { bus } = await import('./bus.js');
 after(() => {
@@ -144,4 +144,20 @@ test('default copy identifies user settings without promising the effective proj
   assert.equal(modelTriggerLabel(catalog, ''), '跟随项目默认');
   assert.equal(defaultModelDescription(catalog), '用户配置默认：provider/user-A；实际运行遵循当前项目配置');
   assert.equal(defaultModelDescription(null), '实际运行遵循当前项目配置');
+});
+
+test('scopeErrMsg, runErrMsg and approvalErrMsg label the error location and map raw errors to concise Chinese reasons', () => {
+  assert.equal(scopeErrMsg('会话加载', { code: 'session_not_found' }, '加载失败'), '会话加载：会话不存在');
+  assert.equal(scopeErrMsg('会话加载', { code: 'network_timeout' }, '加载失败'), '会话加载：连接超时');
+  assert.equal(scopeErrMsg('历史消息', { code: 'upstream_timeout' }, '加载失败'), '历史消息：连接超时');
+  assert.equal(scopeErrMsg('历史消息', { code: 'network_error' }, '加载失败'), '历史消息：网络不可达');
+  assert.equal(scopeErrMsg('消息定位', { code: 'device_offline' }, '定位失败'), '消息定位：设备离线');
+  assert.equal(scopeErrMsg('消息定位', { status: 502, code: 'http_502' }, '定位失败'), '消息定位：中继不可用');
+  assert.equal(scopeErrMsg('会话加载', { status: 500, code: 'internal' }, '加载失败'), '会话加载：服务异常');
+  assert.equal(apiErrReason(new Error('unexpected'), '定位失败'), '定位失败');
+  assert.equal(runErrMsg('API Error: 404 model not found'), '模型运行：模型不可用');
+  assert.equal(runErrMsg('429 Too Many Requests: rate limit exceeded'), '模型运行：请求过于频繁');
+  assert.equal(runErrMsg('529 Overloaded'), '模型运行：服务繁忙');
+  assert.equal(approvalErrMsg({ code: 'invalid', data: { message: 'missing answer for: q1' } }), '审批提交：请先完成作答');
+  assert.equal(approvalErrMsg({ code: 'network_timeout' }), '审批提交：连接超时');
 });

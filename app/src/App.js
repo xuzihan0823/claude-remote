@@ -98,7 +98,8 @@ export default function App() {
     clearToken();
     localStorage.removeItem(TOKEN_KEY);
     setAuth('need');
-    setAuthErr('token 已失效，请重新输入');
+    setAuthErr('');
+    toast('登录状态：令牌已失效，请重新配对', 'error');
   }, []);
   useBus('logout', () => {
     ws.stop();
@@ -108,6 +109,25 @@ export default function App() {
     setAuth('need');
     setAuthErr('');
   }, []);
+
+  // 按 daemon 报告的地址同步这台设备的候选通道（手填地址永远保留）。完整连接和 daemon 广播
+  // channels 时都走这里：新增或删除 relay 后手机不必再“完整连接一次”。
+  const syncDeviceBases = useCallback((id, connectedBase) => {
+    if (!id) return;
+    api('/api/connect-info').then((info) => {
+      if (!Array.isArray(info?.bases)) return;
+      syncBases(id, info.bases, connectedBase);
+      bus.emit('devices');
+    }).catch(() => { /* 旧 daemon 无此接口（404）或网络问题：沿用已有地址 */ });
+  }, []);
+
+  useBus('ws:channels', () => {
+    syncDeviceBases(currentDeviceId(), baseUrl);
+  }, [syncDeviceBases]);
+  // 断线期间 daemon 可能改过 relay 配置，重连后补一次，避免手机长期留着已删除的地址
+  useBus('ws-open', () => {
+    syncDeviceBases(currentDeviceId(), baseUrl);
+  }, [syncDeviceBases]);
 
   // opts.beforeCommit：探测成功后、切到首页前调用（登录页借此播放「已连接」衔接动画）
   // 连接成功后记下这台 Mac（设备列表），再异步取主机名 / 版本补全显示信息，并按 daemon 报告同步候选地址。
@@ -119,13 +139,9 @@ export default function App() {
       updateDevice(d.id, { autoName: h?.hostname ? displayName(h.hostname, base) : undefined, info: { version: h?.version, claudeCliVersion: h?.claudeCliVersion } });
       bus.emit('devices');
     }).catch(() => { /* 显示信息缺失不影响使用 */ });
-    api('/api/connect-info').then((info) => {
-      if (!Array.isArray(info?.bases)) return;
-      syncBases(d.id, info.bases, base);
-      bus.emit('devices');
-    }).catch(() => { /* 旧 daemon 无此接口（404）或网络问题：沿用已有地址 */ });
+    syncDeviceBases(d.id, base);
     return d;
-  }, []);
+  }, [syncDeviceBases]);
 
   // 已配对时启动探测失败（Mac 休眠、网络未就绪）不退回连接页：进主界面，由 ws 重连和 reselect 自动恢复。
   const onConnectFail = useCallback((e, opts) => {
@@ -136,7 +152,7 @@ export default function App() {
       ws.start();
     } else if (authRef.current !== 'ok') {
       setAuth('need');
-      setAuthErr(msg);
+      setAuthErr('');
     }
     toast(msg, 'error');
     return false;
@@ -255,7 +271,7 @@ export default function App() {
   const handleUrl = useCallback((url) => {
     if (!url || !url.startsWith('claude-remote:')) return;
     const link = parseDeepLink(url);
-    if (!link) { toast('无法识别的链接', 'error'); return; }
+    if (!link) { toast('链接打开：无法识别的配对链接', 'error'); return; }
     if (link.type === 'setup') { setPairReq({ token: link.token, bases: link.bases }); return; }
     pendingLinkRef.current = link;
     flushLink();

@@ -145,12 +145,23 @@ export async function uploadAttachments(files, endpoint, { onProgress } = {}) {
     const f = files[i];
     onProgress?.(i, files.length);
     if (f.uploadedPath && f.uploadedBase === requestBase) { paths.push(f.uploadedPath); continue; }
-    const blob = await (await fetch(f.uri)).blob();
+    let blob;
+    try {
+      blob = await (await fetch(f.uri)).blob();
+    } catch {
+      throw Object.assign(new ApiError(0, 'attachment_read_failed'), { file: f.name });
+    }
     check();
     if (blob.size > MAX_UPLOAD_BYTES) throw Object.assign(new ApiError(413, 'payload_too_large'), { file: f.name });
-    const r = await api(`${endpoint}?filename=${encodeURIComponent(f.name)}`, {
-      method: 'POST', body: blob, headers: { 'Content-Type': 'application/octet-stream' },
-    });
+    let r;
+    try {
+      r = await api(`${endpoint}?filename=${encodeURIComponent(f.name)}`, {
+        method: 'POST', body: blob, headers: { 'Content-Type': 'application/octet-stream' },
+      });
+    } catch (e) {
+      if (e?.status === 413 && !e.file) e.file = f.name;
+      throw e;
+    }
     check();
     f.uploadedPath = r.path;
     f.uploadedBase = requestBase;
@@ -161,6 +172,7 @@ export async function uploadAttachments(files, endpoint, { onProgress } = {}) {
 }
 
 /** 413 的提示文案：带上是哪个文件。 */
-export function tooLargeMessage(e) {
-  return e?.file ? `「${e.file}」超过 25MB，无法上传` : '附件过大（上限 25MB）';
+export function tooLargeMessage(e, { hasFiles = true } = {}) {
+  if (e?.file) return `附件上传：「${e.file}」超过 25MB`;
+  return hasFiles ? '附件上传：文件超过 25MB' : '消息发送：消息内容过长';
 }

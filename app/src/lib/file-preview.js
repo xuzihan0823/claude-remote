@@ -10,6 +10,12 @@ const ERROR_TEXT = {
   file_not_found: '文件不存在',
   session_not_found: '会话不存在',
   invalid_path: '文件路径无效',
+  network_timeout: '连接超时',
+  upstream_timeout: '连接超时',
+  idle_timeout: '连接超时',
+  network_error: '网络不可达',
+  device_offline: '设备离线',
+  device_disconnected: '设备离线',
 };
 
 export const fileErrorText = (code) => ERROR_TEXT[code] || '无法读取文件';

@@ -25,7 +25,7 @@ export function AttachmentPicker({ disabled, onPicked, extraItems = [] }) {
     const items = assets.map((a) => normalizeAsset(a));
     const ok = items.filter((f) => !(f.size > MAX_UPLOAD_BYTES));
     const big = items.length - ok.length;
-    if (big) toast(`${big} 个文件超过 25MB，已跳过`, 'error');
+    if (big) toast(`附件选择：已跳过 ${big} 个超过 25MB 的文件`, 'error');
     if (ok.length) onPicked(ok);
   };
 
@@ -50,8 +50,8 @@ export function AttachmentPicker({ disabled, onPicked, extraItems = [] }) {
       if (!perm.granted) { askSettings('相机'); return; }
       const r = await ImagePicker.launchCameraAsync(imageOpts);
       if (r && !r.canceled && r.assets) addAssets(r.assets);
-    } catch (e) {
-      toast(`相机打开失败：${e?.message || e}`, 'error');
+    } catch {
+      toast('相机：无法打开', 'error');
     }
   };
 
@@ -60,8 +60,8 @@ export function AttachmentPicker({ disabled, onPicked, extraItems = [] }) {
       // iOS 14+ 走系统 PHPicker，无需相册授权
       const r = await ImagePicker.launchImageLibraryAsync({ ...imageOpts, allowsMultipleSelection: true, selectionLimit: 10 });
       if (r && !r.canceled && r.assets) addAssets(r.assets);
-    } catch (e) {
-      toast(`相册打开失败：${e?.message || e}`, 'error');
+    } catch {
+      toast('相册：无法打开', 'error');
     }
   };
 
@@ -69,8 +69,8 @@ export function AttachmentPicker({ disabled, onPicked, extraItems = [] }) {
     try {
       const r = await DocumentPicker.getDocumentAsync({ multiple: true, copyToCacheDirectory: true, type: '*/*' });
       if (r && !r.canceled && r.assets) addAssets(r.assets);
-    } catch (e) {
-      toast(`文件选择失败：${e?.message || e}`, 'error');
+    } catch {
+      toast('文件选择：读取失败', 'error');
     }
   };
 
