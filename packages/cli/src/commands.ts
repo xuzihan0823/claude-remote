@@ -48,7 +48,7 @@ export const HELP = `cr — Claude Remote 控制台
   cr pair               终端打印配对二维码
   cr config             查看配置；cr config set <项> <值> / unset <项> / reset-token
                         项：host port bark ntfy timeout cooldown claude uploads autostart（改完自动重启 daemon）
-  cr relay              自建 relay：add [地址] [密钥]（省略时读剪贴板/管道）| status | on | off | remove
+  cr relay              自建 relay：add [地址] [密钥]（省略时读 stdin）| status | on | off | remove
   cr ls [-n 20]         最近会话
   cr search <词> [--full]  搜标题/项目路径；--full 连对话全文一起搜
   cr show <id>          最近消息（id 可写前缀）

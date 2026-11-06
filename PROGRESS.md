@@ -57,8 +57,8 @@
 - 国内服务器上未备案域名（含 sslip.io）访问 80 端口会被阻断，sslip.io 兜底在国内不可用。
 - 本仓库多个 worktree 共用 stash 列表，临时保存文件别用 `git stash`。
 
-### 2026-11-06·cr relay add 省掉复制地址和密钥
+### 2026-11-06·cr relay add 支持从 stdin 读安装输出
 
-- 服务器装完 relay 后不用从输出里挑出 `cr relay add …` 那一行：把输出整段复制到剪贴板，在 Mac 上直接 `cr relay add` 即可；有管道时读 stdin（`… | cr relay add`），方便脚本化。
-- 识别顺序：`cr relay add <地址> <密钥>` 行 → `RELAY_URL=` / `RELAY_SECRET=` → 全文唯一的地址和唯一的密钥；出现多个候选时明确报错，不猜。
-- 验证：cli 测试 54 通过（新增 2 个用例覆盖识别与歧义报错）、`pnpm --filter @claude-remote/cli typecheck` 与 `pnpm typecheck:root` 通过；用临时 repo 目录 + 本地假 relay 实测管道导入、显式参数和缺参数报错。
+- cr 和 relay 在同一台服务器上时省掉跨机器复制：安装输出直接管道给 cr（`… | cr relay add`）或 `cr relay add < relay-install.log`。
+- 无参数 `cr relay add` 只读 stdin，只认 `cr relay add <地址> <密钥>` 行或 `RELAY_URL=` / `RELAY_SECRET=` 配置对；认不出直接报错，不从别的文本里猜。
+- 验证：cli 测试 54 通过（2 个用例覆盖 stdin 识别与认不出时的报错）、`pnpm --filter @claude-remote/cli typecheck` 与 `pnpm typecheck:root` 通过；临时 repo 目录 + 本地假 relay 实测管道导入、重定向导入、显式参数和缺参数报错。

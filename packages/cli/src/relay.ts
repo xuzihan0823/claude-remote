@@ -1,7 +1,5 @@
 // cr relay：RELAY_* 由这里管理，设备身份由所有 relay 共用。
 
-import { execFile } from "node:child_process";
-
 import { isRelaySecret, MIN_RELAY_SECRET_LENGTH, normalizeRelayUrl, relayBase, relayConfigIndexes } from "@claude-remote/daemon/config";
 import { deriveDeviceId, generateDeviceKey, isDeviceKey } from "@claude-remote/relay/protocol";
 
@@ -18,7 +16,7 @@ const DEFINITIVE_ERRORS = new Set(["auth", "device_key_mismatch", "invalid_devic
 
 export const RELAY_USAGE = `用法：
   cr relay add <relay 地址> <密钥>   追加 relay；地址已存在时更新密钥
-  cr relay add                       不带参数：从剪贴板或 stdin（… | cr relay add）识别地址和密钥
+  cr relay add                       不带参数：从 stdin 读安装输出（… | cr relay add）
   cr relay status                    逐条查看连接状态与手机地址
   cr relay on | off                  全部启用 / 临时停用（保留配置）
   cr relay remove <relay 地址>       删除一个 relay，保留设备私钥
@@ -50,9 +48,8 @@ function unquote(token: string): string {
 }
 
 /**
- * 从整段安装输出里认出「地址 + 密钥」：优先 `cr relay add <地址> <密钥>` 那一行，
- * 其次 `RELAY_URL=` / `RELAY_SECRET=`，最后按全文唯一的地址和唯一的密钥兜底。
- * 这样服务器上的输出整段复制下来，直接 `cr relay add` 就能用。
+ * 从 stdin 里的安装输出认出「地址 + 密钥」：`cr relay add <地址> <密钥>` 那一行，
+ * 或 `RELAY_URL=` / `RELAY_SECRET=` 配置对。认不出就报错，不做模糊猜测。
  */
 export function parseRelayAddInput(text: string): { url: string; secret: string } {
   const clean = text.replace(ANSI_ESCAPE, "");
@@ -65,46 +62,14 @@ export function parseRelayAddInput(text: string): { url: string; secret: string 
   if (urlLine !== null && secretLine !== null) {
     return { url: parseRelayUrl(unquote(urlLine[1]!)), secret: relaySecretOrThrow(unquote(secretLine[1]!)) };
   }
-  const urls = [...new Set([...clean.matchAll(/https?:\/\/[^\s"'`<>]+/g)].map((match) => match[0].replace(/[),.;:>\]'"]+$/, "")).filter((candidate) => normalizeRelayUrl(candidate) !== undefined))];
-  if (urls.length === 0) throw new Error("没从输入里找到 relay 地址（https://…）");
-  if (urls.length > 1) throw new Error(`识别到多个地址（${urls.join("、")}），请直接用 cr relay add <地址> <密钥>`);
-  const secrets = [...new Set([...clean.matchAll(/(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])/g)].map((match) => match[0]).filter((candidate) => isRelaySecret(candidate)))];
-  if (secrets.length === 0) throw new Error("没从输入里找到 relay 密钥（32 个字符以上的字母、数字、- 或 _）");
-  if (secrets.length > 1) throw new Error("识别到多个候选密钥，请直接用 cr relay add <地址> <密钥>");
-  return { url: parseRelayUrl(urls[0]!), secret: relaySecretOrThrow(secrets[0]!) };
-}
-
-function execText(command: string, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(command, args, { timeout: 3000, maxBuffer: 1024 * 1024 }, (error, stdout) => (error === null ? resolve(stdout) : reject(error)));
-  });
-}
-
-/** 剪贴板全文：macOS 用 pbpaste，Linux 依次尝试 wl-paste / xclip / xsel。 */
-async function readClipboardText(): Promise<string> {
-  const commands: [string, string[]][] = process.platform === "darwin"
-    ? [["pbpaste", []]]
-    : [["wl-paste", ["--no-newline"]], ["xclip", ["-selection", "clipboard", "-o"]], ["xsel", ["--clipboard", "--output"]]];
-  for (const [command, args] of commands) {
-    try {
-      return await execText(command, args);
-    } catch {
-      continue;
-    }
-  }
-  throw new Error("读不到剪贴板（Linux 需要 wl-clipboard 或 xclip）。也可以直接 cr relay add <地址> <密钥>");
+  throw new Error("没从 stdin 里认出 relay 地址和密钥（需要 `cr relay add <地址> <密钥>` 行，或 RELAY_URL= / RELAY_SECRET=）；也可以直接带参数");
 }
 
 async function readStdinText(): Promise<string> {
+  if (process.stdin.isTTY) throw new Error("没有从管道收到内容；请直接 cr relay add <地址> <密钥>，或把安装输出管道过来");
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk as Uint8Array));
   return Buffer.concat(chunks).toString("utf8");
-}
-
-/** 有管道时读管道（ssh … | cr relay add），否则读剪贴板。 */
-async function readRelayImportText(): Promise<string> {
-  if (!process.stdin.isTTY) return readStdinText();
-  return readClipboardText();
 }
 
 export async function probeRelay(url: string, fetchImpl: typeof fetch): Promise<void> {
@@ -261,8 +226,8 @@ export interface RelayDeps {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   waitMs?: number;
-  /** 无参数 add 时的导入文本来源（默认：有管道读 stdin，否则读剪贴板）；测试注入用。 */
-  readImport?: () => Promise<string>;
+  /** 无参数 add 时的输入来源（默认读 stdin）；测试注入用。 */
+  readStdin?: () => Promise<string>;
 }
 
 type Expectation = { kind: "connected"; bases: string[] } | { kind: "disconnected"; bases?: string[] };
@@ -374,12 +339,12 @@ export async function runRelay(args: string[], deps: RelayDeps): Promise<number>
         secret = rest[1]!;
         checkRelaySecret(secret);
       } else if (rest.length === 0) {
-        const text = await (deps.readImport ?? readRelayImportText)();
-        if (text.trim() === "") throw new Error("剪贴板 / 管道里没有内容；也可以直接 cr relay add <地址> <密钥>");
+        const text = await (deps.readStdin ?? readStdinText)();
+        if (text.trim() === "") throw new Error("没有从 stdin 收到内容；请直接 cr relay add <地址> <密钥>");
         ({ url, secret } = parseRelayAddInput(text));
         deps.out(`✓ 已识别地址 ${url}`);
       } else {
-        throw new Error("用法：cr relay add <relay 地址> <密钥>；不带参数时从剪贴板 / 管道导入");
+        throw new Error("用法：cr relay add <relay 地址> <密钥>；不带参数时从 stdin 读安装输出");
       }
       const previous = readRelayFile(deps.envFile);
       deps.out(`… 检查 ${url}`);

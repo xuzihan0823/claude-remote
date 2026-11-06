@@ -46,9 +46,7 @@ sudo bash install.sh --domain relay.example.com
 cr relay add https://relay.example.com <密钥>
 ```
 
-不想从输出里挑那一行也没关系：把安装输出整段复制，回到 Mac 直接执行 `cr relay add`，它会自己认出地址和密钥；有管道时读 stdin（`… | cr relay add`）。识别到多个候选地址或密钥时会直接报错，不会替你猜。
-
-如果 cr 和 daemon 就跑在这台服务器上，不用复制：安装输出可以直接管道给 cr（`curl … | sudo bash | cr relay add`），或先存成文件再 `cr relay add < relay-install.log`。服务器没有图形界面时无参数 `cr relay add` 读 stdin，没有管道会提示读不到剪贴板。
+如果 cr 和 daemon 就跑在这台服务器上，可以省掉复制：安装输出直接管道给 cr（`curl … | sudo bash | cr relay add`），或先存成文件再 `cr relay add < relay-install.log`。无参数 `cr relay add` 只从 stdin 读，并且只认 `cr relay add <地址> <密钥>` 那一行或 `RELAY_URL=` / `RELAY_SECRET=` 配置对，认不出就报错，不会从别的内容里猜。在 Mac 上手工接入时，照抄脚本打印的命令即可。
 
 之后让已配对的手机完整连接一次（冷启动或点“重新连接”），即可同步 relay 地址，无需重新扫码。新手机用 `cr pair` 扫码。
 

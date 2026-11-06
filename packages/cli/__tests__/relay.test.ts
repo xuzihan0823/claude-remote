@@ -149,15 +149,15 @@ test("relay add：密钥错误立即报告，不等满 15 秒", async () => {
   assert.match(h.lines.at(-1) ?? "", /✗ .*relay 密钥错误/);
 });
 
-test("relay add 无参数：从剪贴板 / 管道文本里认出地址和密钥", async () => {
+test("relay add 无参数：从 stdin 的安装输出里认出地址和密钥", async () => {
   const cases: Array<[string, string]> = [
     [`\x1b[1;34m==>\x1b[0m relay 已就绪\n    cr relay add ${URL_} ${SECRET}\n`, `${URL_}/healthz`],
+    [`安装完成，参考文档 https://github.com/xuzihan0823/claude-remote\n    cr relay add ${URL_} ${SECRET}\n`, `${URL_}/healthz`],
     [`RELAY_DOMAIN=relay.example.com\nRELAY_URL=${URL_}\nRELAY_SECRET=${SECRET}\nRELAY_HTTPS_PORT=443\n`, `${URL_}/healthz`],
-    [`安装完成，地址 ${URL_} ，密钥 ${SECRET} 请自行保存`, `${URL_}/healthz`],
   ];
   for (const [text, probe] of cases) {
     const h = harness(envFile());
-    h.deps.readImport = async () => text;
+    h.deps.readStdin = async () => text;
     assert.equal(await runRelay(["add"], h.deps), 0, text);
     assert.deepEqual(h.fetched, [probe]);
     assert.equal(parseDotenv(readFileSync(h.deps.envFile, "utf8")).RELAY_SECRET, SECRET);
@@ -165,18 +165,16 @@ test("relay add 无参数：从剪贴板 / 管道文本里认出地址和密钥"
   }
 });
 
-test("relay add 无参数：认不出或候选不唯一时明确报错，不写文件、不重启", async () => {
+test("relay add 无参数：认不出时不猜，不写文件、不重启", async () => {
   const cases: Array<[string, RegExp]> = [
-    [" \n\t\n", /没有内容/],
-    ["安装完成，没有可识别的内容", /没从输入里找到 relay 地址/],
-    [`https://a.example.com https://b.example.com ${SECRET}`, /识别到多个地址/],
-    [`${URL_} 这次没带上密钥`, /没从输入里找到 relay 密钥/],
-    [`${URL_} ${"a".repeat(40)} ${"b".repeat(40)}`, /多个候选密钥/],
+    ["", /没有从 stdin 收到内容/],
+    [" \n\t\n", /没有从 stdin 收到内容/],
+    [`安装完成，地址 ${URL_} ，密钥 ${SECRET} 请自行保存`, /没从 stdin 里认出/],
   ];
   for (const [text, message] of cases) {
     const file = envFile();
     const h = harness(file);
-    h.deps.readImport = async () => text;
+    h.deps.readStdin = async () => text;
     await assert.rejects(runRelay(["add"], h.deps), message, text);
     assert.equal(readFileSync(file, "utf8"), "BRIDGE_TOKEN=t\n# 注释\n");
     assert.equal(h.restarts, 0);
