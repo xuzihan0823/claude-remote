@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { transformSync } from 'esbuild';
 import { applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys } from '../../../../web/core/stream-drafts.js';
 import { newClientMessageId, reconcilePending, sendFailureState } from '../../../../web/core/message-delivery.js';
 import { emptyPermissionState, reducePermissionState } from '../../../../web/core/permission-state.js';
-import { mergeToolMessages, takeToolBatch, TOOL_BATCH_INTERVAL_MS } from '../tool-view.js';
+import { matchesMessageKey, mergeToolMessages, takeToolBatch, TOOL_BATCH_INTERVAL_MS } from '../tool-view.js';
 
 const storageValues = new Map();
 if (!globalThis.localStorage) {
@@ -43,6 +44,7 @@ function mount(source, start, end, exposed, initialProps, dependencies) {
       return slots[index] ??= { current: initial };
     },
     useCallback(fn) { cursor++; return fn; },
+    useMemo(fn) { cursor++; return fn(); },
     useEffect(fn, deps) {
       const index = cursor++;
       const previous = effects[index];
@@ -63,7 +65,8 @@ function mount(source, start, end, exposed, initialProps, dependencies) {
     bodyStart = headerEnd + 4;
   }
   const body = source.slice(bodyStart, source.indexOf(end));
-  const run = new Function('props', ...Object.keys(hooks), `${header}${body}\nreturn { ${exposed} };`);
+  const compiled = transformSync(`${header}${body}`, { loader: 'jsx', jsxFactory: 'createElement' }).code;
+  const run = new Function('props', ...Object.keys(hooks), `${compiled}\nreturn { ${exposed} };`);
   return {
     render(nextProps = props) {
       props = nextProps;
@@ -86,9 +89,10 @@ function mount(source, start, end, exposed, initialProps, dependencies) {
   };
 }
 
-function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: false }), dependencies = {}) {
-  const instance = mount(screenSource, 'export function ChatScreen({ route }) {', '  const kbOffset =',
-    'pending, onSendFailed, drafts, store, runActive, activeRunId, status, addMsgs, onSending, onSent, loadErr, initLoading, firstSeq, hasMore, loadOlder, permissionState, mode, setMode', {}, {
+function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: false }), dependencies = {}, includeScroll = false) {
+  const scrollExports = includeScroll ? ', readingHistory, showJump, userScrolling, listRef, renderScroll, onScroll, onUserScrollBegin, onUserScrollEnd, onMomentumScrollEnd, jumpToBottom, onContentInsetChange, setFocusTarget' : '';
+  const instance = mount(screenSource, 'export function ChatScreen({ route }) {', includeScroll ? '  const visiblePending =' : '  const kbOffset =',
+    `pending, onSendFailed, drafts, store, runActive, activeRunId, status, addMsgs, onSending, onSent, loadErr, initLoading, firstSeq, hasMore, loadOlder, permissionState, mode, setMode${scrollExports}`, {}, {
       route: { params: { sessionId: 'session' } },
       useNavigation: () => ({}), useTheme: () => ({ colors: {} }), useSafeAreaInsets: () => ({}),
       useI18n: () => ({ t: fakeT }),
@@ -100,7 +104,11 @@ function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: fals
       toast() {}, setSessionMode() {}, PERMISSION_MODES: ['default'],
       haptics: { success() {} },
       newClientMessageId, reconcilePending, sendFailureState, runErrMsg, scopeErrMsg,
-      takeToolBatch, TOOL_BATCH_INTERVAL_MS,
+      mergePermissionDenials: (messages) => ({ messages, unmatched: [] }),
+      MVCP_READING: { minIndexForVisible: 0 },
+      KeyboardChatScrollView: 'KeyboardChatScrollView',
+      createElement: (type, props) => ({ type, props }),
+      matchesMessageKey, mergeToolMessages, takeToolBatch, TOOL_BATCH_INTERVAL_MS,
       ...dependencies,
     });
   instance.render();
@@ -109,6 +117,174 @@ function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: fals
 const user = { seq: 1, role: 'user', kind: 'text', text: '问题' };
 const answer = { seq: 2, blockIndex: 0, apiMessageId: 'msg', role: 'assistant', kind: 'text', text: '好的' };
 const stream = { sessionId: 'session', key: 'msg:0', offset: 0, text: '好的', done: true };
+
+const scrollEvent = (y, velocity = 0) => ({ nativeEvent: { contentOffset: { y }, velocity: { y: velocity } } });
+const nativeScrollProps = (page) => {
+  const state = page.render();
+  return state.renderScroll({ maintainVisibleContentPosition: state.readingHistory ? { minIndexForVisible: 1 } : undefined }).props;
+};
+
+test('actual ChatScreen: native position maintenance stays enabled and uses the bottom header only while following', () => {
+  const page = screen(undefined, {}, true);
+  assert.match(screenSource, /maintainVisibleContentPosition=\{readingHistory \? MVCP_READING : undefined\}/, 'FlatList must not wait for a native offset correction while the header anchors the bottom');
+  assert.deepEqual(nativeScrollProps(page).maintainVisibleContentPosition, { minIndexForVisible: 0 });
+  page.render().onUserScrollBegin(scrollEvent(0));
+  page.render().onScroll(scrollEvent(12));
+  assert.equal(page.render().readingHistory, true, 'detach before a full row or tool card has scrolled past');
+  assert.deepEqual(nativeScrollProps(page).maintainVisibleContentPosition, { minIndexForVisible: 1 });
+  page.render().onUserScrollEnd(scrollEvent(12));
+  page.render().onScroll(scrollEvent(0));
+  assert.equal(page.render().readingHistory, true, 'native compensation cannot resume following');
+  page.render().onUserScrollBegin(scrollEvent(0));
+  assert.equal(page.render().readingHistory, false);
+  assert.deepEqual(nativeScrollProps(page).maintainVisibleContentPosition, { minIndexForVisible: 0 });
+});
+
+test('actual ChatScreen: keyboard offsets, drag momentum and an explicit jump preserve scrolling intent', () => {
+  const page = screen(undefined, {}, true);
+  const offsets = [];
+  page.render().listRef.current = { scrollToOffset: (value) => offsets.push(value) };
+  page.render().onContentInsetChange({ top: 280 });
+  page.render().onScroll(scrollEvent(-100));
+  assert.equal(page.render().readingHistory, false, 'programmatic keyboard movement does not detach');
+  page.render().onUserScrollBegin(scrollEvent(-280));
+  page.render().onScroll(scrollEvent(-250));
+  page.render().onUserScrollEnd(scrollEvent(-200, -1));
+  assert.equal(page.render().readingHistory, true);
+  page.render().onScroll(scrollEvent(-279));
+  page.render().onMomentumScrollEnd(scrollEvent(-280));
+  assert.equal(page.render().readingHistory, false, 'momentum reaching the inset-adjusted bottom resumes following');
+  assert.equal(page.render().userScrolling.current, false);
+  page.render().onUserScrollBegin(scrollEvent(20));
+  assert.equal(page.render().showJump, true);
+  page.render().jumpToBottom();
+  page.render().onScroll(scrollEvent(-100));
+  assert.equal(page.render().readingHistory, false, 'intermediate jump offsets cannot detach again');
+  assert.equal(page.render().showJump, false);
+  assert.deepEqual(offsets, [{ offset: -280, animated: true }]);
+});
+
+test('actual ChatScreen: incoming text and tools cannot change reading intent; a fresh session resets it', async () => {
+  const page = screen(undefined, {}, true);
+  page.effects();
+  await new Promise(setImmediate);
+  page.render().onUserScrollBegin(scrollEvent(320));
+  page.render().onUserScrollEnd(scrollEvent(320));
+  page.emit('ws:stream', stream);
+  page.emit('ws:message', { sessionId: 'session', message: answer });
+  page.emit('ws:message', { sessionId: 'session', message: { seq: 3, kind: 'tool_result', text: '完成' } });
+  await new Promise(setImmediate);
+  assert.equal(page.render().drafts.length, 0);
+  page.render().onScroll(scrollEvent(50));
+  assert.equal(page.render().readingHistory, true);
+  assert.deepEqual(nativeScrollProps(page).maintainVisibleContentPosition, { minIndexForVisible: 1 });
+  page.render().onUserScrollBegin(scrollEvent(0));
+  page.emit('ws:stream', { ...stream, key: 'next:0' });
+  assert.equal(page.render().readingHistory, false);
+  page.render().onUserScrollBegin(scrollEvent(320));
+  page.unmount();
+  const fresh = screen(undefined, {}, true);
+  fresh.effects();
+  assert.equal(fresh.render().readingHistory, false);
+  assert.equal(fresh.render().showJump, false);
+  assert.equal(fresh.render().userScrolling.current, false);
+  fresh.unmount();
+});
+
+test('actual ChatScreen: search positioning explicitly enters history reading without requiring a drag', () => {
+  const page = screen(undefined, {}, true);
+  page.effects();
+  page.render().addMsgs([answer]);
+  page.render().setFocusTarget({ key: '2:0', nonce: 1 });
+  page.render();
+  page.effects();
+  assert.equal(page.render().readingHistory, true);
+  assert.deepEqual(nativeScrollProps(page).maintainVisibleContentPosition, { minIndexForVisible: 1 });
+  page.unmount();
+});
+
+// Mirror iOS prepare/adjust around a mounting transaction, using the actual scroll props.
+function nativePositionModel(page, headerHeight = 0) {
+  const header = { y: 16, height: headerHeight };
+  const history = { y: 16 + headerHeight, height: 800 };
+  const views = [header, history];
+  let position = nativeScrollProps(page).maintainVisibleContentPosition;
+  const model = {
+    header, history, views, offset: 0,
+    commit(update = () => {}) {
+      assert.ok(position, 'position maintenance is enabled before every mount');
+      const candidates = views.slice(position.minIndexForVisible);
+      const anchor = candidates.find((view) => view.y + view.height > model.offset) || candidates.at(-1);
+      const anchorY = anchor.y;
+      update();
+      let y = 16;
+      for (const view of views) {
+        view.y = y;
+        y += view.height;
+      }
+      position = nativeScrollProps(page).maintainVisibleContentPosition;
+      assert.ok(position, 'position maintenance is enabled after every mount');
+      const delta = anchor.y - anchorY;
+      if (Math.abs(delta) > 0.5) model.offset += delta;
+    },
+  };
+  return model;
+}
+
+test('native anchor regression: bottom stays fixed through pending bubbles, tool insertion and draft growth', () => {
+  const page = screen(undefined, {}, true);
+  const model = nativePositionModel(page);
+  model.commit(() => { model.header.height = 80; });
+  assert.equal(model.offset, 0);
+  model.commit(() => {
+    model.header.height = 0;
+    model.views.splice(1, 0, { y: 0, height: 80 });
+  });
+  assert.equal(model.offset, 0, 'pending-to-saved transition does not push the list off the bottom');
+  model.commit(() => { model.views.splice(1, 0, { y: 0, height: 64 }); });
+  model.commit(() => { model.header.height = 600; });
+  assert.equal(model.offset, 0, 'tools and streaming text follow the bottom without a scroll animation');
+});
+
+test('native anchor regression: reading a long draft survives growth, conversion and tools, including repeated bottom visits', () => {
+  const page = screen(undefined, {}, true);
+  const model = nativePositionModel(page, 900);
+  for (let cycle = 0; cycle < 3; cycle++) {
+    model.offset = 240;
+    page.render().onUserScrollBegin(scrollEvent(model.offset));
+    page.render().onUserScrollEnd(scrollEvent(model.offset));
+    model.commit();
+    const historyPosition = model.history.y - model.offset;
+    const paragraphPosition = model.header.y + model.header.height - 100 - model.offset;
+    model.commit(() => { model.header.height += 120; });
+    assert.equal(model.history.y - model.offset, historyPosition);
+    assert.equal(model.header.y + model.header.height - 100 - model.offset, paragraphPosition);
+    const saved = { y: 0, height: model.header.height + 56 };
+    model.commit(() => {
+      model.header.height = 0;
+      model.views.splice(1, 0, saved);
+    });
+    assert.equal(model.history.y - model.offset, historyPosition);
+    assert.equal(saved.y + saved.height - 100 - model.offset, paragraphPosition, 'the paragraph stays in place when saved actions add height');
+    const savedPosition = saved.y - model.offset;
+    model.commit(() => { model.views.splice(1, 0, { y: 0, height: 64 }); });
+    assert.equal(saved.y - model.offset, savedPosition);
+    page.render().jumpToBottom();
+    model.offset = 0;
+    model.commit();
+    model.commit(() => { model.header.height = 900; });
+    assert.equal(model.offset, 0, 'a later draft follows the bottom without reusing a history anchor');
+  }
+});
+
+test('tool cards keep opacity-only entry without layout animation that disagrees with native anchoring', () => {
+  const source = readFileSync(new URL('../../components/MessageRow.js', import.meta.url), 'utf8');
+  const block = source.slice(source.indexOf('function Block('), source.indexOf('function MonoBody('));
+  const entry = block.slice(block.indexOf('  const enterStyle ='), block.indexOf('  const chevronStyle ='));
+  assert.match(entry, /opacity:/);
+  assert.doesNotMatch(entry, /transform|translate|scale/);
+  assert.doesNotMatch(block, /layout=|LinearTransition/);
+});
 
 test('actual ChatScreen: replies vibrate once on completion, without feedback for streaming, history, other sessions or stale runs', async () => {
   const feedback = [];

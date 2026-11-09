@@ -27,8 +27,8 @@ import { useI18n } from '../lib/i18n.js';
 
 // 移植 web/ui/screens/chat.js。列表用 inverted FlatList：
 // - 数据倒序（最新在 index 0）。贴底时倒置列表天然「新内容把旧内容往上顶」；
-//   maintainVisibleContentPosition 只在翻看历史时开启，保证新消息进来阅读位置不动。
-//   贴底时不能开：iOS 会先补偿 offset 再动画滚回底部，发消息、出打字点时整屏滑一下（实测录屏）
+//   原生位置维护始终开启，避免 iOS 重新开启时使用旧锚点。贴底时让原生锚定 Header，
+//   翻看历史时沿用 FlatList 跳过 Header 的锚点，补偿草稿增高和转正带来的位移。
 // - 键盘：列表用 KeyboardChatScrollView 加 contentInset、输入框和跳底按钮用 KeyboardStickyView 平移，
 //   键盘动画期间不改布局（逐帧改 padding 会整页重排，收键盘时掉帧）。贴底 offset 因此是 -inset 而非 0
 // - 向上翻更早消息 = onEndReached（视觉顶部），追加到数据尾端，无需 web 的 prepend 滚动补偿
@@ -99,6 +99,7 @@ export function ChatScreen({ route }) {
   }, []);
   const [showJump, setShowJump] = useState(false);
   const [readingHistory, setReadingHistory] = useState(false);
+  const userScrolling = useRef(false);
   const listRef = useRef(null);
   const loadingOlder = useRef(false);
   // 分页游标的同步镜像：搜索定位在异步流程里要读最新值
@@ -190,6 +191,9 @@ export function ChatScreen({ route }) {
   useEffect(() => {
     const generation = ++loadGeneration.current;
     initialLoadComplete.current = false;
+    userScrolling.current = false;
+    setReadingHistory(false);
+    setShowJump(false);
     clearTimeout(clearTimer.current);
     resetPendingBatch();
     runFloorSeq.current = 0;
@@ -502,18 +506,38 @@ export function ChatScreen({ route }) {
   const kbOffset = Math.max(insets.bottom, 8); // 与 ChatComposer 底部安全区间距一致
   const insetTop = useRef(0);
   const onContentInsetChange = useCallback((i) => { insetTop.current = i.top; }, []);
-  const renderScroll = useCallback((props) => (
-    <KeyboardChatScrollView {...props} inverted offset={kbOffset} onContentInsetChange={onContentInsetChange} />
-  ), [kbOffset, onContentInsetChange]);
   const onScroll = useCallback((e) => {
     const y = e.nativeEvent.contentOffset.y + insetTop.current;
     setShowJump((s) => (y > 240 ? true : y < 120 ? false : s));
-    setReadingHistory((r) => (y > 160 ? true : y < 80 ? false : r));
+    if (userScrolling.current) setReadingHistory((r) => (y > 8 ? true : y <= 1 ? false : r));
   }, []);
+  const onUserScrollBegin = useCallback((e) => {
+    userScrolling.current = true;
+    onScroll(e);
+  }, [onScroll]);
+  const onUserScrollEnd = useCallback((e) => {
+    onScroll(e);
+    userScrolling.current = !!e.nativeEvent.velocity?.y;
+  }, [onScroll]);
+  const onMomentumScrollEnd = useCallback((e) => {
+    onScroll(e);
+    userScrolling.current = false;
+  }, [onScroll]);
   const jumpToBottom = useCallback(() => {
+    userScrolling.current = false;
+    setReadingHistory(false);
     listRef.current?.scrollToOffset({ offset: -insetTop.current, animated: true });
     setShowJump(false);
   }, []);
+  const renderScroll = useCallback((props) => (
+    <KeyboardChatScrollView
+      {...props}
+      inverted
+      offset={kbOffset}
+      onContentInsetChange={onContentInsetChange}
+      maintainVisibleContentPosition={readingHistory ? props.maintainVisibleContentPosition : MVCP_READING}
+    />
+  ), [kbOffset, onContentInsetChange, readingHistory]);
 
   // inverted 数据：最新在前
   const permissionMessages = useMemo(() => mergePermissionDenials(store.current.sorted, permissionState.denials), [version, permissionState.denials]);
@@ -524,6 +548,7 @@ export function ChatScreen({ route }) {
     if (!focusTarget) return;
     const index = msgsDesc.findIndex((m) => matchesMessageKey(m, focusTarget.key));
     if (index < 0) return;
+    setReadingHistory(true);
     const t = setTimeout(() => {
       listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.5 });
       setHighlightKey(focusTarget.key);
@@ -615,6 +640,9 @@ export function ChatScreen({ route }) {
           onEndReached={loadOlder}
           onEndReachedThreshold={0.6}
           onScroll={onScroll}
+          onScrollBeginDrag={onUserScrollBegin}
+          onScrollEndDrag={onUserScrollEnd}
+          onMomentumScrollEnd={onMomentumScrollEnd}
           scrollEventThrottle={32}
           keyboardDismissMode="interactive"
           keyboardShouldPersistTaps="handled"
