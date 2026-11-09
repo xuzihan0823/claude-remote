@@ -253,6 +253,14 @@ export function ChatScreen({ route }) {
     if (e.sessionId !== sessionId) return;
     const m = e.message;
     liveKeys.current.add(msgKey(m));
+    if (m.kind === 'tool_result' && m.toolUseId && store.current.sorted.some((message) => (
+      message.kind === 'tool_use'
+      && message.toolUseId === m.toolUseId
+      && (message.agentId || '') === (m.agentId || '')
+    ))) {
+      addMsgs([m]);
+      return;
+    }
     const generation = loadGeneration.current;
     if (!pendingBatch.current) pendingBatch.current = [];
     pendingBatch.current.push(m);
@@ -264,7 +272,8 @@ export function ChatScreen({ route }) {
         microScheduled.current = true;
         queueMicrotask(() => {
           if (generation !== loadGeneration.current) return;
-          flushPendingBatch();
+          microScheduled.current = false;
+          if (takeToolBatch(pendingBatch.current).immediate) stepToolBatch();
         });
       }
       return;
@@ -275,7 +284,7 @@ export function ChatScreen({ route }) {
         stepToolBatch();
       }, TOOL_BATCH_INTERVAL_MS);
     }
-  }, [sessionId, flushPendingBatch, stepToolBatch]);
+  }, [sessionId, addMsgs, stepToolBatch]);
   useBus('ws:stream', (e) => {
     if (e.sessionId !== sessionId) return;
     if (e.clear) {

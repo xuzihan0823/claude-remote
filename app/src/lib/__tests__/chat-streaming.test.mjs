@@ -748,3 +748,91 @@ test('actual ChatScreen: continuous tool calls reveal in paced batches of 2-3 an
   assert.deepEqual(afterBatch2.map((m) => m.toolUseId), ['t1', 't2', 't3', 't4', 't5']);
   assert.deepEqual(afterBatch2.map((m) => m.toolResult?.text), ['out-1', 'out-2', 'out-3', 'out-4', 'out-5']);
 });
+
+test('actual ChatScreen: text only flushes its prefix while later tools keep their batch interval', async () => {
+  const page = screen();
+  page.emit('ws:message', { sessionId: 'session', message: user });
+  for (let i = 1; i <= 6; i += 1) {
+    page.emit('ws:message', {
+      sessionId: 'session',
+      message: { seq: i * 2, kind: 'tool_use', toolUseId: `t${i}`, toolName: 'Read' },
+    });
+    page.emit('ws:message', {
+      sessionId: 'session',
+      message: { seq: i * 2 + 1, kind: 'tool_result', toolUseId: `t${i}`, text: `out-${i}` },
+    });
+  }
+  await new Promise(setImmediate);
+  assert.deepEqual(page.render().store.current.sorted, [user]);
+
+  page.flushTimers();
+  const firstBatch = mergeToolMessages(page.render().store.current.sorted).slice(1);
+  assert.deepEqual(firstBatch.map((m) => m.toolUseId), ['t1', 't2', 't3']);
+  assert.deepEqual(firstBatch.map((m) => m.toolResult?.text), ['out-1', 'out-2', 'out-3']);
+  page.flushTimers();
+  assert.equal(mergeToolMessages(page.render().store.current.sorted).length, 7);
+});
+
+test('actual ChatScreen: visible tool results update immediately without revealing queued tools', async () => {
+  const page = screen();
+  for (let i = 1; i <= 10; i += 1) {
+    page.emit('ws:message', {
+      sessionId: 'session',
+      message: { seq: i, kind: 'tool_use', toolUseId: `t${i}`, toolName: 'Read' },
+    });
+  }
+  page.flushTimers();
+  const result = { seq: 11, kind: 'tool_result', toolUseId: 't1', text: 'done' };
+  const queuedResult = { seq: 12, kind: 'tool_result', toolUseId: 't10', text: 'waiting' };
+  page.emit('ws:message', { sessionId: 'session', message: result });
+  page.emit('ws:message', { sessionId: 'session', message: queuedResult });
+  await new Promise(setImmediate);
+  const visible = mergeToolMessages(page.render().store.current.sorted);
+  assert.deepEqual(visible.map((m) => m.toolUseId), ['t1', 't2', 't3']);
+  assert.equal(visible[0].toolResult, result);
+
+  page.flushTimers();
+  assert.equal(mergeToolMessages(page.render().store.current.sorted).length, 6);
+  page.flushTimers();
+  assert.equal(mergeToolMessages(page.render().store.current.sorted).length, 9);
+  page.flushTimers();
+  const completed = mergeToolMessages(page.render().store.current.sorted);
+  assert.equal(completed.length, 10);
+  assert.equal(completed[9].toolResult, queuedResult);
+});
+
+test('actual ChatScreen: tool result priority respects agent identity', async () => {
+  const page = screen();
+  const mainUse = { seq: 1, kind: 'tool_use', toolUseId: 'shared', toolName: 'Read' };
+  const agentUse = { seq: 2, kind: 'tool_use', toolUseId: 'shared', agentId: 'child', toolName: 'Read' };
+  const mainResult = { seq: 3, kind: 'tool_result', toolUseId: 'shared', text: 'main' };
+  const agentResult = { seq: 4, kind: 'tool_result', toolUseId: 'shared', agentId: 'child', text: 'child' };
+  page.render().addMsgs([mainUse]);
+  page.emit('ws:message', { sessionId: 'session', message: agentUse });
+  page.emit('ws:message', { sessionId: 'session', message: agentResult });
+  page.emit('ws:message', { sessionId: 'session', message: mainResult });
+  await new Promise(setImmediate);
+  assert.deepEqual(page.render().store.current.sorted, [mainUse, mainResult]);
+  page.flushTimers();
+  const visible = mergeToolMessages(page.render().store.current.sorted);
+  assert.equal(visible[0].toolResult, mainResult);
+  assert.equal(visible[1].toolResult, agentResult);
+});
+
+test('actual ChatScreen: a microtask left over after a stream flush cannot reveal the next tool burst', async () => {
+  const page = screen();
+  page.emit('ws:message', { sessionId: 'session', message: user });
+  page.emit('ws:stream', stream);
+  for (let i = 1; i <= 6; i += 1) {
+    page.emit('ws:message', {
+      sessionId: 'session',
+      message: { seq: i + 2, kind: 'tool_use', toolUseId: `t${i}`, toolName: 'Read' },
+    });
+  }
+  await new Promise(setImmediate);
+  assert.deepEqual(page.render().store.current.sorted, [user]);
+  page.flushTimers();
+  assert.equal(page.render().store.current.sorted.length, 4);
+  page.flushTimers();
+  assert.equal(page.render().store.current.sorted.length, 7);
+});
