@@ -26,7 +26,7 @@ import { useI18n } from '../lib/i18n.js';
 
 // 移植 web/ui/screens/chat.js。列表用 inverted FlatList：
 // - 数据倒序（最新在 index 0）。贴底时倒置列表天然「新内容把旧内容往上顶」；
-//   位置维护始终开启，避免 iOS 重新开启时使用旧锚点。贴底时让原生锚定 Header，
+//   原生位置维护始终开启，避免 iOS 重新开启时使用旧锚点。贴底时让原生锚定 Header，
 //   翻看历史时沿用 FlatList 跳过 Header 的锚点，补偿草稿增高和转正带来的位移。
 // - 键盘：列表用 KeyboardChatScrollView 加 contentInset、输入框和跳底按钮用 KeyboardStickyView 平移，
 //   键盘动画期间不改布局（逐帧改 padding 会整页重排，收键盘时掉帧）。贴底 offset 因此是 -inset 而非 0
@@ -577,7 +577,7 @@ export function ChatScreen({ route }) {
           }}
           extraData={highlightKey}
           onScrollToIndexFailed={onScrollToIndexFailed}
-          maintainVisibleContentPosition={MVCP_READING}
+          maintainVisibleContentPosition={readingHistory ? MVCP_READING : undefined}
           onEndReached={loadOlder}
           onEndReachedThreshold={0.6}
           onScroll={onScroll}
