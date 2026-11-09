@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { diffLines, foldContext, toolErrorHeadline, toolHeadline, toolView } from '../tool-view.js';
+import {
+  diffLines,
+  foldContext,
+  matchesMessageKey,
+  mergeToolMessages,
+  takeToolBatch,
+  toolErrorHeadline,
+  toolHeadline,
+  toolView,
+} from '../tool-view.js';
 
 const ops = (rows) => rows.map((r) => (r.op === '…' ? `…${r.count}` : `${r.op}${r.text}`));
 
@@ -67,4 +76,64 @@ test('toolErrorHeadline：提取首行非空报错并限制长度', () => {
   assert.equal(toolErrorHeadline('\n  Exit code 1\nstack line 2'), 'Exit code 1');
   assert.equal(toolErrorHeadline(''), '');
   assert.equal(toolErrorHeadline('x'.repeat(60)), `${'x'.repeat(48)}…`);
+});
+
+test('mergeToolMessages：按 toolUseId 将 tool_use 与 tool_result 合成单张卡片，保留孤立 tool_result 与拒绝信息', () => {
+  const orphan = { seq: 1, blockIndex: 0, role: 'user', kind: 'tool_result', toolUseId: 'orphan', text: '旧页结果' };
+  const use1 = { seq: 2, blockIndex: 0, role: 'assistant', kind: 'tool_use', toolUseId: 't1', toolName: 'Read', toolInput: { file_path: 'a.js' } };
+  const use2 = { seq: 2, blockIndex: 1, role: 'assistant', kind: 'tool_use', toolUseId: 't2', toolName: 'Bash', toolInput: { command: 'ls' } };
+  const res1 = { seq: 3, blockIndex: 0, role: 'user', kind: 'tool_result', toolUseId: 't1', text: 'content a' };
+  const res2 = {
+    seq: 3,
+    blockIndex: 1,
+    role: 'user',
+    kind: 'tool_result',
+    toolUseId: 't2',
+    text: 'denied',
+    isError: true,
+    permissionDenial: { toolUseId: 't2', toolName: 'Bash', message: 'Denied' },
+  };
+  const answer = { seq: 4, blockIndex: 0, role: 'assistant', kind: 'text', text: '完成' };
+
+  const merged = mergeToolMessages([orphan, use1, use2, res1, res2, answer]);
+  assert.equal(merged.length, 4);
+  assert.equal(merged[0], orphan);
+  assert.equal(merged[1].toolName, 'Read');
+  assert.equal(merged[1].toolResult, res1);
+  assert.equal(merged[2].toolName, 'Bash');
+  assert.equal(merged[2].toolResult, res2);
+  assert.equal(merged[2].permissionDenial?.message, 'Denied');
+  assert.equal(merged[3], answer);
+
+  assert.equal(matchesMessageKey(merged[1], '2:0'), true);
+  assert.equal(matchesMessageKey(merged[1], '3:0'), true);
+  assert.equal(matchesMessageKey(merged[1], '3:1'), false);
+});
+
+test('takeToolBatch：连续工具调用每次最多取出 3 个（含配对结果），普通文本立即排空', () => {
+  const tools = [];
+  for (let i = 1; i <= 5; i += 1) {
+    tools.push({ seq: i * 2, blockIndex: 0, role: 'assistant', kind: 'tool_use', toolUseId: `t${i}`, toolName: 'Read' });
+    tools.push({ seq: i * 2 + 1, blockIndex: 0, role: 'user', kind: 'tool_result', toolUseId: `t${i}`, text: `r${i}` });
+  }
+  const step1 = takeToolBatch(tools);
+  assert.equal(step1.immediate, false);
+  assert.deepEqual(
+    step1.batch.map((m) => `${m.kind}:${m.toolUseId}`),
+    ['tool_use:t1', 'tool_result:t1', 'tool_use:t2', 'tool_result:t2', 'tool_use:t3', 'tool_result:t3'],
+  );
+  const step2 = takeToolBatch(step1.rest);
+  assert.equal(step2.immediate, false);
+  assert.deepEqual(
+    step2.batch.map((m) => `${m.kind}:${m.toolUseId}`),
+    ['tool_use:t4', 'tool_result:t4', 'tool_use:t5', 'tool_result:t5'],
+  );
+  assert.deepEqual(step2.rest, []);
+
+  // 含最终文本时立即排空前缀工具调用与该文本
+  const withAnswer = [...tools.slice(0, 4), { seq: 99, blockIndex: 0, role: 'assistant', kind: 'text', text: '总结' }];
+  const immediateStep = takeToolBatch(withAnswer);
+  assert.equal(immediateStep.immediate, true);
+  assert.equal(immediateStep.batch.length, 5);
+  assert.deepEqual(immediateStep.rest, []);
 });

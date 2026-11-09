@@ -13,6 +13,7 @@ import { applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys } from '.
 import { findFocusIndex, loadUntilSeq } from '../../../web/core/search.js';
 import { newClientMessageId, reconcilePending, sendFailureState } from '../../../web/core/message-delivery.js';
 import { cmpMsg, msgKey } from '../lib/format.js';
+import { matchesMessageKey, mergeToolMessages, takeToolBatch, TOOL_BATCH_INTERVAL_MS } from '../lib/tool-view.js';
 import { ConversationHeader } from '../components/ConversationHeader.js';
 import { GlassSurface } from '../components/GlassSurface.js';
 import { Icon } from '../components/Icon.js';
@@ -153,12 +154,44 @@ export function ChatScreen({ route }) {
     return fresh.length > 0;
   }, [updateDrafts]);
 
+  const pendingBatch = useRef(null);
+  const batchTimer = useRef(null);
+  const microScheduled = useRef(false);
+  const resetPendingBatch = useCallback(() => {
+    clearTimeout(batchTimer.current);
+    batchTimer.current = null;
+    microScheduled.current = false;
+    pendingBatch.current = null;
+  }, []);
+  const flushPendingBatch = useCallback(() => {
+    clearTimeout(batchTimer.current);
+    batchTimer.current = null;
+    microScheduled.current = false;
+    const batch = pendingBatch.current;
+    pendingBatch.current = null;
+    if (batch && batch.length) addMsgs(batch);
+  }, [addMsgs]);
+  const stepToolBatch = useCallback(() => {
+    batchTimer.current = null;
+    const queue = pendingBatch.current;
+    if (!queue || !queue.length) {
+      pendingBatch.current = null;
+      return;
+    }
+    const { batch, rest } = takeToolBatch(queue);
+    pendingBatch.current = rest.length ? rest : null;
+    if (batch.length) addMsgs(batch);
+    if (rest.length) {
+      batchTimer.current = setTimeout(stepToolBatch, TOOL_BATCH_INTERVAL_MS);
+    }
+  }, [addMsgs]);
+
   // ---- 初始加载：尾部 100 条 + 会话元信息（新会话落盘竞态重试 8 次）
   useEffect(() => {
     const generation = ++loadGeneration.current;
     initialLoadComplete.current = false;
     clearTimeout(clearTimer.current);
-    pendingBatch.current = null;
+    resetPendingBatch();
     runFloorSeq.current = 0;
     permissionStateRef.current = emptyPermissionState();
     setPermissionState(permissionStateRef.current);
@@ -210,28 +243,39 @@ export function ChatScreen({ route }) {
     return () => {
       loadGeneration.current += 1;
       clearTimeout(clearTimer.current);
+      resetPendingBatch();
       ws.unsubscribe(sessionId);
     };
-  }, [sessionId, addMsgs, updateDrafts, applyRunState]);
+  }, [sessionId, addMsgs, updateDrafts, applyRunState, resetPendingBatch]);
 
-  // ---- WS 事件：同 tick 多条 message 微任务合并（web 同款）
-  const pendingBatch = useRef(null);
+  // ---- WS 事件：非工具消息同 tick 微任务合并；连续工具调用按固定间隔每次露出 2～3 个
   useBus('ws:message', (e) => {
     if (e.sessionId !== sessionId) return;
     const m = e.message;
     liveKeys.current.add(msgKey(m));
     const generation = loadGeneration.current;
-    if (!pendingBatch.current) {
-      pendingBatch.current = [];
-      queueMicrotask(() => {
-        if (generation !== loadGeneration.current) return;
-        const batch = pendingBatch.current;
-        pendingBatch.current = null;
-        if (batch && batch.length) addMsgs(batch);
-      });
-    }
+    if (!pendingBatch.current) pendingBatch.current = [];
     pendingBatch.current.push(m);
-  }, [sessionId, addMsgs]);
+    const { immediate } = takeToolBatch(pendingBatch.current);
+    if (immediate) {
+      clearTimeout(batchTimer.current);
+      batchTimer.current = null;
+      if (!microScheduled.current) {
+        microScheduled.current = true;
+        queueMicrotask(() => {
+          if (generation !== loadGeneration.current) return;
+          flushPendingBatch();
+        });
+      }
+      return;
+    }
+    if (!batchTimer.current) {
+      batchTimer.current = setTimeout(() => {
+        if (generation !== loadGeneration.current) return;
+        stepToolBatch();
+      }, TOOL_BATCH_INTERVAL_MS);
+    }
+  }, [sessionId, flushPendingBatch, stepToolBatch]);
   useBus('ws:stream', (e) => {
     if (e.sessionId !== sessionId) return;
     if (e.clear) {
@@ -243,10 +287,14 @@ export function ChatScreen({ route }) {
       }, 1500);
       return;
     }
+    flushPendingBatch();
     clearTimeout(clearTimer.current);
     updateDrafts((d) => reconcileCurrentTurnDrafts(applyStreamFrame(d, e), store.current.sorted, runFloorSeq.current));
-  }, [sessionId, updateDrafts]);
-  useEffect(() => () => clearTimeout(clearTimer.current), []);
+  }, [sessionId, updateDrafts, flushPendingBatch]);
+  useEffect(() => () => {
+    clearTimeout(clearTimer.current);
+    resetPendingBatch();
+  }, [resetPendingBatch]);
   useBus('ws:session-state', (e) => {
     if (e.sessionId !== sessionId) return;
     if (e.activeRunId && permissionStateRef.current.endedRuns.includes(e.activeRunId)) return;
@@ -254,11 +302,12 @@ export function ChatScreen({ route }) {
     applyRunState(e.status, e.activeRunId || null);
     updatePermissionState({ ...e, type: 'session-state' });
     if (!e.activeRunId || (previousRunId && previousRunId !== e.activeRunId)) {
+      flushPendingBatch();
       clearTimeout(clearTimer.current);
       updateDrafts([]);
       runFloorSeq.current = 0;
     }
-  }, [sessionId, updateDrafts, applyRunState]);
+  }, [sessionId, updateDrafts, applyRunState, flushPendingBatch]);
   useBus('ws:permission-mode', (e) => {
     if (e.sessionId === sessionId) updatePermissionState({ ...e, type: 'permission-mode' });
   }, [sessionId, updatePermissionState]);
@@ -285,6 +334,7 @@ export function ChatScreen({ route }) {
     } else {
       // 上一轮终态可能迟到：只能结束它自己，不能清掉已开始的新一轮
       if (e.runId && activeRunIdRef.current && e.runId !== activeRunIdRef.current) return;
+      flushPendingBatch();
       if (e.state === 'done' && e.runId && !completedRuns.current.has(e.runId)) {
         completedRuns.current.add(e.runId);
         haptics.success();
@@ -292,14 +342,14 @@ export function ChatScreen({ route }) {
       applyRunState('idle');
       if (e.state === 'error' && !/^aborted$/i.test(String(e.error || '').trim())) toast(runErrMsg(e.error), 'error');
     }
-  }, [sessionId, updateDrafts, applyRunState]);
+  }, [sessionId, updateDrafts, applyRunState, flushPendingBatch]);
   // ---- resync：daemon 侧链视图失效，清空全量重拉
   useBus('ws:resync', async (e) => {
     if (e.sessionId !== sessionId) return;
     const generation = ++loadGeneration.current;
     initialLoadComplete.current = false;
     clearTimeout(clearTimer.current);
-    pendingBatch.current = null;
+    resetPendingBatch();
     runFloorSeq.current = 0;
     store.current = { map: new Map(), sorted: [] };
     setVersion((v) => v + 1);
@@ -458,12 +508,12 @@ export function ChatScreen({ route }) {
 
   // inverted 数据：最新在前
   const permissionMessages = useMemo(() => mergePermissionDenials(store.current.sorted, permissionState.denials), [version, permissionState.denials]);
-  const msgsDesc = useMemo(() => [...permissionMessages.messages].reverse(), [permissionMessages]);
+  const msgsDesc = useMemo(() => [...mergeToolMessages(permissionMessages.messages)].reverse(), [permissionMessages]);
 
   // msgsDesc 更新后再滚动（inverted：index 0 = 最新）
   useEffect(() => {
     if (!focusTarget) return;
-    const index = msgsDesc.findIndex((m) => msgKey(m) === focusTarget.key);
+    const index = msgsDesc.findIndex((m) => matchesMessageKey(m, focusTarget.key));
     if (index < 0) return;
     const t = setTimeout(() => {
       listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.5 });
@@ -546,7 +596,7 @@ export function ChatScreen({ route }) {
           renderItem={({ item }) => {
             const k = msgKey(item);
             const row = <MessageRow m={item} sessionId={sessionId} live={liveKeys.current.has(k)} />;
-            return k === highlightKey
+            return matchesMessageKey(item, highlightKey)
               ? <View style={{ backgroundColor: colors.glassTintAccent, borderRadius: 12, marginHorizontal: -8, paddingHorizontal: 8 }}>{row}</View>
               : row;
           }}

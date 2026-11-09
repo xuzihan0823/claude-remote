@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys } from '../../../../web/core/stream-drafts.js';
 import { newClientMessageId, reconcilePending, sendFailureState } from '../../../../web/core/message-delivery.js';
 import { emptyPermissionState, reducePermissionState } from '../../../../web/core/permission-state.js';
+import { mergeToolMessages, takeToolBatch, TOOL_BATCH_INTERVAL_MS } from '../tool-view.js';
 
 const storageValues = new Map();
 if (!globalThis.localStorage) {
@@ -99,6 +100,7 @@ function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: fals
       toast() {}, setSessionMode() {}, PERMISSION_MODES: ['default'],
       haptics: { success() {} },
       newClientMessageId, reconcilePending, sendFailureState, runErrMsg, scopeErrMsg,
+      takeToolBatch, TOOL_BATCH_INTERVAL_MS,
       ...dependencies,
     });
   instance.render();
@@ -718,4 +720,31 @@ test('actual ChatScreen: SDK downgrade and reconnect do not overwrite next-turn 
   assert.equal(page.render().permissionState.notices.length, 0);
   assert.equal(page.render().mode, 'plan');
   assert.deepEqual(writes, []);
+});
+
+test('actual ChatScreen: continuous tool calls reveal in paced batches of 2-3 and merge with tool_result', async () => {
+  const page = screen();
+  page.emit('ws:run', { sessionId: 'session', state: 'started', runId: 'A' });
+  for (let i = 1; i <= 5; i += 1) {
+    page.emit('ws:message', {
+      sessionId: 'session',
+      message: { seq: i * 2, blockIndex: 0, role: 'assistant', kind: 'tool_use', toolUseId: `t${i}`, toolName: 'Read' },
+    });
+    page.emit('ws:message', {
+      sessionId: 'session',
+      message: { seq: i * 2 + 1, blockIndex: 0, role: 'user', kind: 'tool_result', toolUseId: `t${i}`, text: `out-${i}` },
+    });
+  }
+  await new Promise(setImmediate);
+  assert.equal(page.render().store.current.sorted.length, 0, 'tool burst waits for batch timer instead of dumping immediately');
+
+  page.flushTimers();
+  const afterBatch1 = mergeToolMessages(page.render().store.current.sorted);
+  assert.deepEqual(afterBatch1.map((m) => m.toolUseId), ['t1', 't2', 't3']);
+  assert.deepEqual(afterBatch1.map((m) => m.toolResult?.text), ['out-1', 'out-2', 'out-3']);
+
+  page.flushTimers();
+  const afterBatch2 = mergeToolMessages(page.render().store.current.sorted);
+  assert.deepEqual(afterBatch2.map((m) => m.toolUseId), ['t1', 't2', 't3', 't4', 't5']);
+  assert.deepEqual(afterBatch2.map((m) => m.toolResult?.text), ['out-1', 'out-2', 'out-3', 'out-4', 'out-5']);
 });
