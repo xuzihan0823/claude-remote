@@ -54,6 +54,18 @@ test('responses from a previous connection never populate the current session ca
   assert.equal(sessionCache.get('new').cwd, '/new');
 });
 
+test('failed requests from a previous channel or token are discarded as connection changes', async () => {
+  for (const [base, tok] of [['https://new.example.com', 'first'], ['https://old.example.com', 'second']]) {
+    saveConn('https://old.example.com', 'first');
+    let rejectOld;
+    globalThis.fetch = () => new Promise((_resolve, reject) => { rejectOld = reject; });
+    const pending = api('/api/projects');
+    saveConn(base, tok);
+    rejectOld(new TypeError('Network request failed'));
+    await assert.rejects(pending, { code: 'connection_changed' });
+  }
+});
+
 test('project catalog is read from its authenticated endpoint without truncation parameters', async () => {
   saveConn('http://localhost:8788', 'project-test');
   globalThis.fetch = async (url, options) => {

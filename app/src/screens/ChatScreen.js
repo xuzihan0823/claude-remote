@@ -112,6 +112,7 @@ export function ChatScreen({ route }) {
   const clearTimer = useRef(null);
   const runFloorSeq = useRef(0);
   const loadGeneration = useRef(0);
+  const initialLoadComplete = useRef(false);
   const stateRevision = useRef(0);
   const recoveryGeneration = useRef(0);
   const completedRuns = useRef(new Set());
@@ -155,6 +156,7 @@ export function ChatScreen({ route }) {
   // ---- 初始加载：尾部 100 条 + 会话元信息（新会话落盘竞态重试 8 次）
   useEffect(() => {
     const generation = ++loadGeneration.current;
+    initialLoadComplete.current = false;
     clearTimeout(clearTimer.current);
     pendingBatch.current = null;
     runFloorSeq.current = 0;
@@ -185,12 +187,13 @@ export function ChatScreen({ route }) {
             await new Promise((resolve) => setTimeout(resolve, 250));
           }
         }
-        if (generation !== loadGeneration.current) return;
+        if (generation !== loadGeneration.current || initialLoadComplete.current) return;
         addMsgs(d.messages);
         setFirstSeq(d.firstSeq);
         setHasMore(d.hasMore);
+        initialLoadComplete.current = true;
       } catch (e) {
-        if (generation === loadGeneration.current) {
+        if (generation === loadGeneration.current && !initialLoadComplete.current && e?.code !== 'connection_changed') {
           const msg = scopeErrMsg('会话加载', e, '加载失败');
           setLoadErr(msg);
           if (e?.code !== 'unauthorized') toast(msg, 'error');
@@ -294,6 +297,7 @@ export function ChatScreen({ route }) {
   useBus('ws:resync', async (e) => {
     if (e.sessionId !== sessionId) return;
     const generation = ++loadGeneration.current;
+    initialLoadComplete.current = false;
     clearTimeout(clearTimer.current);
     pendingBatch.current = null;
     runFloorSeq.current = 0;
@@ -305,6 +309,7 @@ export function ChatScreen({ route }) {
       addMsgs(d.messages);
       setFirstSeq(d.firstSeq);
       setHasMore(d.hasMore);
+      initialLoadComplete.current = true;
       setInitLoading(false);
       setLoadErr('');
     } catch { /* 拉取失败：等下次 ws-open 补缺口或用户翻页 */ }
@@ -338,6 +343,7 @@ export function ChatScreen({ route }) {
         setFirstSeq(d.firstSeq);
         setHasMore(d.hasMore);
       }
+      initialLoadComplete.current = true;
       setInitLoading(false);
       setLoadErr('');
     } catch { /* 断线补拉失败，等下次重连 */ }
@@ -362,7 +368,7 @@ export function ChatScreen({ route }) {
       setHasMore(d.hasMore);
       addMsgs(d.messages);
     } catch (e) {
-      if (e?.code !== 'unauthorized') toast(scopeErrMsg('历史消息', e, '加载失败'), 'error');
+      if (generation === loadGeneration.current && !['unauthorized', 'connection_changed'].includes(e?.code)) toast(scopeErrMsg('历史消息', e, '加载失败'), 'error');
     } finally { loadingOlder.current = false; }
   }, [sessionId, hasMore, firstSeq, addMsgs]);
 

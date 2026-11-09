@@ -354,6 +354,33 @@ test('actual ChatScreen: old HTTP recovery cannot overwrite a new run or a newer
   assert.deepEqual(page.render().store.current.sorted.map((m) => m.text), ['问题', '好的']);
 });
 
+test('actual ChatScreen: successful recovery supersedes late initial failures and paging metadata', async () => {
+  for (const lateFailure of [true, false]) {
+    let finishInitial;
+    let rejectInitial;
+    let calls = 0;
+    const toasts = [];
+    const page = screen(() => ++calls === 1
+      ? new Promise((resolve, reject) => { finishInitial = resolve; rejectInitial = reject; })
+      : Promise.resolve({ messages: [user, answer], firstSeq: 1, hasMore: true }), {
+      toast: (msg) => toasts.push(msg),
+    });
+    page.effects();
+    await page.emit('ws-open');
+    if (lateFailure) rejectInitial({ code: 'network_error' });
+    else finishInitial({ messages: [], firstSeq: null, hasMore: false });
+    await new Promise(setImmediate);
+    const state = page.render();
+    assert.equal(state.loadErr, '');
+    assert.equal(state.initLoading, false);
+    assert.equal(state.firstSeq, 1);
+    assert.equal(state.hasMore, true);
+    assert.equal(state.store.current.sorted.length, 2);
+    assert.deepEqual(toasts, []);
+    page.unmount();
+  }
+});
+
 test('actual ChatScreen: failed initial loading is repaired by reconnect, including paging', async () => {
   let fail = true;
   const toasts = [];

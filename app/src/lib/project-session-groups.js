@@ -72,20 +72,20 @@ export function createProjectSessionGroups(fetchPage, publish, { now = Date.now 
     }
     return entries.get(id);
   };
-  const reload = async (id) => {
+  const reload = async (id, automatic = false) => {
     if (disposed || !definitions().some((p) => p.id === id)) return;
     const entry = ensure(id);
     const version = ++entry.version;
     entry.dirty = false;
     entry.refreshing = true;
-    await entry.pager.refresh(id);
+    await entry.pager.refresh(id, false, { automatic });
     if (disposed || entries.get(id) !== entry || version !== entry.version) return;
     entry.refreshing = false;
     emit();
   };
-  const open = (id) => {
+  const open = (id, automatic = false) => {
     expanded.add(id);
-    if (ensure(id).dirty) void reload(id);
+    if (ensure(id).dirty) void reload(id, automatic);
   };
   const invalidate = () => {
     for (const entry of entries.values()) {
@@ -98,7 +98,7 @@ export function createProjectSessionGroups(fetchPage, publish, { now = Date.now 
   };
 
   return {
-    update({ catalog: nextCatalog, loaded: nextLoaded, optimistic: nextOptimistic = [], focus: nextFocus = {}, refresh = false }) {
+    update({ catalog: nextCatalog, loaded: nextLoaded, optimistic: nextOptimistic = [], focus: nextFocus = {}, refresh = false, automatic = true }) {
       if (disposed) return;
       catalog = nextCatalog;
       loaded = nextLoaded;
@@ -125,9 +125,9 @@ export function createProjectSessionGroups(fetchPage, publish, { now = Date.now 
         const id = focus.name === 'Chat' ? owner(focus.meta)
           : focus.name === 'Home' ? [...catalog.projects].sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0]?.id
             ?? (ids.has('') ? '' : undefined) : undefined;
-        if (id !== undefined && ids.has(id)) { defaultApplied = true; open(id); }
+        if (id !== undefined && ids.has(id)) { defaultApplied = true; open(id, automatic); }
       }
-      for (const id of expanded) if (ensure(id).dirty) void reload(id);
+      for (const id of expanded) if (ensure(id).dirty) void reload(id, automatic);
       emit();
     },
     toggle(id) {

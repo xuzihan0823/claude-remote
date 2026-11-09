@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { AppState } from 'react-native';
 import { fetchProjects, scopeErrMsg } from '../../../web/core/api.js';
 import { toast, useBus } from '../../../web/core/bus.js';
+import { ws } from '../../../web/core/ws.js';
 import { t } from './i18n.js';
 import {
   ALL_PROJECTS, normalizeCatalog, parsePref, pathTail,
@@ -19,7 +20,7 @@ export function ProjectsProvider({ base, children }) {
   const [catalogError, setCatalogError] = useState('');
   const [projectId, setProjectId] = useState(() => parsePref(localStorage.getItem(prefKey(base))).projectId);
   const [target, setTargetState] = useState(() => parsePref(localStorage.getItem(prefKey(base))).cwd);
-  const [listSignal, setListSignal] = useState(0);
+  const [listSignal, setListSignal] = useState({ automatic: true });
   const [optimistic, setOptimistic] = useState([]);
   const gen = useRef(0);
   const catalogSeq = useRef(0);
@@ -40,7 +41,7 @@ export function ProjectsProvider({ base, children }) {
     persist({ cwd });
   }, []);
 
-  const loadCatalog = useCallback(async () => {
+  const loadCatalog = useCallback(async (automatic = false) => {
     const g = gen.current;
     const seq = ++catalogSeq.current;
     try {
@@ -50,25 +51,29 @@ export function ProjectsProvider({ base, children }) {
       setCatalogLoaded(true);
       setCatalogError('');
     } catch (e) {
-      if (g !== gen.current || seq !== catalogSeq.current || e?.code === 'unauthorized') return;
+      if (g !== gen.current || seq !== catalogSeq.current || ['unauthorized', 'connection_changed'].includes(e?.code)) return;
       const msg = scopeErrMsg(t('项目列表'), e, t('加载失败'));
       setCatalogError(msg);
-      toast(msg, 'error');
+      if (!automatic) toast(msg, 'error');
     }
   }, []);
 
-  const refresh = useCallback(() => {
+  const refresh = useCallback(({ automatic = false } = {}) => {
     clearTimeout(timer.current);
-    loadCatalog();
-    setListSignal((x) => x + 1);
+    loadCatalog(automatic);
+    setListSignal({ automatic });
   }, [loadCatalog]);
+  const refreshAutomatically = useCallback(() => {
+    if (AppState.currentState !== 'active' || ws.state.phase !== 'open') return;
+    refresh({ automatic: true });
+  }, [refresh]);
   const scheduleRefresh = useCallback((ms = 1500) => {
     clearTimeout(timer.current);
-    timer.current = setTimeout(refresh, ms);
-  }, [refresh]);
+    timer.current = setTimeout(refreshAutomatically, ms);
+  }, [refreshAutomatically]);
 
   useEffect(() => {
-    loadCatalog();
+    loadCatalog(true);
     return () => { gen.current += 1; clearTimeout(timer.current); };
   }, [loadCatalog]);
 
@@ -80,11 +85,10 @@ export function ProjectsProvider({ base, children }) {
   }, [catalog, catalogLoaded, projectId, setTarget]);
 
   useEffect(() => {
-    const iv = setInterval(refresh, 30_000);
-    const sub = AppState.addEventListener('change', (s) => { if (s === 'active') refresh(); });
-    return () => { clearInterval(iv); sub.remove(); };
-  }, [refresh]);
-  useBus('ws-open', refresh, [refresh]);
+    const iv = setInterval(refreshAutomatically, 30_000);
+    return () => clearInterval(iv);
+  }, [refreshAutomatically]);
+  useBus('ws-open', refreshAutomatically, [refreshAutomatically]);
   // status 只在轮次开始/结束时到达，合并后再刷，避免每条消息全量拉取
   useBus('ws:status', () => scheduleRefresh(), [scheduleRefresh]);
 
@@ -119,10 +123,10 @@ export function ProjectsProvider({ base, children }) {
 
   const noteCreated = useCallback((summary) => {
     setOptimistic((xs) => [{ ...summary, createdAt: Date.now() }, ...xs.filter((x) => x.sessionId !== summary.sessionId)]);
-    refresh();
+    refreshAutomatically();
     // JSONL 首行落盘可能晚于 POST 返回，补一次延迟刷新
     scheduleRefresh(2500);
-  }, [refresh, scheduleRefresh]);
+  }, [refreshAutomatically, scheduleRefresh]);
 
   const setDraftActive = useCallback((v) => { draftActive.current = v; }, []);
 

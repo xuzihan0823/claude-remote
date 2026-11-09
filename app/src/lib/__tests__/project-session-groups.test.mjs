@@ -259,6 +259,44 @@ test('first-page and pagination errors retry independently without losing useful
   assert.equal(group(controller, '/repo/a').sessions.length, 60);
 });
 
+test('automatic refresh retains rows and inline errors without notifying; manual retries still notify', async () => {
+  let fail = false;
+  const controller = setup(async () => {
+    if (fail) throw { code: 'network_error' };
+    return { sessions: rows('/repo/a', 0, 50), total: 60 };
+  });
+  controller.toggle('/repo/a');
+  await settle();
+  fail = true;
+  controller.update({ catalog, loaded: true, refresh: true, automatic: true });
+  await settle();
+  assert.equal(group(controller, '/repo/a').error, '会话列表：网络不可达');
+  assert.equal(group(controller, '/repo/a').notifyError, false);
+  assert.equal(group(controller, '/repo/a').sessions.length, 50);
+  await controller.retry('/repo/a');
+  assert.equal(group(controller, '/repo/a').notifyError, true);
+  fail = false;
+  controller.update({ catalog, loaded: true, refresh: true, automatic: true });
+  await settle();
+  assert.equal(group(controller, '/repo/a').error, '');
+  fail = true;
+  await controller.loadMore('/repo/a');
+  assert.equal(group(controller, '/repo/a').moreError, '会话列表：网络不可达');
+  controller.refresh();
+  await settle();
+  assert.equal(group(controller, '/repo/a').notifyError, true);
+  controller.dispose();
+});
+
+test('rejected requests from an old channel do not become list errors', async () => {
+  const controller = setup(async () => { throw { code: 'connection_changed' }; });
+  controller.toggle('/repo/a');
+  await settle();
+  assert.equal(group(controller, '/repo/a').error, '');
+  assert.equal(group(controller, '/repo/a').loading, false);
+  controller.dispose();
+});
+
 test('nested drawer navigation resolves only the active leaf and duplicate project titles remain distinct', () => {
   assert.deepEqual(drawerFocus({ index: 0, routes: [{ name: 'Main', state: { index: 1, routes: [{ name: 'Home' }, { name: 'Chat', params: { sessionId: 'current' } }] } }] }), { name: 'Chat', sessionId: 'current' });
   assert.deepEqual(drawerFocus(undefined), { name: undefined, sessionId: undefined });
