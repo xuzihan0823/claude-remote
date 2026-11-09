@@ -2,8 +2,8 @@ import { scopeErrMsg } from '../../../web/core/errors.js';
 import { t } from './i18n.js';
 import { mergeSessions, SESSION_PAGE, sessionQuery } from './projects.js';
 
-const initialState = () => ({ items: [], total: 0, loading: true, error: '', loadingMore: false, moreError: '' });
-const errorText = (e) => e?.code === 'unauthorized' ? '' : scopeErrMsg(t('会话列表'), e, t('加载失败'));
+const initialState = () => ({ items: [], total: 0, loading: true, error: '', notifyError: true, loadingMore: false, moreError: '' });
+const errorText = (e) => ['unauthorized', 'connection_changed'].includes(e?.code) ? '' : scopeErrMsg(t('会话列表'), e, t('加载失败'));
 
 export function createSessionPager(fetchPage, publish) {
   let state = initialState();
@@ -16,7 +16,7 @@ export function createSessionPager(fetchPage, publish) {
   const update = (patch) => { state = { ...state, ...patch }; publish(state); };
 
   return {
-    async refresh(nextProjectId, reset = false) {
+    async refresh(nextProjectId, reset = false, { automatic = false } = {}) {
       const current = ++generation;
       projectId = nextProjectId;
       const query = sessionQuery(projectId);
@@ -24,7 +24,7 @@ export function createSessionPager(fetchPage, publish) {
       refreshing = true;
       moreBusy = false;
       if (reset) { offset = 0; state = initialState(); }
-      update({ loading: reset || state.items.length === 0, loadingMore: false, moreError: '' });
+      update({ loading: reset || state.items.length === 0, error: '', notifyError: !automatic, loadingMore: false, moreError: '' });
       try {
         let items = [];
         let consumed = 0;

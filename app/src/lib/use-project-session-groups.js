@@ -28,7 +28,7 @@ export function useProjectSessionGroups(navigationState) {
     const prevErrors = new Map();
     controller.current = createProjectSessionGroups(fetchSessions, (next) => {
       for (const g of next.groups) {
-        const err = g.error || g.moreError || '';
+        const err = g.moreError || (g.notifyError === false ? '' : g.error) || '';
         if (err && prevErrors.get(g.id) !== err) toast(err, 'error');
         prevErrors.set(g.id, err);
       }
@@ -42,6 +42,7 @@ export function useProjectSessionGroups(navigationState) {
       catalog, loaded: catalogLoaded, optimistic,
       focus: { ...focus, meta: sessionCache.get(focus.sessionId) || optimistic.find((s) => s.sessionId === focus.sessionId) },
       refresh: signal.current !== listSignal,
+      automatic: listSignal.automatic,
     });
     signal.current = listSignal;
   }, [catalog, catalogLoaded, listSignal, optimistic, focus.name, focus.sessionId, cacheVersion]);

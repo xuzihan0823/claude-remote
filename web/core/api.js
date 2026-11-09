@@ -73,6 +73,7 @@ export async function api(path, opts = {}) {
       },
     });
   } catch {
+    if (requestBase !== baseUrl || requestToken !== token) throw new ApiError(0, 'connection_changed');
     throw new ApiError(0, ctrl.signal.aborted ? 'network_timeout' : 'network_error');
   } finally { clearTimeout(timer); }
   const data = await res.json().catch(() => ({}));
