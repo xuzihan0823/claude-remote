@@ -8,7 +8,7 @@ import { useTheme } from '../theme.js';
 
 // 品牌芒星：12 条锥形光芒 + 实心中心，按用户给的参考图描出来（2026-10）。
 // 每项 [角度°（0 = 向右，顺时针）, 长度, 端部宽度]，viewBox 24×24，中心 (12,12)；按顺时针从正上方排序，绽放时依次长出。
-// 光芒从中心的 0.75 倍宽渐宽到端部，端部是带小圆角的平头。web/ui/components/spark.js 与 App 图标仍是旧版。
+// 光芒从中心的 0.75 倍宽渐宽到端部，端部是带小圆角的平头。iOS 图标（assets/icon.png）已换成此芒星；web/ui/components/spark.js 与 Android 图标仍是旧版。
 export const RAYS = [
   [280, 8.88, 1.62],
   [313, 9.19, 2.24],
