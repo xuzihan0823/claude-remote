@@ -6,7 +6,7 @@
 //   其它（Read / Grep / Glob / WebFetch …）  → { kind: 'fields', fields: [[标签, 值]] }
 // 任何意外结构都退回 { kind: 'json' }，由界面直接显示原始 JSON。
 
-import { cwdTail } from './format.js';
+import { cwdTail, msgKey } from './format.js';
 import { t } from './i18n.js';
 
 const MAX_DIFF_CELLS = 400_000; // 行级 LCS 的 n*m 上限，超过就整段「删旧加新」
@@ -197,4 +197,146 @@ export function toolErrorHeadline(text) {
     .find(Boolean);
   if (!first) return '';
   return first.length > 48 ? `${first.slice(0, 48)}…` : first;
+}
+
+export const TOOL_BATCH_LIMIT = 3;
+export const TOOL_BATCH_INTERVAL_MS = 650;
+
+const pairScopeKey = (m) => (m?.toolUseId ? `${m.agentId || ''}:${m.toolUseId}` : '');
+
+/**
+ * 将列表中的 tool_use 与对应的 tool_result 合成为单条展示消息（挂在 tool_use.toolResult 上）。
+ * 孤立的 tool_result（如分页边界处对应的 tool_use 尚未加载）原样保留。
+ */
+export function mergeToolMessages(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return [];
+  const resultsById = new Map();
+  const adjacentResults = new Map();
+  let lastUnkeyedUse = null;
+
+  for (const m of messages) {
+    if (!m) continue;
+    if (m.kind === 'tool_use') {
+      lastUnkeyedUse = m.toolUseId ? null : m;
+      continue;
+    }
+    if (m.kind === 'tool_result') {
+      const scope = pairScopeKey(m);
+      if (scope && !resultsById.has(scope)) {
+        resultsById.set(scope, m);
+      } else if (!scope && lastUnkeyedUse && !adjacentResults.has(lastUnkeyedUse)) {
+        adjacentResults.set(lastUnkeyedUse, m);
+        lastUnkeyedUse = null;
+      }
+      continue;
+    }
+    lastUnkeyedUse = null;
+  }
+
+  if (resultsById.size === 0 && adjacentResults.size === 0) return messages;
+
+  const consumedResults = new Set();
+  for (const m of messages) {
+    if (m?.kind !== 'tool_use') continue;
+    const scope = pairScopeKey(m);
+    const res = scope ? resultsById.get(scope) : adjacentResults.get(m);
+    if (res && !consumedResults.has(res)) consumedResults.add(res);
+  }
+  if (consumedResults.size === 0) return messages;
+
+  const out = [];
+  const pairedUses = new Set();
+  for (const m of messages) {
+    if (!m) continue;
+    if (m.kind === 'tool_use') {
+      const scope = pairScopeKey(m);
+      const res = scope && !pairedUses.has(scope) ? resultsById.get(scope) : adjacentResults.get(m);
+      if (res && consumedResults.has(res)) {
+        if (scope) pairedUses.add(scope);
+        const permissionDenial = res.permissionDenial || m.permissionDenial;
+        out.push({
+          ...m,
+          toolResult: res,
+          ...(permissionDenial ? { permissionDenial } : {}),
+        });
+        continue;
+      }
+    }
+    if (m.kind === 'tool_result' && consumedResults.has(m)) continue;
+    out.push(m);
+  }
+  return out;
+}
+
+/** 判断合并后的消息（或其内嵌的 toolResult）是否命中指定 msgKey。 */
+export function matchesMessageKey(m, key) {
+  if (!m || !key) return false;
+  if (msgKey(m) === key) return true;
+  return !!(m.toolResult && msgKey(m.toolResult) === key);
+}
+
+const isStepKind = (kind) => kind === 'tool_use' || kind === 'tool_result' || kind === 'thinking';
+
+/**
+ * 从实时消息队列中切出一批消息：
+ * - 若存在非工具/思考类消息（如 user/assistant 文本），或队列仅有已露出卡片的 tool_result，则立即取出；
+ * - 否则每次最多取出 maxTools 个 tool_use（连同其前置思考块及已到达的配对 tool_result）。
+ */
+export function takeToolBatch(queue, maxTools = TOOL_BATCH_LIMIT) {
+  if (!Array.isArray(queue) || queue.length === 0) {
+    return { batch: [], rest: [], immediate: false };
+  }
+  let lastImmediateIdx = -1;
+  let hasNewStepCard = false;
+  for (let i = 0; i < queue.length; i += 1) {
+    const kind = queue[i]?.kind;
+    if (!isStepKind(kind)) lastImmediateIdx = i;
+    else if (kind === 'tool_use' || kind === 'thinking') hasNewStepCard = true;
+  }
+  if (lastImmediateIdx >= 0) {
+    return {
+      batch: queue.slice(0, lastImmediateIdx + 1),
+      rest: queue.slice(lastImmediateIdx + 1),
+      immediate: true,
+    };
+  }
+  if (!hasNewStepCard) {
+    return { batch: queue.slice(), rest: [], immediate: true };
+  }
+
+  const batch = [];
+  const rest = [];
+  const takenScopes = new Set();
+  let toolCount = 0;
+  let stopped = false;
+
+  for (const m of queue) {
+    const kind = m?.kind;
+    if (!stopped) {
+      if (kind === 'tool_use') {
+        if (toolCount >= maxTools) {
+          stopped = true;
+          rest.push(m);
+          continue;
+        }
+        toolCount += 1;
+        const scope = pairScopeKey(m);
+        if (scope) takenScopes.add(scope);
+        batch.push(m);
+      } else if (kind === 'thinking' && toolCount >= maxTools) {
+        stopped = true;
+        rest.push(m);
+      } else {
+        batch.push(m);
+      }
+      continue;
+    }
+    const scope = kind === 'tool_result' ? pairScopeKey(m) : '';
+    if (scope && takenScopes.has(scope)) {
+      batch.push(m);
+    } else {
+      rest.push(m);
+    }
+  }
+  return { batch, rest, immediate: false };
 }

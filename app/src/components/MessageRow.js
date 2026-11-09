@@ -30,7 +30,7 @@ import { MessageActionSheet } from './MessageActionSheet.js';
 const BLOCK_SPRING = { damping: 18, stiffness: 210, mass: 0.75 };
 const CHEVRON_SPRING = { damping: 20, stiffness: 260, mass: 0.7 };
 
-function Block({ icon, title, sub, err, live = false, children, defaultOpen = false }) {
+function Block({ icon, title, sub, badge, err, live = false, children, defaultOpen = false }) {
   const { colors, fonts, radius } = useTheme();
   const reduceMotion = useReducedMotion();
   const [open, setOpen] = useState(defaultOpen);
@@ -91,6 +91,7 @@ function Block({ icon, title, sub, err, live = false, children, defaultOpen = fa
         ) : (
           <View style={{ flex: 1 }} />
         )}
+        {badge}
         <Animated.View style={chevronStyle}>
           <Icon name="chevron" size={16} color={colors.ink3} />
         </Animated.View>
@@ -247,7 +248,7 @@ function AssistantMessage({ m, sessionId, live = false }) {
 }
 
 export function MessageRow({ m, sessionId, sending = false, live = false }) {
-  const { colors } = useTheme();
+  const { colors, fonts } = useTheme();
   const { t } = useI18n();
   const scale = usePref('fontScale');
   const showThinking = usePref('showThinking');
@@ -282,17 +283,39 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
     );
   }
   if (m.kind === 'tool_use') {
+    const res = m.toolResult;
+    const isErr = !!(res?.isError || denial);
+    const errSub = res?.isError ? toolErrorHeadline(res.text) : '';
+    const subText = toolHeadline(m.toolName, m.toolInput) || toolSummary(m) || errSub;
+    const resText = res ? (denial ? deniedToolResultText(denial, res.text) : res.text || '') : '';
     return (
       <Block
-        icon={<Icon name={toolIconName(m.toolName)} size={15} color={colors.accentDeep} />}
+        icon={<Icon name={toolIconName(m.toolName)} size={15} color={isErr ? colors.danger : colors.accentDeep} />}
         title={denial ? t('{tool}已拒绝', { tool: m.toolName || t('工具') }) : m.toolName || t('工具')}
-        sub={toolHeadline(m.toolName, m.toolInput) || toolSummary(m)}
+        sub={subText}
+        badge={res || denial ? (
+          <Icon name={isErr ? 'close' : 'check'} size={14} color={isErr ? colors.danger : colors.ok} strokeWidth={2.1} />
+        ) : null}
         defaultOpen={toolsExpanded}
         live={live}
-        err={!!denial}
+        err={isErr}
       >
         <ToolInputView name={m.toolName} input={m.toolInput} />
-        {denial ? <Text selectable style={{ color: colors.danger, fontSize: 14, lineHeight: 21, marginTop: 8 }}>{denialText(denial)}</Text> : null}
+        {res ? (
+          <View style={{ marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.line }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: resText ? 4 : 0 }}>
+              <Text style={{ fontSize: 11.5, fontWeight: '600', color: isErr ? colors.danger : colors.ink2 }}>
+                {denial ? t('操作已拒绝') : res.isError ? t('工具出错') : t('工具结果')}
+              </Text>
+              <Text style={{ fontSize: 11, fontFamily: fonts.mono, color: colors.ink3 }}>
+                {t('{n} 字符', { n: (res.text || '').length })}
+              </Text>
+            </View>
+            {resText ? <MonoBody text={resText} err={isErr} /> : null}
+          </View>
+        ) : denial ? (
+          <Text selectable style={{ color: colors.danger, fontSize: 14, lineHeight: 21, marginTop: 8 }}>{denialText(denial)}</Text>
+        ) : null}
       </Block>
     );
   }
