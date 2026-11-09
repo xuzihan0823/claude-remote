@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
 import Animated, {
   FadeIn,
-  LinearTransition,
   useAnimatedStyle,
   useReducedMotion,
   useSharedValue,
@@ -55,10 +54,6 @@ function Block({ icon, title, sub, err, live = false, children, defaultOpen = fa
 
   const enterStyle = useAnimatedStyle(() => ({
     opacity: Math.min(1, enter.value * 1.4),
-    transform: [
-      { translateY: (1 - enter.value) * 16 },
-      { scale: 0.96 + 0.04 * enter.value },
-    ],
   }));
 
   const chevronStyle = useAnimatedStyle(() => ({
@@ -67,7 +62,6 @@ function Block({ icon, title, sub, err, live = false, children, defaultOpen = fa
 
   return (
     <Animated.View
-      layout={reduceMotion ? undefined : LinearTransition.springify().damping(22).stiffness(260)}
       style={[
         {
           backgroundColor: colors.card,
