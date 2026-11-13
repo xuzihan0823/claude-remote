@@ -113,7 +113,7 @@ export async function main(argv: string[], binPath: string): Promise<void> {
       case "logs":
         return await cmdLogs(ctx);
       case "pair":
-        return await cmdPair(ctx);
+        return await cmdPair(ctx, args);
       case "config":
         return await cmdConfig(ctx, args);
       case "relay":

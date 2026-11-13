@@ -12,9 +12,10 @@ import { useTheme } from '../../theme.js';
 import { Group, Row, SettingsPage } from './ui.js';
 import { agoText } from './labels.js';
 
-const CHANNEL_LABELS = { tailscale: '直连 · Tailscale', lan: '直连 · 局域网', mdns: '直连 · 局域网', relay: 'relay' };
+const CHANNEL_LABELS = { tailscale: 'Tailscale', lan: '直连 · 局域网', mdns: '直连 · 局域网', relay: 'relay' };
 const PREF_OPTIONS = [
   { key: 'auto', label: '自动', sub: '优先直连，直连不通时走 relay' },
+  { key: 'tailscale', label: '只走 Tailscale', sub: '经 Tailscale 连接这台 Mac' },
   { key: 'direct', label: '只走直连', sub: 'Tailscale / 局域网' },
   { key: 'relay', label: '只走 relay', sub: '经自建 relay 服务器' },
 ];
@@ -39,7 +40,7 @@ export function DeviceDetailScreen({ navigation, route }) {
       .then((h) => { if (alive) { setHealth(h); setLatency(Date.now() - t0); } })
       .catch(() => { if (alive) setHealth(false); });
     return () => { alive = false; };
-  }, [isCurrent]);
+  }, [isCurrent, d?.lastBase]);
 
   if (!d) return <SettingsPage title={t('设备')} />;
 
@@ -113,14 +114,20 @@ export function DeviceDetailScreen({ navigation, route }) {
 
   const pref = channelPrefOf(d);
   const setPref = async (key) => {
-    if (key === pref) return;
-    updateDevice(d.id, { channelPref: key });
-    changed();
-    if (isCurrent) await reselect();
+    if (key === pref || busy) return;
+    if (!isCurrent) {
+      updateDevice(d.id, { channelPref: key });
+      changed();
+      return;
+    }
+    setBusy(true);
+    const ok = await reselect(key);
+    if (ok) haptics.success();
+    else haptics.error();
+    setBusy(false);
   };
   const hasRelay = d.bases.some((b) => baseChannel(b) === 'relay');
-  const hasDirect = d.bases.some((b) => baseChannel(b) !== 'relay');
-  const prefAvailable = (key) => key === 'auto' || (key === 'relay' ? hasRelay : hasDirect);
+  const prefAvailable = (key) => candidateBases({ ...d, channelPref: key }).length > 0;
 
   const status = isCurrent
     ? (health === null ? { label: t('检查中…'), dot: colors.ink3 } : health ? { label: t('已连接'), dot: colors.ok } : { label: t('连不上'), dot: colors.danger })

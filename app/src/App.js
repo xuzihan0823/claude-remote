@@ -219,30 +219,46 @@ export default function App() {
   }, []);
 
   // 对当前设备的候选地址重新探测，换到当前最优通道。只换 base、重启 ws，不重挂导航、不清缓存。
-  const reselectingRef = useRef(false);
-  const reselect = useCallback(async () => {
-    if (reselectingRef.current || authRef.current !== 'ok') return;
+  const reselectingRef = useRef(null);
+  const reselect = useCallback(async (preference) => {
+    const manual = preference !== undefined;
+    if ((!manual && reselectingRef.current) || authRef.current !== 'ok') return false;
     const d = getDevice(currentDeviceId());
-    if (!d || d.token !== token) { ws.reconnectNow(); return; }
-    reselectingRef.current = true;
+    if (!d || d.token !== token) {
+      if (!manual) ws.reconnectNow();
+      return false;
+    }
+    const attempt = {};
+    reselectingRef.current = attempt;
     const fromBase = baseUrl;
     const fromToken = token;
+    const isCurrent = () => reselectingRef.current === attempt && currentDeviceId() === d.id
+      && baseUrl === fromBase && token === fromToken;
     try {
-      const next = await probeBases(candidateBases(d), d.token);
-      if (baseUrl !== fromBase || token !== fromToken) return; // 期间切了设备 / 退出，交给那条路径
-      if (next === baseUrl) { ws.reconnectNow(); return; }
+      const candidates = candidateBases(manual ? { ...d, channelPref: preference } : d);
+      const next = await probeBases(candidates, d.token);
+      if (!isCurrent()) return false;
+      if (manual) updateDevice(d.id, { channelPref: preference });
+      if (next === baseUrl) {
+        if (manual) bus.emit('devices');
+        if (!manual || ws.state.phase !== 'open') ws.reconnectNow();
+        return true;
+      }
       saveConn(next, d.token);
       connKeyRef.current = `${baseUrl}\n${token}`;
       upsertDevice({ bases: [next], base: next, token: d.token });
       bus.emit('devices');
       ws.stop();
       ws.start();
+      return true;
     } catch (e) {
-      if (baseUrl !== fromBase || token !== fromToken) return;
-      if (e.code === 'unauthorized') bus.emit('unauthorized');
-      else ws.resume();
+      if (!isCurrent()) return false;
+      if (manual) toast(connErrMsg(e), 'error');
+      else if (e.code === 'unauthorized') bus.emit('unauthorized');
+      ws.resume();
+      return false;
     } finally {
-      reselectingRef.current = false;
+      if (reselectingRef.current === attempt) reselectingRef.current = null;
     }
   }, []);
   useBus('ws-reselect', () => { reselect(); }, [reselect]);

@@ -193,15 +193,22 @@ cr
 
 手机会把直连地址和 Relay 地址视作同一台 Mac 的多个通道，**能直连时优先直连，不通时自动走 Relay**。
 
-#### 方案 A：Tailscale / 同 Wi-Fi 局域网直连（无需服务器）
+#### 方案 A：Tailscale Serve（无需服务器）
 
-> **重要**：daemon 出厂默认监听 `127.0.0.1`（仅本机）。使用 Tailscale 或局域网直连时，需先放开监听地址：
+1. 在 Mac 和 iPhone 上安装 Tailscale，并连接同一个 Tailscale 网络。
+2. 保持 Mac 上的 `cr` 运行，在另一个终端运行：
 
-```sh
-cr config set host 0.0.0.0   # 允许局域网 / Tailscale 直连；也可改为本机 Tailscale IP
-```
+   ```sh
+   cr pair --tailscale
+   ```
 
-然后在 Mac 和 iPhone 上安装并登录同一个 **Tailscale** 账号即可（同一 Wi-Fi 下也可直接走局域网）。
+3. 首次使用 Serve 时，按 Tailscale 提示在浏览器开启 HTTPS，再扫终端二维码。
+
+daemon 可以保持默认的 `127.0.0.1`。命令会复用已经指向 daemon 的私有 HTTPS Serve 地址，或在 Tailscale 的 443、8443 端口中选一个空闲端口。已配对且在线的手机会自动收到新地址。
+
+Tailscale 会自动处理直连和 DERP 中继，手机使用同一个 HTTPS 地址。也配置了自建 Relay 时，在 App 的「设置 → 设备 → 设备详情 → 通道偏好」选择「只走 Tailscale」「只走 relay」或「自动」。切换当前设备的通道时，App 会先试连，再保存偏好。
+
+只在同一个 Wi-Fi 下使用时，也可以用 `cr config set host 0.0.0.0` 开启局域网直连。默认随 `cr` 启停时，重开 `cr` 使设置生效，再运行 `cr pair`。
 
 #### 方案 B：自建公网 Relay（有 Linux 服务器时）
 
@@ -249,7 +256,7 @@ npx expo run:ios --device
 
 ### 第四步：扫码配对
 
-在 Mac 终端运行（或在 `cr` 全屏控制台里按 `p`）：
+如果第二步已经完成扫码，可以开始使用。需要再次显示配对码时，在 Mac 终端运行（或在 `cr` 全屏控制台里按 `p`）：
 
 ```sh
 cr pair

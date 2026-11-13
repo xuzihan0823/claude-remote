@@ -1,7 +1,7 @@
 // relay connector：daemon 主动连出到 relay（design §3.1），把 relay 转来的手机 HTTP / WS
 // 在本机回环重放给 daemon 自己的端口。daemon 的路由、鉴权、上传、WS upgrade 原样复用。
 //
-// 安全：配对端点（/api/pair-info、/api/pair-qr.svg）在这里直接 403，不进 daemon；
+// 安全：本机配对和通道刷新端点在这里直接 403，不进 daemon；
 // 其余回放请求一律带 X-Forwarded-*，即使路径判断被绕过，looksProxied() 也会让配对端点 403。
 // 日志只记连接事件，不记 query、头、body、密钥。
 
@@ -66,7 +66,7 @@ export interface LoopbackTarget {
 
 /** relay 被替换旧连接时的关闭码（packages/relay/src/server.ts CLOSE_REPLACED）。 */
 const CLOSE_REPLACED = 4001;
-const PAIR_PATHS = new Set(["/api/pair-info", "/api/pair-qr.svg"]);
+const PAIR_PATHS = new Set(["/api/pair-info", "/api/pair-qr.svg", "/api/channels/refresh"]);
 const MAX_REJECT_BODY = 4096;
 
 /** 回放目标：daemon 监听在通配地址时走 127.0.0.1。 */

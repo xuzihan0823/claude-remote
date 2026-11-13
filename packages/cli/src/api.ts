@@ -133,6 +133,10 @@ export class Api {
     return this.#request("GET", "/api/connect-info");
   }
 
+  refreshChannels(): Promise<{ ok: boolean }> {
+    return this.#request("POST", "/api/channels/refresh");
+  }
+
   /** 仅本机：让 daemon 重读 relay 配置（不重启）。旧版本 daemon 没有这个接口，返回 404。 */
   reloadRelay(): Promise<{ relays: RelayStatus[] }> {
     return this.#request("POST", "/api/relay/reload");

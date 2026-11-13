@@ -82,8 +82,8 @@ export const en = {
   // 快速上手
   '在 Mac 终端运行 {cmd}，首次会自动完成安装并启动 daemon': 'Run {cmd} in Terminal on your Mac. The first run installs and starts the daemon automatically.',
   'Mac 和手机装上 {app}，登录同一个账号': 'Install {app} on your Mac and phone, and sign in with the same account.',
-  'Mac 上运行 {cmd}，用这里的「添加设备」扫二维码': 'Run {cmd} on your Mac, then scan the QR code with Add Device.',
-  '连不上时，在设备详情里补一个 Tailscale 或局域网地址': "If you can't connect, add a Tailscale or LAN address in the device details.",
+  '保持 cr 运行，在另一个 Mac 终端运行 {cmd}，然后用「添加设备」扫码': 'Keep cr running, run {cmd} in another Mac terminal, then scan with Add Device.',
+  '同时配置自建 Relay 后，可在设备详情的「通道偏好」切换': 'If you also configure a self-hosted relay, switch in Connection Preference in the device details.',
   '在 GitHub 上查看说明': 'View Instructions on GitHub',
 
   // 设备列表
@@ -104,6 +104,8 @@ export const en = {
   '自动': 'Auto',
   '优先直连，直连不通时走 relay': 'Prefer direct connections; fall back to relay',
   '只走直连': 'Direct Only',
+  '只走 Tailscale': 'Tailscale Only',
+  '经 Tailscale 连接这台 Mac': 'Connect to this Mac via Tailscale',
   'Tailscale / 局域网': 'Tailscale / LAN',
   '只走 relay': 'Relay Only',
   '经自建 relay 服务器': 'Via self-hosted relay server',
@@ -122,7 +124,6 @@ export const en = {
   '移除「{name}」？': 'Remove "{name}"?',
   '会清除这台 Mac 的地址和 Token，之后需要重新配对。': "This removes the Mac's address and token. You'll need to pair again.",
   '已重新配对': 'Paired Again',
-  '直连 · Tailscale': 'Direct · Tailscale',
   '直连 · 局域网': 'Direct · LAN',
 
   // 修改连接

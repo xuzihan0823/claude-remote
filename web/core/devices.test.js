@@ -96,9 +96,11 @@ test('存储损坏时不崩溃，按空列表处理', () => {
 });
 
 const RELAY = 'https://relay.example.com/d/abc123';
+const SERVE = 'https://mac.example.ts.net:8443';
 
 test('baseChannel：relay / Tailscale(100.64/10) / mDNS / 局域网', () => {
   assert.equal(D.baseChannel(RELAY), 'relay');
+  assert.equal(D.baseChannel(SERVE), 'tailscale');
   assert.equal(D.baseChannel('http://100.64.0.1:8787'), 'tailscale');
   assert.equal(D.baseChannel('http://100.127.255.1:8787'), 'tailscale');
   assert.equal(D.baseChannel('http://100.63.0.1:8787'), 'lan', '100.63 不在 CGNAT 段');
@@ -116,6 +118,16 @@ test('candidateBases 按通道偏好过滤；旧记录无偏好按 auto；auto �
   assert.deepEqual(D.candidateBases({ ...legacy, channelPref: 'relay' }), [RELAY]);
   assert.deepEqual(D.candidateBases({ ...legacy, channelPref: 'bogus' }), D.candidateBases(legacy));
   assert.equal(D.channelPrefOf({}), 'auto');
+});
+
+test('Serve 地址经 Relay 同步后可独立选择；旧的直连偏好仍包含局域网', () => {
+  const lan = 'http://192.168.1.2:8787';
+  const d = D.upsertDevice({ base: RELAY, token: 't' });
+  D.syncBases(d.id, [SERVE, lan, RELAY], RELAY);
+  for (const [pref, expected] of [['tailscale', [SERVE]], ['relay', [RELAY]], ['direct', [SERVE, lan]]]) {
+    D.updateDevice(d.id, { channelPref: pref });
+    assert.deepEqual(D.candidateBases(D.getDevice(d.id)), expected);
+  }
 });
 
 test('updateDevice 设置通道偏好，非法值忽略', () => {

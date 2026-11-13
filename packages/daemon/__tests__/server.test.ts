@@ -122,6 +122,7 @@ async function startHarness(
   isCliAlive: (sessionId: string) => Promise<boolean> = async () => false,
   trackerOptions: ActivityTrackerOptions = {},
   reloadRelays?: () => Promise<RelayStatus[]>,
+  tailscaleServeUrl?: () => string | undefined,
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "claude-remote-it-"));
   const settingsPath = join(root, "settings.json");
@@ -174,6 +175,7 @@ async function startHarness(
     modelCatalog: () => readModelCatalog(settingsPath),
     effortOptions: async () => ({ levels: ["low", "high", "max"], verified: true }),
     ...(reloadRelays === undefined ? {} : { reloadRelays }),
+    ...(tailscaleServeUrl === undefined ? {} : { tailscaleServeUrl }),
   });
   await server.listen();
   const { port } = server.address();
@@ -315,6 +317,31 @@ test("GET /api/connect-info：需鉴权；返回直连地址与 relay 状态，�
   assert.deepEqual(info.bases, harness.server.pairInfo.bases);
   assert.deepEqual(info.relays, []);
   assert.equal(JSON.stringify(info).includes(TOKEN), false);
+});
+
+test("配置 Serve 后在线手机收到 channels，同步新地址，代理无法访问本机配对端点", async (t) => {
+  let serve: string | undefined;
+  const h = await startHarness(async () => false, {}, undefined, () => serve);
+  t.after(() => h.dispose());
+  const sink = new FrameSink(h.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+
+  serve = "https://mac.example.ts.net:8443";
+  const refresh = `${h.base}/api/channels/refresh`;
+  const headers = { "x-forwarded-host": "mac.example.ts.net", "x-forwarded-proto": "https" };
+  assert.equal((await fetch(refresh, { method: "POST" })).status, 401);
+  assert.equal((await fetch(refresh, authed({ method: "POST", headers }))).status, 403);
+  assert.equal((await fetch(refresh, authed({ method: "POST" }))).status, 200);
+  await sink.waitFor((frame) => frame.type === "channels");
+
+  const res = await fetch(`${h.base}/api/connect-info`, authed({ headers }));
+  assert.deepEqual(await res.json(), { bases: [serve], relays: [] });
+  const pair = await fetch(`${h.base}/api/pair-info`);
+  assert.deepEqual(await pair.json(), { bases: [serve], token: TOKEN });
+  for (const path of ["/api/pair-info", "/api/pair-qr.svg"]) {
+    assert.equal((await fetch(`${h.base}${path}`, { headers })).status, 403);
+  }
 });
 
 test("WS 应用层心跳：ping 立即回 pong，且不影响后续订阅帧", async (t) => {

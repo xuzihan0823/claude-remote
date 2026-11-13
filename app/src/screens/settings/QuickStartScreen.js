@@ -11,12 +11,12 @@ export function QuickStartScreen() {
   const p = { fontSize: 15, color: colors.ink, lineHeight: 23 };
   const [runBefore, runAfter] = t('在 Mac 终端运行 {cmd}，首次会自动完成安装并启动 daemon').split('{cmd}');
   const [installBefore, installAfter] = t('Mac 和手机装上 {app}，登录同一个账号').split('{app}');
-  const [pairBefore, pairAfter] = t('Mac 上运行 {cmd}，用这里的「添加设备」扫二维码').split('{cmd}');
+  const [pairBefore, pairAfter] = t('保持 cr 运行，在另一个 Mac 终端运行 {cmd}，然后用「添加设备」扫码').split('{cmd}');
   const steps = [
     <Text style={p}>{runBefore}<Text style={code}>cr</Text>{runAfter}</Text>,
     <Text style={p}>{installBefore}<Text style={{ fontWeight: '600', color: colors.inkStrong }}>Tailscale</Text>{installAfter}</Text>,
-    <Text style={p}>{pairBefore}<Text style={code}>cr pair</Text>{pairAfter}</Text>,
-    <Text style={p}>{t('连不上时，在设备详情里补一个 Tailscale 或局域网地址')}</Text>,
+    <Text style={p}>{pairBefore}<Text style={code}>cr pair --tailscale</Text>{pairAfter}</Text>,
+    <Text style={p}>{t('同时配置自建 Relay 后，可在设备详情的「通道偏好」切换')}</Text>,
   ];
   return (
     <SettingsPage title={t('快速上手')}>

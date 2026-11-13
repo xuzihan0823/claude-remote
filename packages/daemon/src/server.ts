@@ -64,6 +64,7 @@ export interface DaemonServerOptions {
   /** 测试/嵌入方可注入；默认每次请求重新读取 Mac 设置，以反映即时切换。 */
   modelCatalog?: () => Promise<ModelCatalog>;
   effortOptions?: (cwd: string, model?: string) => Promise<EffortOptions>;
+  tailscaleServeUrl?: () => string | undefined;
   /** relay connector 只读状态；缺省视为未启用。 */
   relayStatuses?: () => RelayStatus[];
   /** 仅本机：重读 RELAY_* 并按地址增删连接；缺省表示不支持热加载（旧版本或嵌入方）。 */
@@ -142,8 +143,16 @@ export class DaemonServer {
   /** 配对信息（候选地址每次现查——Tailscale 可能在 daemon 启动后才拉起）；listen() 后用实际端口。 */
   get pairInfo(): PairInfo {
     const { token } = this.#options.config;
-    const relayBases = (this.#options.relayStatuses?.() ?? []).flatMap((relay) => relay.base === undefined ? [] : [relay.base]);
-    return { bases: pairBases(this.#pairPort, relayBases), token };
+    return { bases: this.#connectionBases(this.#options.relayStatuses?.() ?? []), token };
+  }
+
+  #connectionBases(relays: RelayStatus[]): string[] {
+    const relayBases = relays.flatMap((relay) => relay.base === undefined ? [] : [relay.base]);
+    const base = this.#options.tailscaleServeUrl?.();
+    const addr = this.#http.address();
+    const host = addr !== null && typeof addr !== "string" ? addr.address : this.#options.config.host;
+    const serve = base === undefined ? undefined : { base, loopbackOnly: isLoopbackAddress(host) };
+    return pairBases(this.#pairPort, relayBases, serve);
   }
 
   /** 实际监听地址（测试用 port 0）。 */
@@ -244,8 +253,18 @@ export class DaemonServer {
 
     if (method === "GET" && path === "/api/connect-info") {
       const relays = this.#options.relayStatuses?.() ?? [];
-      const relayBases = relays.flatMap((relay) => relay.base === undefined ? [] : [relay.base]);
-      this.#json(res, 200, { bases: pairBases(this.#pairPort, relayBases), relays });
+      this.#json(res, 200, { bases: this.#connectionBases(relays), relays });
+      return;
+    }
+
+    if (method === "POST" && path === "/api/channels/refresh") {
+      if (!isLoopbackAddress(req.socket.remoteAddress) || looksProxied(req.headers)) {
+        this.#json(res, 403, { error: "loopback_only" });
+        return;
+      }
+      req.resume();
+      this.#broadcastAll({ type: "channels" });
+      this.#json(res, 200, { ok: true });
       return;
     }
 
