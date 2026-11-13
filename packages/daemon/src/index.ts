@@ -19,7 +19,7 @@ import { InteractionManager, InteractionStore } from "@claude-remote/interaction
 import QRCode from "qrcode";
 
 import { ConfigError, loadConfig, loadRelaySettings, relayBase, type RelaySettings } from "./config.js";
-import { pairPayload } from "./pair.js";
+import { pairPayload, readTailscaleServeUrl } from "./pair.js";
 import { RelayManager } from "./relay/manager.js";
 import { ApprovalBridge, TurnRunner, createNotifier, type ActivityGate, type ApprovalEvent } from "./run/index.js";
 import { DaemonServer } from "./server.js";
@@ -129,6 +129,7 @@ async function main(): Promise<void> {
     version: pkg.version,
     claudeCliVersion: () => claudeCliVersion,
     isCliAlive: async (sessionId) => (await readLiveCliSessions(cliSessionsDir)).has(sessionId),
+    tailscaleServeUrl: () => readTailscaleServeUrl(envFile ?? ".env"),
     relayStatuses: () => relays.statuses(),
     reloadRelays: () => relays.reload(readRelaySettings(envFile)),
   });

@@ -1,5 +1,7 @@
-import { networkInterfaces, hostname } from "node:os";
+import { readFileSync } from "node:fs";
 import type { IncomingHttpHeaders } from "node:http";
+import { hostname, networkInterfaces } from "node:os";
+import { parseEnv } from "node:util";
 
 export interface PairInfo {
   bases: string[];
@@ -45,6 +47,28 @@ export function isTailscaleAddress(address: string): boolean {
   return a === 100 && b !== undefined && b >= 64 && b <= 127;
 }
 
+export const TAILSCALE_SERVE_URL = "TAILSCALE_SERVE_URL";
+
+export function normalizeTailscaleServeUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.){2,}ts\.net$/.test(url.hostname)) return undefined;
+    if (url.pathname !== "/" || url.search || url.hash || url.username || url.password) return undefined;
+    return url.origin;
+  } catch {
+    return undefined;
+  }
+}
+
+/** CLI 与运行中的 daemon 读取同一份配置。Serve 地址变动无需重启。 */
+export function readTailscaleServeUrl(envFile: string): string | undefined {
+  try {
+    return normalizeTailscaleServeUrl(parseEnv(readFileSync(envFile, "utf8"))[TAILSCALE_SERVE_URL] ?? "");
+  } catch {
+    return undefined;
+  }
+}
+
 function interfaceIpv4(name: string): string | undefined {
   return networkInterfaces()[name]?.find((entry) => !entry.internal && entry.family === "IPv4" && isIpv4(entry.address))?.address;
 }
@@ -64,9 +88,10 @@ export function enumeratePairBases(port: number): string[] {
   return [...new Set(addresses)].map((address) => `http://${address}:${port}`);
 }
 
-/** 配对/同步用的全部候选地址：直连在前，relay base（启用时）追加在最后。 */
-export function pairBases(port: number, relayBases: string[] = []): string[] {
-  return [...new Set([...enumeratePairBases(port), ...relayBases])];
+/** 配对和地址同步共用。Serve 已启用时，回环监听无需向手机发布无法直连的地址。 */
+export function pairBases(port: number, relayBases: string[] = [], serve?: { base: string; loopbackOnly: boolean }): string[] {
+  const direct = serve?.loopbackOnly ? [] : enumeratePairBases(port);
+  return [...new Set([...(serve === undefined ? [] : [serve.base]), ...direct, ...relayBases])];
 }
 
 export function pairPayload(info: PairInfo): string {

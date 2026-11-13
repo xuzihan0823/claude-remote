@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { loadRelaySettings, relayBase } from "@claude-remote/daemon/config";
-import { pairBases, pairPayload, type PairInfo } from "@claude-remote/daemon/pair";
+import { isLoopbackAddress, pairBases, pairPayload, readTailscaleServeUrl, type PairInfo } from "@claude-remote/daemon/pair";
 
 import { Api, ApiError, type ApprovalCard, type ConnectInfo, type SessionSummary } from "./api.js";
 import { AttachedDaemon } from "./attached.js";
@@ -206,7 +206,10 @@ export function configuredRelayBases(envFile: string): string[] {
 
 export function pairInfo(ctx: Context): PairInfo | undefined {
   if (ctx.env.token === undefined) return undefined;
-  return { bases: pairBases(ctx.env.port, configuredRelayBases(ctx.env.envFile)), token: ctx.env.token };
+  const base = readTailscaleServeUrl(ctx.env.envFile);
+  const loopbackOnly = ctx.env.host === "localhost" || isLoopbackAddress(ctx.env.host);
+  const serve = base === undefined ? undefined : { base, loopbackOnly };
+  return { bases: pairBases(ctx.env.port, configuredRelayBases(ctx.env.envFile), serve), token: ctx.env.token };
 }
 
 /**

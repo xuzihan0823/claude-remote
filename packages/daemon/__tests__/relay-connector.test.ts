@@ -218,6 +218,9 @@ test("配对端点经 relay 一律 403（含 ./ 变体），本机直连仍可�
   }
   const direct = await request(`http://127.0.0.1:${daemon.port}/api/pair-info`);
   assert.equal(direct.status, 200);
+  const refresh = await request(`${phoneBase}/api/channels/refresh`, { method: "POST", headers: bearer });
+  assert.equal(refresh.status, 403);
+  assert.equal(refresh.headers["access-control-allow-origin"], undefined);
 });
 
 test("回放请求带转发头：Host 改本机，X-Forwarded-* 覆盖手机伪造值，触发 looksProxied", () => {

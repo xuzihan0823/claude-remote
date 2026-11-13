@@ -54,7 +54,7 @@ export const CONFIG_FIELDS: ConfigField[] = [
     key: "BRIDGE_HOST",
     alias: "host",
     label: "监听地址",
-    hint: "127.0.0.1 仅本机；0.0.0.0 允许局域网/Tailscale 的手机直连；也可填 Tailscale IP",
+    hint: "127.0.0.1 可配合 cr pair --tailscale；0.0.0.0 允许局域网直连；也可填 Tailscale IP",
     fallback: "127.0.0.1",
     affectsCli: true,
     validate: (v) =>

@@ -21,8 +21,9 @@ import {
 import { CONFIG_FIELDS, findField, readConfig, rotateToken, setConfig } from "./config.js";
 import { countProjects, detectClaude, inspectClaude, type DetectDeps, type DetectedClaude } from "./detect.js";
 import { ensureToken, loadCliEnv } from "./env.js";
-import { isTailscaleAddress } from "@claude-remote/daemon/pair";
+import { isTailscaleAddress, normalizeTailscaleServeUrl } from "@claude-remote/daemon/pair";
 import { readRelayFile, runRelay, snapshotRelayLine } from "./relay.js";
+import { configureTailscaleServe } from "./tailscale.js";
 import {
   describeMessage,
   fit,
@@ -45,7 +46,7 @@ export const HELP = `cr — Claude Remote 控制台
                         随 cr 运行时：cr up 在前台运行 daemon（Ctrl-C 停止），cr down 停止 daemon
   cr status             daemon 状态、配对地址、会话与待审批数量
   cr logs               跟随 daemon 日志
-  cr pair               终端打印配对二维码
+  cr pair [--tailscale]  终端打印配对二维码；--tailscale 首次接入 Tailscale Serve
   cr config             查看配置；cr config set <项> <值> / unset <项> / reset-token
                         项：host port bark ntfy timeout cooldown claude uploads autostart（改完自动重启 daemon）
   cr relay              自建 relay：add <地址> <密钥> | status | on | off | remove
@@ -206,7 +207,7 @@ function tailscaleHosts(bases: string[]): string[] {
   return bases.flatMap((base) => {
     try {
       const host = new URL(base).hostname;
-      return isTailscaleAddress(host) ? [host] : [];
+      return isTailscaleAddress(host) || normalizeTailscaleServeUrl(base) !== undefined ? [host] : [];
     } catch {
       return [];
     }
@@ -217,7 +218,7 @@ function tailscaleHosts(bases: string[]): string[] {
 function channelLines(snap: DaemonSnapshot, localBases: string[], envFile: string): string[] {
   const tailscale = tailscaleHosts(snap.connect?.bases ?? localBases);
   return [
-    `通道     Tailscale  ${tailscale.length > 0 ? `在线（${tailscale.join("、")}）` : "未检测到 Tailscale 地址"}`,
+    `通道     Tailscale  ${tailscale.length > 0 ? `地址（${tailscale.join("、")}）` : "未检测到 Tailscale 地址"}`,
     `         relay      ${snapshotRelayLine(snap, readRelayFile(envFile))}`,
   ];
 }
@@ -260,9 +261,14 @@ export async function cmdLogs(ctx: Context): Promise<void> {
   });
 }
 
-export async function cmdPair(ctx: Context): Promise<void> {
+export async function cmdPair(ctx: Context, args: string[] = []): Promise<void> {
+  if (args.length > 0) {
+    if (args.length !== 1 || args[0] !== "--tailscale") throw new Error("用法：cr pair [--tailscale]");
+    await configureTailscaleServe(ctx);
+  }
   const info = pairInfo(ctx);
   if (info === undefined) throw new Error("没有找到 BRIDGE_TOKEN，先运行 cr setup");
+  if (info.bases.length === 0) throw new Error("没有可配对的地址");
   console.log(await terminalQr(info));
   console.log("iPhone 相机扫码，点「在 Claude Remote 中打开」即可配对。候选地址：");
   for (const base of info.bases) console.log(`  ${base}`);

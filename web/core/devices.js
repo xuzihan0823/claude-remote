@@ -27,13 +27,14 @@ const uniqBases = (list) => {
   return out;
 };
 
-export const CHANNEL_PREFS = ['auto', 'direct', 'relay'];
+export const CHANNEL_PREFS = ['auto', 'direct', 'tailscale', 'relay'];
 
 /** 地址属于哪种通道：relay | tailscale | mdns | lan。后三种都是直连，细分只用于展示。 */
 export function baseChannel(base) {
   if (isRelayBase(base)) return 'relay';
   let host = '';
   try { host = new URL(normalizeBase(base)).hostname.toLowerCase(); } catch { return 'lan'; }
+  if (host.endsWith('.ts.net')) return 'tailscale';
   if (host.endsWith('.local')) return 'mdns';
   const m = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
   if (m && Number(m[1]) === 100 && Number(m[2]) >= 64 && Number(m[2]) <= 127) return 'tailscale';
@@ -145,6 +146,7 @@ export function candidateBases(d) {
   const all = uniqBases([d.lastBase, ...d.bases]);
   const pref = channelPrefOf(d);
   if (pref === 'auto') return all;
+  if (pref === 'tailscale') return all.filter((b) => baseChannel(b) === 'tailscale');
   return all.filter((b) => (baseChannel(b) === 'relay') === (pref === 'relay'));
 }
 

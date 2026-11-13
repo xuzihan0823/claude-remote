@@ -29,6 +29,8 @@ export interface CliEnv {
   envFile: string;
   /** package 模式下 launchd 直接运行的 daemon 入口。 */
   daemonEntry: string;
+  /** daemon 监听地址，保留通配地址以区别回环监听。 */
+  host: string;
   /** daemon 监听端口（BRIDGE_PORT，默认 8787）。 */
   port: number;
   /** CLI 访问 daemon 的地址（总是走本机）。 */
@@ -156,6 +158,7 @@ export function loadCliEnv(deps: LoadEnvDeps = {}): CliEnv {
     dataDir,
     envFile,
     daemonEntry: join(repoDir, "dist", "daemon.js"),
+    host,
     port,
     baseUrl: `http://${hostPart}:${port}`,
     token,

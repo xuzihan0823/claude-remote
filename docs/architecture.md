@@ -50,6 +50,7 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 - 运行中改 relay 配置不必重启 daemon：`cr relay add/remove/on/off` 写完文件后调用仅本机的 `POST /api/relay/reload`，daemon 重读配置文件里的 `RELAY_*`，按地址 diff 增删 connector。参数（地址、密钥、设备身份）完全没变的连接原样保留，所以活跃轮次和手机连接都不受影响；成功后向所有 WS 连接广播 `{"type":"channels"}`。旧 daemon 没有这个接口时 cr 退回重启；端口、token、通知等进程级配置仍要重启。
 - 所有 relay 共用 `RELAY_DEVICE_ID` / `RELAY_DEVICE_KEY`。`add` 追加地址或更新已有地址的密钥；`remove <地址>` 重排编号并保留设备身份；`remove --all` 清除身份。每台 relay 都会收到设备私钥，并能看到转发的 token 和内容，因此仅适用于自己控制的服务器。
 - 配对码和 `GET /api/connect-info` 都在直连地址后追加所有已启用的 relay 地址，暂时故障的 relay 也保留。`connect-info` 返回 `{ bases: string[], relays: RelayStatus[] }`，不再返回单数 `relay`；未启用时 `relays` 为空，状态只含 `state`、`base`、`since` 和可选 `error`，不包含密钥。
+- `cr pair --tailscale` 写入私有 HTTPS Serve 地址，配对码与 `connect-info` 共同发布。daemon 只监听回环时，启用 Serve 后省略局域网和 Tailscale IP 直连地址。CLI 通过仅本机可用的 `POST /api/channels/refresh` 通知在线手机同步地址。
 
 ## 手机端多通道
 
