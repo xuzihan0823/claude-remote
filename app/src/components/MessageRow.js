@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
 import Animated, {
+  Easing,
   FadeIn,
   useAnimatedStyle,
   useReducedMotion,
   useSharedValue,
   withSpring,
+  withTiming,
 } from 'react-native-reanimated';
 import { filePathsIn, MarkdownView } from './markdown/MarkdownView.js';
 import { FileCard } from './FileCard.js';
@@ -13,7 +15,7 @@ import { FilePreview } from './FilePreview.js';
 import { Icon, toolIconName } from './Icon.js';
 import { Spark } from './Spark.js';
 import { fmtClock, toolSummary } from '../lib/format.js';
-import { toolErrorHeadline, toolHeadline } from '../lib/tool-view.js';
+import { toolErrorHeadline, toolHeadline, TOOL_REVEAL_INTERVAL_MS } from '../lib/tool-view.js';
 import { denialText, deniedToolResultText } from '../../../web/core/permission-state.js';
 import { ToolInputView } from './ToolInputView.js';
 import { useTheme } from '../theme.js';
@@ -29,31 +31,33 @@ import { MessageActionSheet } from './MessageActionSheet.js';
 // 折叠块：thinking / tool_use / tool_result 共用（web 的 <details> 对应物）
 const BLOCK_SPRING = { damping: 18, stiffness: 210, mass: 0.75 };
 const CHEVRON_SPRING = { damping: 20, stiffness: 260, mass: 0.7 };
+const TOOL_ENTRY = { duration: 180, easing: Easing.out(Easing.quad) };
 
-function Block({ icon, title, sub, badge, err, live = false, children, defaultOpen = false }) {
+function Block({ icon, title, sub, badge, err, live = false, toolArrivedAt, children, defaultOpen = false }) {
   const { colors, fonts, radius } = useTheme();
   const reduceMotion = useReducedMotion();
   const [open, setOpen] = useState(defaultOpen);
-  const enter = useSharedValue(live && !reduceMotion ? 0 : 1);
+  const [toolEntering] = useState(() => toolArrivedAt != null && Date.now() - toolArrivedAt < TOOL_REVEAL_INTERVAL_MS);
+  const enter = useSharedValue(reduceMotion ? 1 : toolEntering ? 0.32 : live ? 0 : 1);
   const fold = useSharedValue(defaultOpen ? 1 : 0);
 
   useEffect(() => {
-    if (!live || reduceMotion) {
+    if (reduceMotion || (!live && !toolEntering)) {
       enter.value = 1;
       return undefined;
     }
     const id = requestAnimationFrame(() => {
-      enter.value = withSpring(1, BLOCK_SPRING);
+      enter.value = toolEntering ? withTiming(1, TOOL_ENTRY) : withSpring(1, BLOCK_SPRING);
     });
     return () => cancelAnimationFrame(id);
-  }, [live, reduceMotion, enter]);
+  }, [live, reduceMotion, toolEntering, enter]);
 
   useEffect(() => {
     fold.value = reduceMotion ? (open ? 1 : 0) : withSpring(open ? 1 : 0, CHEVRON_SPRING);
   }, [open, reduceMotion, fold]);
 
   const enterStyle = useAnimatedStyle(() => ({
-    opacity: Math.min(1, enter.value * 1.4),
+    opacity: toolEntering ? enter.value : Math.min(1, enter.value * 1.4),
   }));
 
   const chevronStyle = useAnimatedStyle(() => ({
@@ -247,7 +251,7 @@ function AssistantMessage({ m, sessionId, live = false }) {
   );
 }
 
-export function MessageRow({ m, sessionId, sending = false, live = false }) {
+export function MessageRow({ m, sessionId, sending = false, live = false, toolArrivedAt }) {
   const { colors, fonts } = useTheme();
   const { t } = useI18n();
   const scale = usePref('fontScale');
@@ -297,7 +301,7 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
           <Icon name={isErr ? 'close' : 'check'} size={14} color={isErr ? colors.danger : colors.ok} strokeWidth={2.1} />
         ) : null}
         defaultOpen={toolsExpanded}
-        live={live}
+        toolArrivedAt={toolArrivedAt}
         err={isErr}
       >
         <ToolInputView name={m.toolName} input={m.toolInput} />
@@ -328,7 +332,7 @@ export function MessageRow({ m, sessionId, sending = false, live = false }) {
         title={denial ? t('操作已拒绝') : m.isError ? t('工具出错') : t('工具结果')}
         sub={denial ? denial.toolName : (errSub || t('{n} 字符', { n: chars }))}
         defaultOpen={toolsExpanded}
-        live={live}
+        toolArrivedAt={toolArrivedAt}
       >
         <MonoBody text={denial ? deniedToolResultText(denial, m.text) : m.text || ''} err={m.isError || !!denial} />
       </Block>

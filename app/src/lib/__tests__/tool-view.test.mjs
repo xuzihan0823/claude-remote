@@ -5,7 +5,7 @@ import {
   foldContext,
   matchesMessageKey,
   mergeToolMessages,
-  takeToolBatch,
+  takeToolCard,
   toolErrorHeadline,
   toolHeadline,
   toolView,
@@ -110,30 +110,12 @@ test('mergeToolMessages：按 toolUseId 将 tool_use 与 tool_result 合成单�
   assert.equal(matchesMessageKey(merged[1], '3:1'), false);
 });
 
-test('takeToolBatch：连续工具调用每次最多取出 3 个（含配对结果），普通文本立即排空', () => {
-  const tools = [];
-  for (let i = 1; i <= 5; i += 1) {
-    tools.push({ seq: i * 2, blockIndex: 0, role: 'assistant', kind: 'tool_use', toolUseId: `t${i}`, toolName: 'Read' });
-    tools.push({ seq: i * 2 + 1, blockIndex: 0, role: 'user', kind: 'tool_result', toolUseId: `t${i}`, text: `r${i}` });
-  }
-  const step1 = takeToolBatch(tools);
-  assert.equal(step1.immediate, false);
-  assert.deepEqual(
-    step1.batch.map((m) => `${m.kind}:${m.toolUseId}`),
-    ['tool_use:t1', 'tool_result:t1', 'tool_use:t2', 'tool_result:t2', 'tool_use:t3', 'tool_result:t3'],
-  );
-  const step2 = takeToolBatch(step1.rest);
-  assert.equal(step2.immediate, false);
-  assert.deepEqual(
-    step2.batch.map((m) => `${m.kind}:${m.toolUseId}`),
-    ['tool_use:t4', 'tool_result:t4', 'tool_use:t5', 'tool_result:t5'],
-  );
-  assert.deepEqual(step2.rest, []);
-
-  // 含最终文本时立即排空前缀工具调用与该文本
-  const withAnswer = [...tools.slice(0, 4), { seq: 99, blockIndex: 0, role: 'assistant', kind: 'text', text: '总结' }];
-  const immediateStep = takeToolBatch(withAnswer);
-  assert.equal(immediateStep.immediate, true);
-  assert.equal(immediateStep.batch.length, 5);
-  assert.deepEqual(immediateStep.rest, []);
+test('takeToolCard pairs out-of-order messages within the same agent and leaves the next card queued', () => {
+  const result = { seq: 3, kind: 'tool_result', toolUseId: 'same', text: 'done' };
+  const agent = { seq: 4, kind: 'tool_use', toolUseId: 'same', agentId: 'child' };
+  const use = { seq: 2, kind: 'tool_use', toolUseId: 'same' };
+  const queue = new Map([['3:0', result], ['4:0', agent], ['2:0', use]]);
+  assert.deepEqual(takeToolCard(queue), [result, use]);
+  assert.deepEqual(takeToolCard(queue), [agent]);
+  assert.deepEqual(takeToolCard(queue), []);
 });

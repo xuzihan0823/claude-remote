@@ -199,10 +199,10 @@ export function toolErrorHeadline(text) {
   return first.length > 48 ? `${first.slice(0, 48)}…` : first;
 }
 
-export const TOOL_BATCH_LIMIT = 3;
-export const TOOL_BATCH_INTERVAL_MS = 650;
+export const TOOL_REVEAL_INTERVAL_MS = 200;
 
-const pairScopeKey = (m) => (m?.toolUseId ? `${m.agentId || ''}:${m.toolUseId}` : '');
+export const toolScopeKey = (m) => (m?.toolUseId ? `${m.agentId || ''}:${m.toolUseId}` : '');
+export const isToolMessage = (m) => m?.kind === 'tool_use' || m?.kind === 'tool_result';
 
 /**
  * 将列表中的 tool_use 与对应的 tool_result 合成为单条展示消息（挂在 tool_use.toolResult 上）。
@@ -221,7 +221,7 @@ export function mergeToolMessages(messages) {
       continue;
     }
     if (m.kind === 'tool_result') {
-      const scope = pairScopeKey(m);
+      const scope = toolScopeKey(m);
       if (scope && !resultsById.has(scope)) {
         resultsById.set(scope, m);
       } else if (!scope && lastUnkeyedUse && !adjacentResults.has(lastUnkeyedUse)) {
@@ -238,7 +238,7 @@ export function mergeToolMessages(messages) {
   const consumedResults = new Set();
   for (const m of messages) {
     if (m?.kind !== 'tool_use') continue;
-    const scope = pairScopeKey(m);
+    const scope = toolScopeKey(m);
     const res = scope ? resultsById.get(scope) : adjacentResults.get(m);
     if (res && !consumedResults.has(res)) consumedResults.add(res);
   }
@@ -249,7 +249,7 @@ export function mergeToolMessages(messages) {
   for (const m of messages) {
     if (!m) continue;
     if (m.kind === 'tool_use') {
-      const scope = pairScopeKey(m);
+      const scope = toolScopeKey(m);
       const res = scope && !pairedUses.has(scope) ? resultsById.get(scope) : adjacentResults.get(m);
       if (res && consumedResults.has(res)) {
         if (scope) pairedUses.add(scope);
@@ -275,68 +275,19 @@ export function matchesMessageKey(m, key) {
   return !!(m.toolResult && msgKey(m.toolResult) === key);
 }
 
-const isStepKind = (kind) => kind === 'tool_use' || kind === 'tool_result' || kind === 'thinking';
-
-/**
- * 从实时消息队列中切出一批消息：
- * - 若存在非工具/思考类消息（如 user/assistant 文本），或队列仅有已露出卡片的 tool_result，则立即取出；
- * - 否则每次最多取出 maxTools 个 tool_use（连同其前置思考块及已到达的配对 tool_result）。
- */
-export function takeToolBatch(queue, maxTools = TOOL_BATCH_LIMIT) {
-  if (!Array.isArray(queue) || queue.length === 0) {
-    return { batch: [], rest: [], immediate: false };
-  }
-  let lastImmediateIdx = -1;
-  let hasNewStepCard = false;
-  for (let i = 0; i < queue.length; i += 1) {
-    const kind = queue[i]?.kind;
-    if (!isStepKind(kind)) lastImmediateIdx = i;
-    else if (kind === 'tool_use' || kind === 'thinking') hasNewStepCard = true;
-  }
-  if (lastImmediateIdx >= 0) {
-    return {
-      batch: queue.slice(0, lastImmediateIdx + 1),
-      rest: queue.slice(lastImmediateIdx + 1),
-      immediate: true,
-    };
-  }
-  if (!hasNewStepCard) {
-    return { batch: queue.slice(), rest: [], immediate: true };
-  }
-
-  const batch = [];
-  const rest = [];
-  const takenScopes = new Set();
-  let toolCount = 0;
-  let stopped = false;
-
-  for (const m of queue) {
-    const kind = m?.kind;
-    if (!stopped) {
-      if (kind === 'tool_use') {
-        if (toolCount >= maxTools) {
-          stopped = true;
-          rest.push(m);
-          continue;
-        }
-        toolCount += 1;
-        const scope = pairScopeKey(m);
-        if (scope) takenScopes.add(scope);
-        batch.push(m);
-      } else if (kind === 'thinking' && toolCount >= maxTools) {
-        stopped = true;
-        rest.push(m);
-      } else {
-        batch.push(m);
-      }
-      continue;
-    }
-    const scope = kind === 'tool_result' ? pairScopeKey(m) : '';
-    if (scope && takenScopes.has(scope)) {
-      batch.push(m);
-    } else {
-      rest.push(m);
+/** 只取一张新卡片。已到达的同一调用和结果在同一帧显示。 */
+export function takeToolCard(queue) {
+  const entry = queue.entries().next().value;
+  if (!entry) return [];
+  const [key, first] = entry;
+  queue.delete(key);
+  const scope = toolScopeKey(first);
+  if (scope) {
+    for (const [pairedKey, m] of queue) {
+      if (m.kind === first.kind || toolScopeKey(m) !== scope) continue;
+      queue.delete(pairedKey);
+      return [first, m];
     }
   }
-  return { batch, rest, immediate: false };
+  return [first];
 }

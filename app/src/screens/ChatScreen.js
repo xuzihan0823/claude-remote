@@ -13,7 +13,7 @@ import { applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys } from '.
 import { findFocusIndex, loadUntilSeq } from '../../../web/core/search.js';
 import { newClientMessageId, reconcilePending, sendFailureState } from '../../../web/core/message-delivery.js';
 import { cmpMsg, msgKey } from '../lib/format.js';
-import { matchesMessageKey, mergeToolMessages, takeToolBatch, TOOL_BATCH_INTERVAL_MS } from '../lib/tool-view.js';
+import { isToolMessage, matchesMessageKey, mergeToolMessages, takeToolCard, toolScopeKey, TOOL_REVEAL_INTERVAL_MS } from '../lib/tool-view.js';
 import { ConversationHeader } from '../components/ConversationHeader.js';
 import { GlassSurface } from '../components/GlassSurface.js';
 import { Icon } from '../components/Icon.js';
@@ -119,6 +119,9 @@ export function ChatScreen({ route }) {
   const recoveryGeneration = useRef(0);
   const completedRuns = useRef(new Set());
   const liveKeys = useRef(new Set());
+  const pendingTools = useRef(new Map());
+  const toolTimer = useRef(null);
+  const toolArrival = useRef(null);
   const applyRunState = useCallback((nextStatus, runId = null) => {
     if (nextStatus !== 'daemon-driving' || runId) stateRevision.current += 1;
     updatePermissionState({ type: 'identity', runId });
@@ -134,12 +137,24 @@ export function ChatScreen({ route }) {
     setDrafts(next);
   }, []);
 
-  const addMsgs = useCallback((list) => {
+  const addMsgs = useCallback((list, live = false) => {
     const st = store.current;
     const fresh = [];
+    const pending = pendingTools.current;
+    const queuedScopes = !live && pending.size
+      ? new Set(Array.from(pending.values(), toolScopeKey).filter(Boolean))
+      : null;
     for (const m of list) {
       const k = msgKey(m);
-      if (!st.map.has(k)) { st.map.set(k, m); fresh.push(m); }
+      // HTTP 补拉可能先于队列入场，保留已排队卡片的显示节奏。
+      if (st.map.has(k) || pending.has(k)) continue;
+      if (queuedScopes && isToolMessage(m) && queuedScopes.has(toolScopeKey(m))) {
+        pending.set(k, m);
+        continue;
+      }
+      st.map.set(k, m);
+      if (live && !isToolMessage(m)) liveKeys.current.add(k);
+      fresh.push(m);
     }
     if (fresh.length > 0) {
       fresh.sort(cmpMsg);
@@ -150,41 +165,25 @@ export function ChatScreen({ route }) {
       setVersion((v) => v + 1);
     }
     // 首屏、WS、重连、resync、分页都从这里对账；重复补拉也要能消解草稿
-    updateDrafts((d) => reconcileCurrentTurnDrafts(d, st.sorted, runFloorSeq.current));
+    updateDrafts((d) => d.length ? reconcileCurrentTurnDrafts(d, st.sorted, runFloorSeq.current) : d);
     setPending((items) => reconcilePending(items, st.sorted));
     return fresh.length > 0;
   }, [updateDrafts]);
 
-  const pendingBatch = useRef(null);
-  const batchTimer = useRef(null);
-  const microScheduled = useRef(false);
-  const resetPendingBatch = useCallback(() => {
-    clearTimeout(batchTimer.current);
-    batchTimer.current = null;
-    microScheduled.current = false;
-    pendingBatch.current = null;
+  const resetToolQueue = useCallback(() => {
+    clearTimeout(toolTimer.current);
+    toolTimer.current = null;
+    pendingTools.current.clear();
+    toolArrival.current = null;
   }, []);
-  const flushPendingBatch = useCallback(() => {
-    clearTimeout(batchTimer.current);
-    batchTimer.current = null;
-    microScheduled.current = false;
-    const batch = pendingBatch.current;
-    pendingBatch.current = null;
-    if (batch && batch.length) addMsgs(batch);
-  }, [addMsgs]);
-  const stepToolBatch = useCallback(() => {
-    batchTimer.current = null;
-    const queue = pendingBatch.current;
-    if (!queue || !queue.length) {
-      pendingBatch.current = null;
-      return;
-    }
-    const { batch, rest } = takeToolBatch(queue);
-    pendingBatch.current = rest.length ? rest : null;
-    if (batch.length) addMsgs(batch);
-    if (rest.length) {
-      batchTimer.current = setTimeout(stepToolBatch, TOOL_BATCH_INTERVAL_MS);
-    }
+  const revealNextTool = useCallback(function reveal() {
+    const card = takeToolCard(pendingTools.current);
+    toolTimer.current = null;
+    if (!card.length) return;
+    const row = card.find((m) => m.kind === 'tool_use') || card[0];
+    toolArrival.current = { key: msgKey(row), at: Date.now() };
+    toolTimer.current = setTimeout(reveal, TOOL_REVEAL_INTERVAL_MS);
+    addMsgs(card, true);
   }, [addMsgs]);
 
   // ---- 初始加载：尾部 100 条 + 会话元信息（新会话落盘竞态重试 8 次）
@@ -195,7 +194,7 @@ export function ChatScreen({ route }) {
     setReadingHistory(false);
     setShowJump(false);
     clearTimeout(clearTimer.current);
-    resetPendingBatch();
+    resetToolQueue();
     runFloorSeq.current = 0;
     permissionStateRef.current = emptyPermissionState();
     setPermissionState(permissionStateRef.current);
@@ -247,48 +246,34 @@ export function ChatScreen({ route }) {
     return () => {
       loadGeneration.current += 1;
       clearTimeout(clearTimer.current);
-      resetPendingBatch();
+      resetToolQueue();
       ws.unsubscribe(sessionId);
     };
-  }, [sessionId, addMsgs, updateDrafts, applyRunState, resetPendingBatch]);
+  }, [sessionId, addMsgs, updateDrafts, applyRunState, resetToolQueue]);
 
-  // ---- WS 事件：非工具消息同 tick 微任务合并；连续工具调用按固定间隔每次露出 2～3 个
+  // ---- WS 事件：工具卡逐张入场，正文和已有卡片的结果即时更新
   useBus('ws:message', (e) => {
     if (e.sessionId !== sessionId) return;
     const m = e.message;
-    liveKeys.current.add(msgKey(m));
-    if (m.kind === 'tool_result' && m.toolUseId && store.current.sorted.some((message) => (
+    if (!isToolMessage(m)) {
+      addMsgs([m], true);
+      return;
+    }
+    const k = msgKey(m);
+    if (store.current.map.has(k) || pendingTools.current.has(k)) return;
+    const scope = toolScopeKey(m);
+    if (m.kind === 'tool_result' && scope && store.current.sorted.some((message) => (
       message.kind === 'tool_use'
-      && message.toolUseId === m.toolUseId
-      && (message.agentId || '') === (m.agentId || '')
+      && toolScopeKey(message) === scope
     ))) {
-      addMsgs([m]);
+      addMsgs([m], true);
       return;
     }
-    const generation = loadGeneration.current;
-    if (!pendingBatch.current) pendingBatch.current = [];
-    pendingBatch.current.push(m);
-    const { immediate } = takeToolBatch(pendingBatch.current);
-    if (immediate) {
-      clearTimeout(batchTimer.current);
-      batchTimer.current = null;
-      if (!microScheduled.current) {
-        microScheduled.current = true;
-        queueMicrotask(() => {
-          if (generation !== loadGeneration.current) return;
-          microScheduled.current = false;
-          if (takeToolBatch(pendingBatch.current).immediate) stepToolBatch();
-        });
-      }
-      return;
+    pendingTools.current.set(k, m);
+    if (toolTimer.current === null) {
+      toolTimer.current = setTimeout(revealNextTool, TOOL_REVEAL_INTERVAL_MS);
     }
-    if (!batchTimer.current) {
-      batchTimer.current = setTimeout(() => {
-        if (generation !== loadGeneration.current) return;
-        stepToolBatch();
-      }, TOOL_BATCH_INTERVAL_MS);
-    }
-  }, [sessionId, addMsgs, stepToolBatch]);
+  }, [sessionId, addMsgs, revealNextTool]);
   useBus('ws:stream', (e) => {
     if (e.sessionId !== sessionId) return;
     if (e.clear) {
@@ -300,14 +285,9 @@ export function ChatScreen({ route }) {
       }, 1500);
       return;
     }
-    flushPendingBatch();
     clearTimeout(clearTimer.current);
     updateDrafts((d) => reconcileCurrentTurnDrafts(applyStreamFrame(d, e), store.current.sorted, runFloorSeq.current));
-  }, [sessionId, updateDrafts, flushPendingBatch]);
-  useEffect(() => () => {
-    clearTimeout(clearTimer.current);
-    resetPendingBatch();
-  }, [resetPendingBatch]);
+  }, [sessionId, updateDrafts]);
   useBus('ws:session-state', (e) => {
     if (e.sessionId !== sessionId) return;
     if (e.activeRunId && permissionStateRef.current.endedRuns.includes(e.activeRunId)) return;
@@ -315,12 +295,11 @@ export function ChatScreen({ route }) {
     applyRunState(e.status, e.activeRunId || null);
     updatePermissionState({ ...e, type: 'session-state' });
     if (!e.activeRunId || (previousRunId && previousRunId !== e.activeRunId)) {
-      flushPendingBatch();
       clearTimeout(clearTimer.current);
       updateDrafts([]);
       runFloorSeq.current = 0;
     }
-  }, [sessionId, updateDrafts, applyRunState, flushPendingBatch]);
+  }, [sessionId, updateDrafts, applyRunState]);
   useBus('ws:permission-mode', (e) => {
     if (e.sessionId === sessionId) updatePermissionState({ ...e, type: 'permission-mode' });
   }, [sessionId, updatePermissionState]);
@@ -347,7 +326,6 @@ export function ChatScreen({ route }) {
     } else {
       // 上一轮终态可能迟到：只能结束它自己，不能清掉已开始的新一轮
       if (e.runId && activeRunIdRef.current && e.runId !== activeRunIdRef.current) return;
-      flushPendingBatch();
       if (e.state === 'done' && e.runId && !completedRuns.current.has(e.runId)) {
         completedRuns.current.add(e.runId);
         haptics.success();
@@ -355,14 +333,15 @@ export function ChatScreen({ route }) {
       applyRunState('idle');
       if (e.state === 'error' && !/^aborted$/i.test(String(e.error || '').trim())) toast(runErrMsg(e.error), 'error');
     }
-  }, [sessionId, updateDrafts, applyRunState, flushPendingBatch]);
+  }, [sessionId, updateDrafts, applyRunState]);
   // ---- resync：daemon 侧链视图失效，清空全量重拉
   useBus('ws:resync', async (e) => {
     if (e.sessionId !== sessionId) return;
     const generation = ++loadGeneration.current;
     initialLoadComplete.current = false;
     clearTimeout(clearTimer.current);
-    resetPendingBatch();
+    resetToolQueue();
+    liveKeys.current.clear();
     runFloorSeq.current = 0;
     store.current = { map: new Map(), sorted: [] };
     setVersion((v) => v + 1);
@@ -509,7 +488,7 @@ export function ChatScreen({ route }) {
   const onScroll = useCallback((e) => {
     const y = e.nativeEvent.contentOffset.y + insetTop.current;
     setShowJump((s) => (y > 240 ? true : y < 120 ? false : s));
-    if (userScrolling.current) setReadingHistory((r) => (y > 8 ? true : y <= 1 ? false : r));
+    if (userScrolling.current) setReadingHistory(y > 1);
   }, []);
   const onUserScrollBegin = useCallback((e) => {
     userScrolling.current = true;
@@ -629,7 +608,13 @@ export function ChatScreen({ route }) {
           keyExtractor={(m) => msgKey(m)}
           renderItem={({ item }) => {
             const k = msgKey(item);
-            const row = <MessageRow m={item} sessionId={sessionId} live={liveKeys.current.has(k)} />;
+            const arrival = toolArrival.current;
+            const row = <MessageRow
+              m={item}
+              sessionId={sessionId}
+              live={liveKeys.current.has(k)}
+              toolArrivedAt={arrival?.key === k ? arrival.at : undefined}
+            />;
             return matchesMessageKey(item, highlightKey)
               ? <View style={{ backgroundColor: colors.glassTintAccent, borderRadius: 12, marginHorizontal: -8, paddingHorizontal: 8 }}>{row}</View>
               : row;
