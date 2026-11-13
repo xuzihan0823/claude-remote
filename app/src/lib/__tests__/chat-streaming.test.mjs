@@ -5,7 +5,7 @@ import { transformSync } from 'esbuild';
 import { applyStreamFrame, reconcileCurrentTurnDrafts, removeDraftKeys } from '../../../../web/core/stream-drafts.js';
 import { newClientMessageId, reconcilePending, sendFailureState } from '../../../../web/core/message-delivery.js';
 import { emptyPermissionState, reducePermissionState } from '../../../../web/core/permission-state.js';
-import { matchesMessageKey, mergeToolMessages, takeToolBatch, TOOL_BATCH_INTERVAL_MS } from '../tool-view.js';
+import { isToolMessage, matchesMessageKey, mergeToolMessages, takeToolCard, toolScopeKey, TOOL_REVEAL_INTERVAL_MS } from '../tool-view.js';
 
 const storageValues = new Map();
 if (!globalThis.localStorage) {
@@ -53,7 +53,7 @@ function mount(source, start, end, exposed, initialProps, dependencies) {
       }
     },
     useBus(name, handler) { handlers.set(name, handler); },
-    setTimeout(fn) { timers.set(++timerId, fn); return timerId; },
+    setTimeout(fn, delay) { timers.set(++timerId, { fn, delay }); return timerId; },
     clearTimeout(id) { timers.delete(id); },
     ...dependencies,
   };
@@ -84,7 +84,13 @@ function mount(source, start, end, exposed, initialProps, dependencies) {
       }
     },
     emit(name, frame) { return handlers.get(name)?.(frame); },
-    flushTimers() { for (const [id, fn] of [...timers]) { timers.delete(id); fn(); } },
+    flushTimers(delay) {
+      for (const [id, timer] of [...timers]) {
+        if (!timers.has(id) || (delay != null && timer.delay !== delay)) continue;
+        timers.delete(id);
+        timer.fn();
+      }
+    },
     unmount() { for (const effect of effects) effect?.cleanup?.(); },
   };
 }
@@ -92,7 +98,7 @@ function mount(source, start, end, exposed, initialProps, dependencies) {
 function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: false }), dependencies = {}, includeScroll = false) {
   const scrollExports = includeScroll ? ', readingHistory, showJump, userScrolling, listRef, renderScroll, onScroll, onUserScrollBegin, onUserScrollEnd, onMomentumScrollEnd, jumpToBottom, onContentInsetChange, setFocusTarget' : '';
   const instance = mount(screenSource, 'export function ChatScreen({ route }) {', includeScroll ? '  const visiblePending =' : '  const kbOffset =',
-    `pending, onSendFailed, drafts, store, runActive, activeRunId, status, addMsgs, onSending, onSent, loadErr, initLoading, firstSeq, hasMore, loadOlder, permissionState, mode, setMode${scrollExports}`, {}, {
+    `pending, onSendFailed, drafts, store, toolArrival, runActive, activeRunId, status, addMsgs, onSending, onSent, loadErr, initLoading, firstSeq, hasMore, loadOlder, permissionState, mode, setMode${scrollExports}`, {}, {
       route: { params: { sessionId: 'session' } },
       useNavigation: () => ({}), useTheme: () => ({ colors: {} }), useSafeAreaInsets: () => ({}),
       useI18n: () => ({ t: fakeT }),
@@ -108,7 +114,7 @@ function screen(api = async () => ({ messages: [], firstSeq: null, hasMore: fals
       MVCP_READING: { minIndexForVisible: 0 },
       KeyboardChatScrollView: 'KeyboardChatScrollView',
       createElement: (type, props) => ({ type, props }),
-      matchesMessageKey, mergeToolMessages, takeToolBatch, TOOL_BATCH_INTERVAL_MS,
+      isToolMessage, matchesMessageKey, mergeToolMessages, takeToolCard, toolScopeKey, TOOL_REVEAL_INTERVAL_MS,
       ...dependencies,
     });
   instance.render();
@@ -129,8 +135,8 @@ test('actual ChatScreen: native position maintenance stays enabled and uses the 
   assert.match(screenSource, /maintainVisibleContentPosition=\{readingHistory \? MVCP_READING : undefined\}/, 'FlatList must not wait for a native offset correction while the header anchors the bottom');
   assert.deepEqual(nativeScrollProps(page).maintainVisibleContentPosition, { minIndexForVisible: 0 });
   page.render().onUserScrollBegin(scrollEvent(0));
-  page.render().onScroll(scrollEvent(12));
-  assert.equal(page.render().readingHistory, true, 'detach before a full row or tool card has scrolled past');
+  page.render().onScroll(scrollEvent(4));
+  assert.equal(page.render().readingHistory, true, 'even a short drag anchors the messages');
   assert.deepEqual(nativeScrollProps(page).maintainVisibleContentPosition, { minIndexForVisible: 1 });
   page.render().onUserScrollEnd(scrollEvent(12));
   page.render().onScroll(scrollEvent(0));
@@ -898,117 +904,94 @@ test('actual ChatScreen: SDK downgrade and reconnect do not overwrite next-turn 
   assert.deepEqual(writes, []);
 });
 
-test('actual ChatScreen: continuous tool calls reveal in paced batches of 2-3 and merge with tool_result', async () => {
+function sendToolBurst(page, count, { results = false, startSeq = 1 } = {}) {
+  for (let i = 0; i < count; i += 1) {
+    const toolUseId = `t${i + 1}`;
+    const seq = startSeq + i * 2;
+    page.emit('ws:message', { sessionId: 'session', message: { seq, kind: 'tool_use', toolUseId, toolName: 'Read' } });
+    if (results) {
+      page.emit('ws:message', { sessionId: 'session', message: { seq: seq + 1, kind: 'tool_result', toolUseId, text: `out-${i + 1}` } });
+    }
+  }
+}
+
+test('actual ChatScreen: fast tool bursts reveal one card per tick, including after streaming and run completion', () => {
   const page = screen();
   page.emit('ws:run', { sessionId: 'session', state: 'started', runId: 'A' });
-  for (let i = 1; i <= 5; i += 1) {
-    page.emit('ws:message', {
-      sessionId: 'session',
-      message: { seq: i * 2, blockIndex: 0, role: 'assistant', kind: 'tool_use', toolUseId: `t${i}`, toolName: 'Read' },
-    });
-    page.emit('ws:message', {
-      sessionId: 'session',
-      message: { seq: i * 2 + 1, blockIndex: 0, role: 'user', kind: 'tool_result', toolUseId: `t${i}`, text: `out-${i}` },
-    });
+  sendToolBurst(page, 20, { results: true, startSeq: 3 });
+  page.emit('ws:stream', stream);
+  assert.deepEqual(page.render().drafts.map((d) => d.text), [stream.text]);
+  const saved = { ...answer, seq: 43 };
+  page.emit('ws:message', { sessionId: 'session', message: saved });
+  page.emit('ws:session-state', { sessionId: 'session', status: 'idle', activeRunId: null });
+  page.emit('ws:run', { sessionId: 'session', state: 'done', runId: 'A' });
+  assert.deepEqual(page.render().store.current.sorted, [saved]);
+  assert.equal(page.render().drafts.length, 0);
+
+  for (let i = 1; i <= 20; i += 1) {
+    page.flushTimers(TOOL_REVEAL_INTERVAL_MS);
+    const { store, toolArrival } = page.render();
+    const visible = mergeToolMessages(store.current.sorted);
+    assert.equal(visible.length, i + 1);
+    assert.equal(visible[i - 1].toolResult?.text, `out-${i}`);
+    assert.equal(visible[i], saved);
+    assert.equal(toolArrival.current.key, `${3 + (i - 1) * 2}:0`);
   }
-  await new Promise(setImmediate);
-  assert.equal(page.render().store.current.sorted.length, 0, 'tool burst waits for batch timer instead of dumping immediately');
-
-  page.flushTimers();
-  const afterBatch1 = mergeToolMessages(page.render().store.current.sorted);
-  assert.deepEqual(afterBatch1.map((m) => m.toolUseId), ['t1', 't2', 't3']);
-  assert.deepEqual(afterBatch1.map((m) => m.toolResult?.text), ['out-1', 'out-2', 'out-3']);
-
-  page.flushTimers();
-  const afterBatch2 = mergeToolMessages(page.render().store.current.sorted);
-  assert.deepEqual(afterBatch2.map((m) => m.toolUseId), ['t1', 't2', 't3', 't4', 't5']);
-  assert.deepEqual(afterBatch2.map((m) => m.toolResult?.text), ['out-1', 'out-2', 'out-3', 'out-4', 'out-5']);
 });
 
-test('actual ChatScreen: text only flushes its prefix while later tools keep their batch interval', async () => {
+test('actual ChatScreen: visible results update immediately, while orphan results and pending calls are paced', () => {
   const page = screen();
-  page.emit('ws:message', { sessionId: 'session', message: user });
-  for (let i = 1; i <= 6; i += 1) {
-    page.emit('ws:message', {
-      sessionId: 'session',
-      message: { seq: i * 2, kind: 'tool_use', toolUseId: `t${i}`, toolName: 'Read' },
-    });
-    page.emit('ws:message', {
-      sessionId: 'session',
-      message: { seq: i * 2 + 1, kind: 'tool_result', toolUseId: `t${i}`, text: `out-${i}` },
-    });
-  }
-  await new Promise(setImmediate);
-  assert.deepEqual(page.render().store.current.sorted, [user]);
-
-  page.flushTimers();
-  const firstBatch = mergeToolMessages(page.render().store.current.sorted).slice(1);
-  assert.deepEqual(firstBatch.map((m) => m.toolUseId), ['t1', 't2', 't3']);
-  assert.deepEqual(firstBatch.map((m) => m.toolResult?.text), ['out-1', 'out-2', 'out-3']);
-  page.flushTimers();
-  assert.equal(mergeToolMessages(page.render().store.current.sorted).length, 7);
-});
-
-test('actual ChatScreen: visible tool results update immediately without revealing queued tools', async () => {
-  const page = screen();
-  for (let i = 1; i <= 10; i += 1) {
-    page.emit('ws:message', {
-      sessionId: 'session',
-      message: { seq: i, kind: 'tool_use', toolUseId: `t${i}`, toolName: 'Read' },
-    });
-  }
-  page.flushTimers();
-  const result = { seq: 11, kind: 'tool_result', toolUseId: 't1', text: 'done' };
-  const queuedResult = { seq: 12, kind: 'tool_result', toolUseId: 't10', text: 'waiting' };
-  page.emit('ws:message', { sessionId: 'session', message: result });
-  page.emit('ws:message', { sessionId: 'session', message: queuedResult });
-  await new Promise(setImmediate);
+  sendToolBurst(page, 3);
+  page.flushTimers(TOOL_REVEAL_INTERVAL_MS);
+  const arrival = page.render().toolArrival.current;
+  const result = { seq: 7, kind: 'tool_result', toolUseId: 't1', text: 'done' };
+  const queuedResult = { seq: 8, kind: 'tool_result', toolUseId: 't3', text: 'waiting' };
+  const orphan = { seq: 9, kind: 'tool_result', text: 'orphan' };
+  for (const message of [result, queuedResult, orphan, orphan]) page.emit('ws:message', { sessionId: 'session', message });
   const visible = mergeToolMessages(page.render().store.current.sorted);
-  assert.deepEqual(visible.map((m) => m.toolUseId), ['t1', 't2', 't3']);
+  assert.deepEqual(visible.map((m) => m.toolUseId), ['t1']);
   assert.equal(visible[0].toolResult, result);
+  assert.equal(page.render().toolArrival.current, arrival, 'updating a result does not restart card entry');
 
-  page.flushTimers();
-  assert.equal(mergeToolMessages(page.render().store.current.sorted).length, 6);
-  page.flushTimers();
-  assert.equal(mergeToolMessages(page.render().store.current.sorted).length, 9);
-  page.flushTimers();
-  const completed = mergeToolMessages(page.render().store.current.sorted);
-  assert.equal(completed.length, 10);
-  assert.equal(completed[9].toolResult, queuedResult);
+  page.flushTimers(TOOL_REVEAL_INTERVAL_MS);
+  assert.equal(mergeToolMessages(page.render().store.current.sorted).length, 2);
+  page.flushTimers(TOOL_REVEAL_INTERVAL_MS);
+  assert.equal(mergeToolMessages(page.render().store.current.sorted)[2].toolResult, queuedResult);
+  page.flushTimers(TOOL_REVEAL_INTERVAL_MS);
+  assert.equal(mergeToolMessages(page.render().store.current.sorted)[3], orphan);
 });
 
-test('actual ChatScreen: tool result priority respects agent identity', async () => {
+test('actual ChatScreen: tool result priority respects agent identity', () => {
   const page = screen();
   const mainUse = { seq: 1, kind: 'tool_use', toolUseId: 'shared', toolName: 'Read' };
   const agentUse = { seq: 2, kind: 'tool_use', toolUseId: 'shared', agentId: 'child', toolName: 'Read' };
   const mainResult = { seq: 3, kind: 'tool_result', toolUseId: 'shared', text: 'main' };
   const agentResult = { seq: 4, kind: 'tool_result', toolUseId: 'shared', agentId: 'child', text: 'child' };
   page.render().addMsgs([mainUse]);
-  page.emit('ws:message', { sessionId: 'session', message: agentUse });
-  page.emit('ws:message', { sessionId: 'session', message: agentResult });
-  page.emit('ws:message', { sessionId: 'session', message: mainResult });
-  await new Promise(setImmediate);
+  for (const message of [agentUse, agentResult, mainResult]) page.emit('ws:message', { sessionId: 'session', message });
   assert.deepEqual(page.render().store.current.sorted, [mainUse, mainResult]);
-  page.flushTimers();
+  page.flushTimers(TOOL_REVEAL_INTERVAL_MS);
   const visible = mergeToolMessages(page.render().store.current.sorted);
   assert.equal(visible[0].toolResult, mainResult);
   assert.equal(visible[1].toolResult, agentResult);
 });
 
-test('actual ChatScreen: a microtask left over after a stream flush cannot reveal the next tool burst', async () => {
+test('actual ChatScreen: history overlap cannot release a burst early, and changing session clears it', async () => {
   const page = screen();
-  page.emit('ws:message', { sessionId: 'session', message: user });
-  page.emit('ws:stream', stream);
-  for (let i = 1; i <= 6; i += 1) {
-    page.emit('ws:message', {
-      sessionId: 'session',
-      message: { seq: i + 2, kind: 'tool_use', toolUseId: `t${i}`, toolName: 'Read' },
-    });
-  }
+  page.effects();
   await new Promise(setImmediate);
+  const use = { seq: 2, kind: 'tool_use', toolUseId: 't1' };
+  const result = { seq: 3, kind: 'tool_result', toolUseId: 't1', text: 'finished' };
+  page.emit('ws:message', { sessionId: 'session', message: use });
+  page.render().addMsgs([user, use, result]);
   assert.deepEqual(page.render().store.current.sorted, [user]);
-  page.flushTimers();
-  assert.equal(page.render().store.current.sorted.length, 4);
-  page.flushTimers();
-  assert.equal(page.render().store.current.sorted.length, 7);
+  page.flushTimers(TOOL_REVEAL_INTERVAL_MS);
+  assert.equal(mergeToolMessages(page.render().store.current.sorted)[1].toolResult, result);
+  page.emit('ws:message', { sessionId: 'session', message: { ...use, seq: 4, toolUseId: 't2' } });
+  page.render({ route: { params: { sessionId: 'next' } } });
+  page.effects();
+  page.flushTimers(TOOL_REVEAL_INTERVAL_MS);
+  assert.deepEqual(page.render().store.current.sorted, []);
+  assert.equal(page.render().toolArrival.current, null);
+  page.unmount();
 });
