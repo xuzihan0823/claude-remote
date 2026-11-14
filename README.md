@@ -13,7 +13,7 @@ Local-first · 只读 JSONL 历史 · Fail-closed 审批 · Tailscale / 自建 R
 <br />
 
 [![Stars](https://img.shields.io/github/stars/xuzihan0823/claude-remote?style=flat&label=stars)](https://github.com/xuzihan0823/claude-remote/stargazers)
-[![Node](https://img.shields.io/badge/node-%3E%3D22.5-339933?logo=node.js&logoColor=white)](package.json)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.13.0-339933?logo=node.js&logoColor=white)](package.json)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%2B%20iOS-000000?logo=apple&logoColor=white)](#快速开始)
 
 <br />
@@ -162,7 +162,7 @@ Tailscale 或自建 Relay
 
 ### 前置条件
 
-- **Mac**：macOS、**Node.js ≥ 22.5**（`interactions` 包依赖内置 `node:sqlite`）、已安装并登录 **Claude Code CLI**
+- **Mac**：macOS、**Node.js ≥ 22.13.0**（`interactions` 包依赖内置 `node:sqlite`）、已安装并登录 **Claude Code CLI**
 - **iPhone**：当前暂未上架 App Store / TestFlight，需在 Mac 上使用 **Xcode** 从 `app/` 编译安装到真机
 - **远程网络（跨 Wi-Fi 使用时二选一）**：
   - 无服务器：Mac 与 iPhone 安装 **Tailscale** 并登录同一账号
