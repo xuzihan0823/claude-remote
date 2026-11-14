@@ -1,6 +1,6 @@
 # 详细部署文档
 
-本文档说明如何手动完成主机端（macOS / Linux）初始化、网络通道打通与 iPhone 客户端安装。如果你想让主机上的 AI Agent 帮你自动完成配置，可以直接复制 [README](../README.md#快速开始) 中的「Agent 自动化部署提示词」。
+本文档说明如何手动完成主机端（macOS / Linux）初始化、网络通道打通与 iPhone 客户端安装。如果你想让主机上的 AI Agent 帮你自动完成配置，可以直接复制 [README](../README.zh-CN.md#快速开始) 中的「Agent 自动化部署提示词」。
 
 ---
 
@@ -123,7 +123,7 @@ cr pair
 - `cr logs`：实时查看 daemon 日志
 - `cr setup`：重新探测 `claude` 路径并检查初始化状态
 
-更多命令与架构说明见 [README](../README.md) 与 [架构说明](architecture.md)。
+更多命令与架构说明见 [README](../README.zh-CN.md) 与 [架构说明](architecture.md)。
 
 ## 更新 iOS 第三方许可
 
