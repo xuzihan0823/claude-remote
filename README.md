@@ -4,26 +4,35 @@
 
 # claude-remote
 
-### 在 iPhone 上远程查看、续聊与审批 Mac 本机的 Claude Code 会话
+### 在 iPhone 上远程查看、续聊与审批 Mac / Linux 主机上的 Claude Code 会话
 
-**把桌面终端里的 Claude Code 带到手机上——实时镜像、双向接力、安全审批、多通道连接。**
+**把桌面或服务器终端里的 Claude Code 带到手机上——实时镜像、双向接力、安全审批、多通道连接。**
 
 Local-first · 只读 JSONL 历史 · Fail-closed 审批 · Tailscale / 自建 Relay
 
 <br />
 
-[![Stars](https://img.shields.io/github/stars/xuzihan0823/claude-remote?style=flat&label=stars)](https://github.com/xuzihan0823/claude-remote/stargazers)
-[![Node](https://img.shields.io/badge/node-%3E%3D22.5-339933?logo=node.js&logoColor=white)](package.json)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%2B%20iOS-000000?logo=apple&logoColor=white)](docs/quickstart.md)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.13.0-339933?logo=node.js&logoColor=white)](package.json)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%2B%20iOS-000000?logo=apple&logoColor=white)](#快速开始)
 
 <br />
 
-[快速开始](docs/quickstart.md) ·
+[快速开始](#快速开始) ·
+[详细部署文档](docs/deployment.md) ·
+[屏幕截图](docs/screenshots.md) ·
 [整体结构](#整体结构) ·
 [安全边界](#local-first-与安全边界) ·
 [自建 Relay](deploy/relay/README.md) ·
 [常用命令](#cr-控制台与常用命令) ·
 [开发与目录](#开发与目录约定)
+
+<br /><br />
+
+<img src="docs/images/hero.webp" alt="claude-remote" width="94%" />
+
+<br />
+
+**会话留在主机本地 · 审批永远由你掌控 · 直连与自建 Relay 自动切换**
 
 </div>
 
@@ -40,7 +49,7 @@ Local-first · 只读 JSONL 历史 · Fail-closed 审批 · Tailscale / 自建 R
 
 ### 实时镜像与续聊
 
-直接读取 Mac 本机 `~/.claude/projects/**/*.jsonl`。
+直接读取主机 `~/.claude/projects/**/*.jsonl`。
 
 手机端实时查看输出、选择模型与思考强度、上传图片/文件并续聊会话。
 
@@ -50,7 +59,7 @@ Local-first · 只读 JSONL 历史 · Fail-closed 审批 · Tailscale / 自建 R
 
 ### 终端与手机接力
 
-手机与桌面共享同一份会话记录。
+手机与桌面/服务器共享同一份会话记录。
 
 `cr open <id>` 可在终端用 `claude --resume` 接管；终端占用期间自动避免并发冲突。
 
@@ -72,7 +81,7 @@ Local-first · 只读 JSONL 历史 · Fail-closed 审批 · Tailscale / 自建 R
 
 支持局域网、Tailscale、自建公网 Relay 同时启用。
 
-直连优先，断线自动重选；Mac 无需开放公网入站端口。
+直连优先，断线自动重选；主机无需开放公网入站端口。
 
 </td>
 
@@ -88,8 +97,8 @@ iPhone App (app/ + web/core/)
    │  HTTP + WebSocket · Bearer Token
    ├── 直连通道：局域网 / Tailscale / mDNS（优先）
    └── 中转通道：https://<RELAY_HOST>/d/<deviceId> ── packages/relay（自建公网服务器）
-                                                          ▲ Mac 主动连出
-Mac daemon (packages/daemon) ──── connector ──────────────┘
+                                                          ▲ 主机主动连出
+主机 daemon (packages/daemon) ──── connector ─────────────┘
    ├── 读取 ~/.claude/projects/**/*.jsonl（只读）
    ├── 经 Agent SDK 驱动续聊（packages/agent-bridge）
    └── 审批状态机（packages/interactions，node:sqlite）
@@ -102,7 +111,7 @@ cr 命令行 (packages/cli)：全屏 TUI 控制台 · 启停 · 配对 · Relay 
 
 | 项目 | 默认行为与约束 |
 |---|---|
-| 会话数据源 | 仅以 Mac 本机 `~/.claude/projects/**/*.jsonl` 为准；daemon 只读不改写（写入仅来自 SDK resume 原生落盘） |
+| 会话数据源 | 仅以主机 `~/.claude/projects/**/*.jsonl` 为准；daemon 只读不改写（写入仅来自 SDK resume 原生落盘） |
 | 终端 / 手机互斥 | 实测 Claude Code 2.1.209：`--resume` 同 `session_id` 同文件追加；`--fork-session` 复制新文件。存活终端占用期间不抢占 |
 | 审批策略 | Fail-closed：默认 300 秒超时自动拒绝，断线、异常、重启一律 deny |
 | 应用层鉴权 | 随机生成的固定 Bearer Token（`BRIDGE_TOKEN`），不自建加密协议 |
@@ -122,7 +131,7 @@ cr 命令行 (packages/cli)：全屏 TUI 控制台 · 启停 · 配对 · Relay 
 
 **安装 `cr`**
 
-Mac 端自动初始化配置
+`npm i -g @anyyu/claude-remote`
 
 </td>
 
@@ -132,7 +141,7 @@ Mac 端自动初始化配置
 
 **打通网络**
 
-Tailscale 或自建 Relay
+Tailscale Serve 或自建 Relay
 
 </td>
 
@@ -142,7 +151,7 @@ Tailscale 或自建 Relay
 
 **安装 iPhone App**
 
-从 `app/` 构建到真机
+下载 Release `.ipa` 自签安装
 
 </td>
 
@@ -159,11 +168,38 @@ Tailscale 或自建 Relay
 </tr>
 </table>
 
+### 一键交给 Agent 自动部署
+
+复制下方提示词发给任意终端 AI Agent（如 Claude Code / Codex），Agent 会先确认部署在**本机**还是**远程服务器**，再自动完成环境检查、安装初始化与网络通道配置：
+
+```markdown
+请帮我部署并配对 claude-remote（项目仓库：https://github.com/xuzihan0823/claude-remote）。请严格按以下步骤执行，遇到需要我授权、登录或手工操作的步骤时停下来提示我：
+
+1. 确认部署目标（先问我，不要默认假设）：
+   - 询问我打算把 claude-remote 部署在「当前本机」，还是「远程服务器（macOS / Linux）」。
+   - 如果选远程服务器：向我确认 SSH 连接方式（如 host 别名或 `user@host`）并验证连通性；后续第 2–4 步均在该目标主机上执行。
+
+2. 环境检查（只读检查，不要擅自更改目标主机系统 Node）：
+   - 确认目标主机系统为 macOS 或 Linux（`uname -s`，暂不支持原生 Windows）。
+   - 检查 `node -v` 是否 >= 22.13.0；如果不满足，停下来告知我需要升级 Node.js。
+   - 检查 `claude --version` 是否可用；如果找不到，停下来让我先在目标主机安装并登录 Claude Code CLI。
+
+3. 安装与初始化目标主机：
+   - 如果 `command -v cr` 不存在，运行 `npm install -g @anyyu/claude-remote` 安装（如果目标主机当前就在源码仓库目录且我明确要求从源码运行，再改用 `pnpm install && node packages/cli/bin/cr.mjs setup`）。
+   - 运行 `cr setup` 生成 `BRIDGE_TOKEN` 并探测 `claude` 路径。
+   - 若目标主机为 macOS，询问我是否希望开机自启并在后台常驻；如果我同意，执行 `cr config set autostart on`（否则保持默认随 `cr` 启停）。若目标主机为 Linux（无 `launchd`），提醒我在 `tmux`/`screen` 中保持 `cr` 运行，或使用 `cr up` 前台托管 daemon。
+
+4. 询问我选择哪种手机连接方式，然后按对应分支配置（不要替我默认选择）：
+   - 选项 A（Tailscale Serve，无需额外服务器）：先检查目标主机 `tailscale status`，未连接时让我先在目标主机和 iPhone 登录同一个 Tailscale 网络；确认 daemon 运行后（macOS 自启模式确保 `cr up` 成功；随 `cr` 运行模式提醒我保持 `cr` 运行并在另一个终端操作），执行 `cr pair --tailscale`。若提示需要浏览器授权开启 HTTPS Serve，停下来让我点链接授权后再继续。
+   - 选项 B（仅同一 Wi-Fi 局域网直连，主要适用于本机）：执行 `cr config set host 0.0.0.0`，按提示重启或重开 daemon 后运行 `cr pair`。
+   - 选项 C（自建公网 Relay）：指导我（或经我授权后通过 SSH）在公网 Linux 服务器运行 `curl -fsSL https://raw.githubusercontent.com/xuzihan0823/claude-remote/main/deploy/relay/install.sh | sudo bash`（并放行安全组 443/80 端口），取得输出的那条 `cr relay add <地址> <密钥>` 在目标主机上执行，再运行 `cr pair`。
+```
+
 <div align="center">
 
-### [查看完整安装与配置指南 →](docs/quickstart.md)
+### [查看手动步骤与详细部署文档 →](docs/deployment.md)
 
-**需要 macOS · Node.js ≥ 22.5 · Claude Code CLI · Xcode（iOS 源码构建）**
+**支持 macOS / Linux（含服务器）· Node.js ≥ 22.13.0 · Claude Code CLI · iPhone（[下载 Release `.ipa`](https://github.com/xuzihan0823/claude-remote/releases/latest) 自签安装）**
 
 </div>
 
@@ -195,7 +231,7 @@ Tailscale 或自建 Relay
 
 <br />
 
-### 从源码运行 Mac 端
+### 从源码运行主机端（macOS / Linux）
 
 ```sh
 git clone https://github.com/xuzihan0823/claude-remote.git
@@ -224,10 +260,9 @@ pnpm build:npm   # 构建 npm 发布包
 
 ```text
 claude-remote/
-├── README.md            项目定位、概览、命令与目录约定
-├── PROGRESS.md          当前状态、待办与踩坑记录
+├── README.md            项目定位、Agent 快速部署、命令与目录约定
 ├── app/                 React Native + Expo 手机端（独立 npm 依赖；原生工程在 app/ios/）
-├── docs/                快速安装指南、架构说明与设计方案
+├── docs/                详细部署文档、屏幕截图与架构说明
 ├── packages/            daemon、agent-bridge、interactions、cli、relay
 ├── web/core/            手机端共用的连接、缓存、模型与流草稿逻辑及测试
 ├── web/vendor/          手机端依赖的 Markdown 解析器与事件 hook 兼容依赖
@@ -237,9 +272,6 @@ claude-remote/
 
 ---
 
-## 文档导航
+## Friends
 
-- [快速开始](docs/quickstart.md) — Mac 端安装、Tailscale Serve / Relay 接入与 iOS 真机编译指南
-- [架构说明](docs/architecture.md) — 会话数据流、终端/手机占用互斥、安全边界与 Relay 协议
-- [自建 Relay 指南](deploy/relay/README.md) — 多 Relay 容灾、IP 证书、端口与国内服务器配置
-- [进度与踩坑记录](PROGRESS.md) — 当前各分支进度与已知调试经验
+[Linux.Do](https://linux.do/) — A new ideal community
