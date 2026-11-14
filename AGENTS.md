@@ -1,25 +1,85 @@
-# 分支与协作规则
+# AGENTS.md
 
-- 新会话开始时先运行 `gh pr list` 和 `git worktree list`，了解进行中的工作，需要细节时用 `gh pr view <编号>`。
-- 一个任务一条分支，从最新的 `main` 拉出，命名为 `type/简短描述`。一个会话可以做多个任务，一个任务也可以跨多个会话。
-- 多个 agent 同时工作时，每个任务用独立的 git worktree，不在同一个目录里切分支。
-- 开始任务后尽早推送分支并创建草稿 PR（`gh pr create --draft`）。描述写明目标、当前进度、未完成和未验证的部分，进度变化时及时更新。
-- 进度只记在 PR 描述里，不另建共享进度文件。改动文件由 PR 自动列出，不用手写；提交和 PR 写清为什么改、行为有什么变化、做了哪些验证。
-- 任务完成后尽快合入 `main`，合并后删除分支和 worktree。
+Rules for AI coding agents working in `claude-remote`.
+`CLAUDE.md` mirrors this file via `@AGENTS.md`. Treat every change as production maintenance on a live system.
 
-# 前端改动规则
+Optimize in strict order:
+1. Correctness
+2. User data & credential safety
+3. Security boundaries
+4. Protocol & state compatibility
+5. Architectural integrity
+6. Testability & maintainability
+7. Delivery speed
 
-- 不随便修改前端页面的内容，只改用户明确要求的部分；修 bug 时优先不动界面。
-- 需要新增页面、按钮、入口或文案等内容时，先询问用户意见，同意后再做。
+---
 
-# 提交规则
+## 1. Interaction & Read Before Changing
 
-本仓库是公开仓库，推送上去的内容应视为永久公开，改写历史也无法彻底清除。以下规则适用于文件内容、提交说明、分支名和 PR 描述。
+- Reply in the language the user used (e.g., Chinese when asked in Chinese).
+- At session start, check `gh pr list`, `git worktree list`, and `git status --short` to understand active work.
+- Read the nearest `AGENTS.md` (e.g., `app/AGENTS.md`), `docs/architecture.md`, and the target source and tests before editing.
+- **Source of truth** is current code, types, `package.json`, and tests. If documentation contradicts implementation, verify the code first and report the drift.
+- Only ask the user when ambiguity affects public contracts, UI/copy, data compatibility, or irreversible actions; otherwise proceed with the smallest reversible assumption.
 
-- 不提交凭据、密钥、token、真实服务器 IP 或域名、个人邮箱、账号/团队/证书 ID、真实机器名。文档里用 `<RELAY_HOST>` 这类占位符，测试里用 `example.com` 或 `203.0.113.x`。
-- 只暂存明确的路径，提交前检查暂存区差异里有没有敏感值。工作区可能有其他 agent 的改动，不要用 `git add -A`。
-- 不提交构建产物、依赖、`.env`、本地数据库和日志，这些内容加进 `.gitignore`。
-- 提交邮箱用 GitHub noreply 地址，不用个人邮箱。
-- 提交说明格式为 `type(scope): 中文摘要`，`scope` 可省略。
-- 未经用户明确授权，不强制推送，也不改写历史。
-- 2026-10-31 已改写公开历史。改写前的本地克隆和分支不要推送或合并；需要其中的改动时用 cherry-pick，并检查有无敏感值。
+---
+
+## 2. Frozen Architecture & Security Boundaries
+
+- **Session data**: `~/.claude/projects/**/*.jsonl` is **read-only** to the daemon; writes occur only naturally via Claude Code / Agent SDK `--resume`. Never mutate JSONL history directly from the daemon.
+- **Fail-closed approvals**: Timeout, disconnect, daemon restart, or unexpected error must **deny**. Never introduce auto-approve paths.
+- **Loopback pairing guard**: `/api/pair-info` and `/api/pair-qr.svg` are local-only and double-protected by `looksProxied()` and relay connector `PAIR_PATHS` (returning `403` via any relay/proxy). Any new local-only endpoint must also be added to `PAIR_PATHS`; never trust `127.0.0.1` source address alone.
+- **Relay protocol**: Share framing via `@claude-remote/relay/protocol` between `packages/relay` and `packages/daemon/src/relay/connector.ts`; do not duplicate parsers.
+- **No browser client**: Root and static web paths return `404`. (`web/core/` holds shared mobile logic and tests.)
+
+---
+
+## 3. Multi-Agent Isolation & Git Hygiene
+
+- **1 task = 1 branch + 1 dedicated worktree** from latest `main` (`type/short-description`). Never develop directly on `main`, switch branches in another agent's worktree, or touch unrelated work.
+- **Hard prohibitions** (never run without explicit user request for that exact command):
+  ```text
+  git reset --hard
+  git checkout .
+  git clean -fd
+  git stash          # worktrees share one stash list
+  git add .
+  git add -A
+  git commit --no-verify
+  ```
+- Stage explicit file paths only, and inspect `git diff --cached` before committing.
+- **Never force-push or rewrite history** without explicit user authorization.
+- **2026-10-31 history rewrite**: Do not push or merge clones/branches created before 2026-10-31; cherry-pick needed commits only after checking for secrets.
+- When opening/updating a PR, state goal, rationale, behavior changes, verified checks, and unverified items in the PR description (do not create separate shared progress files). Once merged, delete the branch and worktree.
+
+---
+
+## 4. Public Repository & Commit Rules
+
+This repository is **public**. Anything pushed must be treated as permanently public.
+
+- **Never commit** credentials, secrets, tokens, real server IPs or domains, personal emails, Apple Team / certificate / account IDs, or real machine hostnames. Use placeholders (`<RELAY_HOST>`, `example.com`, `203.0.113.x`) in docs and tests.
+- **Never commit** build artifacts, dependencies, `.env`, local databases, or logs (keep them in `.gitignore`).
+- Use your GitHub `noreply` email for commits, never a personal email.
+- Commit format: `type(scope): concise summary` (`scope` optional).
+
+---
+
+## 5. Scope, Frontend, & Async Safety
+
+- Keep diffs small, single-purpose, and free of drive-by refactors or mass formatting.
+- **Frontend / mobile UI rule**: Do not modify UI pages, buttons, entry points, or copy unless explicitly requested; when fixing bugs, keep the UI untouched whenever possible. Ask the user before adding new UI pages, buttons, or user-facing copy.
+- **Async & lifecycle safety**: Never assume state is unchanged across `await` (SDK turns, CLI presence polling, WebSocket heartbeats, relay connectors, approval timers). Every watcher, timer, socket, and child process must have an explicit cleanup path.
+- Never bypass errors or TypeScript checks (`any`, `as any`, `@ts-ignore`, `@ts-nocheck`).
+
+---
+
+## 6. Validation & Delivery Report
+
+- Unified test runner: `node:test` / `tsx --test` (`pnpm test`, `pnpm typecheck`). Do not mix in additional test frameworks.
+- **Minimum bar by change type**:
+  - *Bug fix*: reproduce or add a failing regression test first, fix, and pass relevant tests + typecheck.
+  - *Feature / contract change*: cover user path and boundary/failure cases + typecheck.
+  - *Docs / copy only*: verify all referenced paths, symbols, commands, and links exist; no unit tests required.
+- Never use real user daemons, live relay servers, or paid model APIs as default test environments without explicit authorization.
+- In your final response, report only observed file paths, behavior, and checks actually run after the final edit; clearly list any skipped checks and unverified paths.
