@@ -20,7 +20,7 @@ const out = join(root, "dist", "npm");
 const readJson = (p) => JSON.parse(readFileSync(join(root, p), "utf8"));
 
 const nameArg = process.argv.indexOf("--name");
-const name = nameArg > 0 ? process.argv[nameArg + 1] : process.env.NPM_NAME || "@anyu/claude-remote";
+const name = nameArg > 0 ? process.argv[nameArg + 1] : process.env.NPM_NAME || "@anyyu/claude-remote";
 const rootPkg = readJson("package.json");
 const workspacePkgs = ["cli", "daemon", "agent-bridge", "interactions"].map((p) => readJson(`packages/${p}/package.json`));
 
