@@ -43,4 +43,4 @@ iPhone 客户端主要界面预览，会话与 Mac / Linux 主机端的 Claude C
 </tr>
 </table>
 
-[← 返回 README](../README.md) · [详细部署文档](deployment.md)
+[← 返回 README](../README.zh-CN.md) · [详细部署文档](deployment.md)

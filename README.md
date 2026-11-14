@@ -4,234 +4,111 @@
 
 # claude-remote
 
-### 在 iPhone 上远程查看、续聊与审批 Mac / Linux 主机上的 Claude Code 会话
+**View and continue Claude Code sessions on your iPhone, and respond to approval requests from a Mac or Linux host.**
 
-**把桌面或服务器终端里的 Claude Code 带到手机上——实时镜像、双向接力、安全审批、多通道连接。**
-
-Local-first · 只读 JSONL 历史 · Fail-closed 审批 · Tailscale / 自建 Relay
-
-<br />
+**English** · [简体中文](README.zh-CN.md)
 
 [![Node](https://img.shields.io/badge/node-%3E%3D22.13.0-339933?logo=node.js&logoColor=white)](package.json)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%2B%20iOS-000000?logo=apple&logoColor=white)](#快速开始)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%2B%20iOS-000000?logo=apple&logoColor=white)](#quick-start)
 
-<br />
+[Quick start](#quick-start) · [Deployment guide (Chinese)](docs/deployment.md) ·
+[Screenshots](docs/screenshots.md) · [Architecture](#architecture) ·
+[Security](#security) · [Self-hosted Relay (Chinese)](deploy/relay/README.md) ·
+[CLI reference](#cli-reference) · [Development](#development)
 
-[快速开始](#快速开始) ·
-[详细部署文档](docs/deployment.md) ·
-[屏幕截图](docs/screenshots.md) ·
-[整体结构](#整体结构) ·
-[安全边界](#local-first-与安全边界) ·
-[自建 Relay](deploy/relay/README.md) ·
-[常用命令](#cr-控制台与常用命令) ·
-[开发与目录](#开发与目录约定)
-
-<br /><br />
-
-<img src="docs/images/hero.webp" alt="claude-remote" width="94%" />
-
-<br />
-
-**会话留在主机本地 · 审批永远由你掌控 · 直连与自建 Relay 自动切换**
+<img src="docs/images/hero.webp" alt="Claude Remote app screenshots" width="94%" />
 
 </div>
 
-> 浏览器客户端已移除。daemon 仅提供 API、WebSocket 和本机配对接口，根路径与网页静态资源返回 `404`。
+- **Follow sessions live.** Watch output, choose a model and reasoning effort, and send messages with image or file attachments.
+- **Move between phone and terminal.** Both use the same session history. Use `cr open <id>` to resume in the terminal. The iPhone waits while a terminal process owns the session.
+- **Respond to approvals.** Review tool requests and answer questions on your phone. Pending approvals are denied on timeout, cancellation, or daemon restart.
+- **Connect over LAN, Tailscale, or Relay.** Enable multiple routes and let the app prefer a direct connection in automatic mode. A self-hosted Relay lets the host connect outbound.
 
----
+## Quick start
 
-## 为什么用 claude-remote？
+The host needs macOS or Linux, **Node.js 22.13.0 or later**, and an installed and signed-in Claude Code CLI.
 
-<table>
-<tr>
+1. On the host, install and start `cr`.
 
-<td width="25%" valign="top">
+   ```sh
+   npm install -g @anyyu/claude-remote
+   cr
+   ```
 
-### 实时镜像与续聊
+2. Pick a network route. Keep the daemon running during pairing.
 
-直接读取主机 `~/.claude/projects/**/*.jsonl`。
+   - **Tailscale Serve:** Sign the host and iPhone into the same tailnet, then run `cr pair --tailscale` on the host.
+   - **Same Wi-Fi:** Run `cr config set host 0.0.0.0` and restart the daemon as prompted.
+   - **Self-hosted Relay:** [Deploy Relay on a public Linux server](deploy/relay/README.md), then run the generated `cr relay add` command on the Claude Code host.
+3. Download the [latest iPhone `.ipa`](https://github.com/xuzihan0823/claude-remote/releases/latest). Sign it with your own signing setup before sideloading it.
+4. Run `cr pair` on the host and scan the QR code. If you set up Tailscale Serve with `cr pair --tailscale`, you can scan the QR code from that command.
 
-手机端实时查看输出、选择模型与思考强度、上传图片/文件并续聊会话。
+### Set up with a terminal agent
 
-</td>
-
-<td width="25%" valign="top">
-
-### 终端与手机接力
-
-手机与桌面/服务器共享同一份会话记录。
-
-`cr open <id>` 可在终端用 `claude --resume` 接管；终端占用期间自动避免并发冲突。
-
-</td>
-
-<td width="25%" valign="top">
-
-### Fail-closed 审批
-
-工具调用与提问经手机端弹窗确认。
-
-超时、断线、重启或异常一律自动拒绝（deny），不做自动放行。
-
-</td>
-
-<td width="25%" valign="top">
-
-### 多通道自动选路
-
-支持局域网、Tailscale、自建公网 Relay 同时启用。
-
-直连优先，断线自动重选；主机无需开放公网入站端口。
-
-</td>
-
-</tr>
-</table>
-
----
-
-## 整体结构
-
-```text
-iPhone App (app/ + web/core/)
-   │  HTTP + WebSocket · Bearer Token
-   ├── 直连通道：局域网 / Tailscale / mDNS（优先）
-   └── 中转通道：https://<RELAY_HOST>/d/<deviceId> ── packages/relay（自建公网服务器）
-                                                          ▲ 主机主动连出
-主机 daemon (packages/daemon) ──── connector ─────────────┘
-   ├── 读取 ~/.claude/projects/**/*.jsonl（只读）
-   ├── 经 Agent SDK 驱动续聊（packages/agent-bridge）
-   └── 审批状态机（packages/interactions，node:sqlite）
-cr 命令行 (packages/cli)：全屏 TUI 控制台 · 启停 · 配对 · Relay 配置
-```
-
----
-
-## Local-first 与安全边界
-
-| 项目 | 默认行为与约束 |
-|---|---|
-| 会话数据源 | 仅以主机 `~/.claude/projects/**/*.jsonl` 为准；daemon 只读不改写（写入仅来自 SDK resume 原生落盘） |
-| 终端 / 手机互斥 | 实测 Claude Code 2.1.209：`--resume` 同 `session_id` 同文件追加；`--fork-session` 复制新文件。存活终端占用期间不抢占 |
-| 审批策略 | Fail-closed：默认 300 秒超时自动拒绝，断线、异常、重启一律 deny |
-| 应用层鉴权 | 随机生成的固定 Bearer Token（`BRIDGE_TOKEN`），不自建加密协议 |
-| 配对接口保护 | `/api/pair-info` 与 `/api/pair-qr.svg` 仅允许本机回环访问，经 Relay 或携带代理特征头一律返回 `403` |
-| 公网中转边界 | 无官方托管云端；Relay 仅支持部署在你自己控制的 Linux 服务器上（HTTPS 在你的服务器上解包，请勿接入不可信 Relay） |
-
----
-
-## 快速开始
-
-<table>
-<tr>
-
-<td width="25%" valign="top">
-
-### 01
-
-**安装 `cr`**
-
-`npm i -g @anyyu/claude-remote`
-
-</td>
-
-<td width="25%" valign="top">
-
-### 02
-
-**打通网络**
-
-Tailscale Serve 或自建 Relay
-
-</td>
-
-<td width="25%" valign="top">
-
-### 03
-
-**安装 iPhone App**
-
-下载 Release `.ipa` 自签安装
-
-</td>
-
-<td width="25%" valign="top">
-
-### 04
-
-**扫码配对**
-
-运行 `cr pair` 开始使用
-
-</td>
-
-</tr>
-</table>
-
-### 一键交给 Agent 自动部署
-
-复制下方提示词发给任意终端 AI Agent（如 Claude Code / Codex），Agent 会先确认部署在**本机**还是**远程服务器**，再自动完成环境检查、安装初始化与网络通道配置：
+Copy this prompt into a terminal agent such as Claude Code or Codex:
 
 ```markdown
-请帮我部署并配对 claude-remote（项目仓库：https://github.com/xuzihan0823/claude-remote）。请严格按以下步骤执行，遇到需要我授权、登录或手工操作的步骤时停下来提示我：
+Help me deploy and pair claude-remote from https://github.com/xuzihan0823/claude-remote. Stop when you need my approval, a sign-in, or a manual step.
 
-1. 确认部署目标（先问我，不要默认假设）：
-   - 询问我打算把 claude-remote 部署在「当前本机」，还是「远程服务器（macOS / Linux）」。
-   - 如果选远程服务器：向我确认 SSH 连接方式（如 host 别名或 `user@host`）并验证连通性；后续第 2–4 步均在该目标主机上执行。
-
-2. 环境检查（只读检查，不要擅自更改目标主机系统 Node）：
-   - 确认目标主机系统为 macOS 或 Linux（`uname -s`，暂不支持原生 Windows）。
-   - 检查 `node -v` 是否 >= 22.13.0；如果不满足，停下来告知我需要升级 Node.js。
-   - 检查 `claude --version` 是否可用；如果找不到，停下来让我先在目标主机安装并登录 Claude Code CLI。
-
-3. 安装与初始化目标主机：
-   - 如果 `command -v cr` 不存在，运行 `npm install -g @anyyu/claude-remote` 安装（如果目标主机当前就在源码仓库目录且我明确要求从源码运行，再改用 `pnpm install && node packages/cli/bin/cr.mjs setup`）。
-   - 运行 `cr setup` 生成 `BRIDGE_TOKEN` 并探测 `claude` 路径。
-   - 若目标主机为 macOS，询问我是否希望开机自启并在后台常驻；如果我同意，执行 `cr config set autostart on`（否则保持默认随 `cr` 启停）。若目标主机为 Linux（无 `launchd`），提醒我在 `tmux`/`screen` 中保持 `cr` 运行，或使用 `cr up` 前台托管 daemon。
-
-4. 询问我选择哪种手机连接方式，然后按对应分支配置（不要替我默认选择）：
-   - 选项 A（Tailscale Serve，无需额外服务器）：先检查目标主机 `tailscale status`，未连接时让我先在目标主机和 iPhone 登录同一个 Tailscale 网络；确认 daemon 运行后（macOS 自启模式确保 `cr up` 成功；随 `cr` 运行模式提醒我保持 `cr` 运行并在另一个终端操作），执行 `cr pair --tailscale`。若提示需要浏览器授权开启 HTTPS Serve，停下来让我点链接授权后再继续。
-   - 选项 B（仅同一 Wi-Fi 局域网直连，主要适用于本机）：执行 `cr config set host 0.0.0.0`，按提示重启或重开 daemon 后运行 `cr pair`。
-   - 选项 C（自建公网 Relay）：指导我（或经我授权后通过 SSH）在公网 Linux 服务器运行 `curl -fsSL https://raw.githubusercontent.com/xuzihan0823/claude-remote/main/deploy/relay/install.sh | sudo bash`（并放行安全组 443/80 端口），取得输出的那条 `cr relay add <地址> <密钥>` 在目标主机上执行，再运行 `cr pair`。
+1. Ask whether the target is this machine or a remote macOS or Linux host. For a remote host, confirm the SSH address or alias and verify access. Run the remaining host steps on the chosen machine.
+2. Check the OS with uname -s. Check that Node.js is at least 22.13.0 and that claude --version works. If a prerequisite is missing, tell me what to install or upgrade. Leave the system Node.js installation to me.
+3. If cr is missing, run npm install -g @anyyu/claude-remote. If I explicitly request a source install from the repository, run pnpm install and node packages/cli/bin/cr.mjs setup instead. Run cr setup to initialize the token and detect Claude Code. On macOS, ask whether I want launchd to keep the daemon running and enable it with cr config set autostart on if I agree. Otherwise keep cr open, or run cr up in the foreground. On Linux, suggest tmux or screen for a persistent terminal.
+4. Ask which network route I want:
+   - Tailscale Serve: Check tailscale status and have me sign the host and iPhone into the same tailnet if needed. With the daemon running, run cr pair --tailscale. If Tailscale asks for browser approval to enable HTTPS, stop and show me the approval link.
+   - Same Wi-Fi: Run cr config set host 0.0.0.0, restart the daemon as prompted, then run cr pair.
+   - Self-hosted Relay: With my approval, run curl -fsSL https://raw.githubusercontent.com/xuzihan0823/claude-remote/main/deploy/relay/install.sh | sudo bash on my public Linux server. Check that ports 443 and 80 are available as required. Run the generated cr relay add command on the Claude Code host, then run cr pair.
+5. Point me to the latest iPhone IPA in GitHub Releases so I can sign and install it, then have me scan the pairing QR code.
 ```
 
-<div align="center">
+The [deployment guide (Chinese)](docs/deployment.md) covers manual setup and building the iOS app from source.
 
-### [查看手动步骤与详细部署文档 →](docs/deployment.md)
+## Architecture
 
-**支持 macOS / Linux（含服务器）· Node.js ≥ 22.13.0 · Claude Code CLI · iPhone（[下载 Release `.ipa`](https://github.com/xuzihan0823/claude-remote/releases/latest) 自签安装）**
+```text
+iPhone app (app/ + web/core/)
+    │ HTTP and WebSocket with a bearer token
+    ├── Direct: LAN, Tailscale, or mDNS
+    └── Relay: https://<RELAY_HOST>/d/<deviceId> (packages/relay)
+                                             ▲ outbound connection
+Host daemon (packages/daemon) ─── connector ──┘
+    ├── Reads ~/.claude/projects/**/*.jsonl
+    ├── Resumes sessions through the Agent SDK (packages/agent-bridge)
+    └── Tracks approval requests in SQLite (packages/interactions)
 
-</div>
+cr (packages/cli) runs the terminal console and manages the daemon, pairing, and Relay.
+```
 
----
+The daemon exposes HTTP APIs, WebSocket, and local pairing endpoints. The root URL and static web routes return `404`.
 
-## `cr` 控制台与常用命令
+## Security
 
-直接运行 `cr` 会进入全屏 TUI 控制台（支持会话列表、搜索、详情回看、实时输出、审批、配对二维码与日志查看；进入后按 `?` 查看全部快捷键）。子命令适合脚本或快速操作：
+| Area | Behavior |
+| --- | --- |
+| Session history | The daemon reads JSONL on the host. Claude Code writes session history as part of its normal operation through the Agent SDK. |
+| Approvals | Pending approvals are denied on timeout (300 seconds by default), cancellation, or daemon restart. |
+| Authentication | The app uses a randomly generated bearer token (`BRIDGE_TOKEN`). |
+| Pairing | `/api/pair-info` and `/api/pair-qr.svg` are for loopback access. Relay requests and requests with recognized proxy headers are rejected. |
+| Self-hosted Relay | TLS terminates on your Relay server, which can see the token and session traffic. Use a server you control. |
 
-| 命令 | 用途 |
-|---|---|
-| `cr` | 进入全屏控制台（首次运行自动初始化） |
-| `cr setup` | 重新探测 `claude` 路径并检查初始化状态 |
-| `cr pair [--tailscale]` | 打印配对二维码与候选地址；加 `--tailscale` 自动配置 Tailscale Serve |
-| `cr status` | 查看 daemon、launchd、通道（Tailscale / Relay）与会话状态 |
-| `cr up` / `cr down` / `cr restart` | 启动 / 停止 / 重启 daemon |
-| `cr config` | 查看或修改配置（`host`、`port`、`bark`、`ntfy`、`autostart` 等） |
-| `cr relay add \| status \| on \| off \| remove` | 管理自建 Relay 连接 |
-| `cr ls [-n 20]` / `cr search <词> [--full]` | 列出或搜索最近会话（`--full` 全文检索） |
-| `cr show <id>` / `cr open <id>` | 查看会话最近消息 / 在终端 `claude --resume` 接管 |
-| `cr logs` | 实时查看 daemon 日志 |
+## CLI reference
 
----
+Run `cr` for the full-screen console. It supports browsing and searching sessions, live output, approvals, pairing, and logs. Press `?` for keyboard shortcuts.
 
-## 开发与目录约定
+| Command | What it does |
+| --- | --- |
+| `cr` | Open the console and initialize it on first run. |
+| `cr setup` | Check initialization and detect the Claude Code executable. |
+| `cr pair [--tailscale]` | Print a pairing QR code and connection addresses. Add `--tailscale` to configure Tailscale Serve. |
+| `cr status` | Show daemon, launchd, connection, and session status. |
+| `cr up` / `cr down` / `cr restart` | Start, stop, or restart the daemon. |
+| `cr config` | View or change settings such as `host`, `port`, `bark`, `ntfy`, and `autostart`. |
+| `cr relay add\|status\|on\|off\|remove` | Manage self-hosted Relay connections. |
+| `cr ls [-n 20]` / `cr search <term> [--full]` | List recent sessions or search them. Use `--full` to search message text. |
+| `cr show <id>` / `cr open <id>` | Read recent messages or resume the session in the terminal. |
+| `cr logs` | Follow daemon logs. |
 
-<details>
-<summary><strong>展开查看源码运行、构建与测试命令</strong></summary>
-
-<br />
-
-### 从源码运行主机端（macOS / Linux）
+## Development
 
 ```sh
 git clone https://github.com/xuzihan0823/claude-remote.git
@@ -240,41 +117,31 @@ pnpm install
 node packages/cli/bin/cr.mjs setup
 ```
 
-- 源码模式（`repo`）配置位于仓库根目录 `.env`（可参考 [.env.example](.env.example)），`cr setup` 会在 `~/.local/bin/cr` 创建软链；npm 全局安装模式（`package`）配置位于 `~/.claude-remote/config.env`。
-- 开发时 daemon 通过 `tsx` 运行（`pnpm dev`）；`pnpm build:npm` 会构建发布到 `dist/npm/` 的 CLI 与 daemon 产物。
-- 手机端 `app/` 维护独立的 `npm` 依赖与原生工程，不纳入根 `pnpm` workspace。
+Source installs use `.env` at the repository root (see [the example](.env.example)). The setup command links `cr` into `~/.local/bin`. Global npm installs use `~/.claude-remote/config.env`.
 
-### 开发检查
+Run `pnpm dev` to start the daemon from source. The mobile app has its own npm dependencies under `app/`. Expo generates the iOS project in `app/ios/`.
 
 ```sh
-pnpm typecheck   # 检查工作区 TypeScript
-pnpm test        # 运行核心逻辑、手机端辅助逻辑与各包测试（统一使用 node:test / tsx --test）
-pnpm build:npm   # 构建 npm 发布包
+pnpm typecheck
+pnpm test
+pnpm build:npm
 ```
 
-> 兼容命令 `pnpm test:web` 仅运行 `web/core/` 测试，不代表仍存在浏览器界面；`web/core/` 暂时保留原路径以避免大范围改写手机端 import。
+The npm build writes to `dist/npm/`. The legacy command `pnpm test:web` runs the shared logic tests in `web/core/`.
 
-</details>
+| Path | Contents |
+| --- | --- |
+| [app/](app/) | React Native and Expo iPhone app |
+| [docs/](docs/) | Deployment, screenshots, and architecture notes |
+| [packages/](packages/) | CLI, daemon, Agent SDK bridge, approvals, and Relay |
+| [web/core/](web/core/) | Shared mobile networking, session state, and tests |
+| [web/vendor/](web/vendor/) | Vendored JavaScript and license notices |
+| [deploy/relay/](deploy/relay/) | Relay installer and Docker, Caddy, and systemd configuration |
+| [scripts/](scripts/) | npm packaging, launchd entry point, and session repair |
 
-### 仓库目录
+## License
 
-```text
-claude-remote/
-├── README.md            项目定位、Agent 快速部署、命令与目录约定
-├── app/                 React Native + Expo 手机端（独立 npm 依赖；原生工程在 app/ios/）
-├── docs/                详细部署文档、屏幕截图与架构说明
-├── packages/            daemon、agent-bridge、interactions、cli、relay
-├── web/core/            手机端共用的连接、缓存、模型与流草稿逻辑及测试
-├── web/vendor/          手机端依赖的 Markdown 解析器与事件 hook 兼容依赖
-├── deploy/relay/        公网 Relay 一键安装与 Docker/Caddy/systemd 部署文件
-└── scripts/             npm 打包、launchd 入口与历史会话修复脚本
-```
-
----
-
-## 开源许可
-
-项目原创代码采用 [MIT](LICENSE)。随仓库分发的第三方代码保留原许可，详见 [web/vendor](web/vendor/README.md) 和 [iOS 第三方许可](app/THIRD-PARTY-NOTICES.txt)。Claude Agent SDK 由 npm 单独安装，适用 [Anthropic 条款](https://code.claude.com/docs/en/legal-and-compliance)。
+Project code is available under the [MIT License](LICENSE). Third-party code remains under its own licenses. See [vendored JavaScript licenses](web/vendor/README.md) and [iOS third-party notices](app/THIRD-PARTY-NOTICES.txt). The Claude Agent SDK is installed separately by npm and is subject to [Anthropic’s terms](https://code.claude.com/docs/en/legal-and-compliance).
 
 ## Friends
 
