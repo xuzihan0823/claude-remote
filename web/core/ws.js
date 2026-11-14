@@ -1,9 +1,35 @@
 import { bus } from './bus.js';
-import { wsEndpoint } from './api.js';
+import { ApiError, wsEndpoint } from './api.js';
 
 export const WS_PING_MS = 10_000;
 export const WS_PONG_TIMEOUT_MS = 5_000;
 export const WS_FAILS_BEFORE_RESELECT = 2;
+const WS_CONNECT_TIMEOUT_MS = 6_000;
+
+/** 试连指定通道，握手成功后关闭临时连接，供切换通道前使用。 */
+export function probeWebSocket(base, token, signal, { WebSocketImpl = globalThis.WebSocket, timers = globalThis } = {}) {
+  return new Promise((resolve, reject) => {
+    const unavailable = () => new ApiError(0, 'network_error');
+    if (signal.aborted) { reject(unavailable()); return; }
+    let socket;
+    try { socket = new WebSocketImpl(wsEndpoint(base, token)); }
+    catch { reject(unavailable()); return; }
+
+    const finish = (error) => {
+      timers.clearTimeout(timer);
+      signal.removeEventListener('abort', fail);
+      socket.onopen = socket.onerror = socket.onclose = null;
+      try { socket.close(); } catch { /* 连接已关闭 */ }
+      if (error) reject(error);
+      else resolve();
+    };
+    const fail = () => finish(unavailable());
+    const timer = timers.setTimeout(() => finish(new ApiError(0, 'network_timeout')), WS_CONNECT_TIMEOUT_MS);
+    signal.addEventListener('abort', fail, { once: true });
+    socket.onopen = () => finish();
+    socket.onerror = socket.onclose = fail;
+  });
+}
 
 // deps 供测试注入；默认用全局 WebSocket / 计时器与当前连接的 wsEndpoint()。
 export function createWs({ endpoint = wsEndpoint, WebSocketImpl, timers = globalThis, random = Math.random } = {}) {
@@ -64,7 +90,7 @@ export function createWs({ endpoint = wsEndpoint, WebSocketImpl, timers = global
     let pongSeen = false;
     let heardSincePing = true;
     const stale = () => sock !== s;
-    const connGuard = timers.setTimeout(() => { if (!stale() && s.readyState === 0) { try { s.close(); } catch { /* noop */ } } }, 6000);
+    const connGuard = timers.setTimeout(() => { if (!stale() && s.readyState === 0) { try { s.close(); } catch { /* noop */ } } }, WS_CONNECT_TIMEOUT_MS);
     const ping = () => {
       if (stale()) return;
       timers.clearTimeout(pongTimer);

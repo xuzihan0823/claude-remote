@@ -32,20 +32,20 @@ export function connHost() {
   if (baseUrl) { try { return new URL(baseUrl).host; } catch { return baseUrl; } }
   return typeof location === 'undefined' ? '' : location.host;
 }
-export function wsEndpoint() {
+export function wsEndpoint(base = baseUrl, tok = token) {
   const hasLoc = typeof location !== 'undefined';
   let host = hasLoc ? location.host : '';
   let secure = hasLoc && location.protocol === 'https:';
   let prefix = '';
-  if (baseUrl) {
+  if (base) {
     try {
-      const u = new URL(baseUrl);
+      const u = new URL(base);
       host = u.host;
       secure = u.protocol === 'https:';
       prefix = u.pathname.replace(/\/+$/, '');
     } catch { /* 保底同源 */ }
   }
-  return `${secure ? 'wss' : 'ws'}://${host}${prefix}/ws?token=${encodeURIComponent(token)}`;
+  return `${secure ? 'wss' : 'ws'}://${host}${prefix}/ws?token=${encodeURIComponent(tok)}`;
 }
 
 export class ApiError extends Error {
@@ -117,11 +117,11 @@ export async function probeBase(base, tok, opts = {}) {
 
 /**
  * 并行探测同一台 Mac 的全部候选地址，返回选中的 base：
- * 直连先通即用；relay 先通则再等 DIRECT_GRACE_MS 给直连机会；任一 401 立即抛；全失败抛最后一个错误。
+ * 直连先通即用；relay 先通则再等 DIRECT_GRACE_MS 给直连机会。全失败时优先报告 401。
  * 决定后中止其余进行中的探测。
  */
 export function probeBases(bases, tok, opts = {}) {
-  const { timers = globalThis, graceMs = DIRECT_GRACE_MS } = opts;
+  const { timers = globalThis, graceMs = DIRECT_GRACE_MS, verify } = opts;
   const list = [];
   for (const raw of bases || []) {
     const b = normalizeBase(raw);
@@ -135,6 +135,7 @@ export function probeBases(bases, tok, opts = {}) {
     let relayHit = '';
     let graceTimer = null;
     let lastErr = new ApiError(0, 'network_error');
+    let authError;
     const finish = (fn, value) => {
       if (done) return;
       done = true;
@@ -145,10 +146,14 @@ export function probeBases(bases, tok, opts = {}) {
     const settled = () => {
       if (--pending > 0) return;
       if (relayHit) finish(resolve, relayHit);
-      else finish(reject, lastErr);
+      else finish(reject, authError ?? lastErr);
+    };
+    const probe = async (base) => {
+      await probeBase(base, tok, { ...opts, signal: ctrl.signal });
+      if (!ctrl.signal.aborted && verify) await verify(base, tok, ctrl.signal);
     };
     for (const base of list) {
-      probeBase(base, tok, { ...opts, signal: ctrl.signal }).then(() => {
+      probe(base).then(() => {
         if (done) return;
         if (!isRelayBase(base)) { finish(resolve, base); return; }
         if (!relayHit) {
@@ -158,7 +163,7 @@ export function probeBases(bases, tok, opts = {}) {
         settled();
       }, (e) => {
         if (done) return;
-        if (e.code === 'unauthorized') { finish(reject, e); return; }
+        if (e.code === 'unauthorized') authError = e;
         lastErr = e;
         settled();
       });

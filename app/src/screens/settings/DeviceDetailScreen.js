@@ -14,9 +14,9 @@ import { agoText } from './labels.js';
 
 const CHANNEL_LABELS = { tailscale: 'Tailscale', lan: '直连 · 局域网', mdns: '直连 · 局域网', relay: 'Relay' };
 const PREF_OPTIONS = [
-  { key: 'auto', label: '自动', sub: '优先尝试 Tailscale 或局域网，失败时使用 Relay' },
   { key: 'relay', label: 'Relay', sub: '经自建 Relay 服务器' },
   { key: 'tailscale', label: 'Tailscale' },
+  { key: 'auto', label: '自动', sub: '优先尝试 Tailscale 或局域网，失败时使用 Relay' },
 ];
 
 export function DeviceDetailScreen({ navigation, route }) {
