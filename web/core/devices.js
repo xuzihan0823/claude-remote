@@ -27,9 +27,9 @@ const uniqBases = (list) => {
   return out;
 };
 
-export const CHANNEL_PREFS = ['auto', 'direct', 'tailscale', 'relay'];
+export const CHANNEL_PREFS = ['auto', 'relay', 'tailscale'];
 
-/** 地址属于哪种通道：relay | tailscale | mdns | lan。后三种都是直连，细分只用于展示。 */
+/** 识别 Relay、Tailscale 和局域网地址，用于显示和筛选候选通道。 */
 export function baseChannel(base) {
   if (isRelayBase(base)) return 'relay';
   let host = '';
@@ -41,6 +41,7 @@ export function baseChannel(base) {
   return 'lan';
 }
 
+/** 旧版直连偏好读作自动，继续涵盖 Tailscale 和局域网。 */
 export function channelPrefOf(d) { return CHANNEL_PREFS.includes(d?.channelPref) ? d.channelPref : 'auto'; }
 
 function read() {
@@ -146,8 +147,7 @@ export function candidateBases(d) {
   const all = uniqBases([d.lastBase, ...d.bases]);
   const pref = channelPrefOf(d);
   if (pref === 'auto') return all;
-  if (pref === 'tailscale') return all.filter((b) => baseChannel(b) === 'tailscale');
-  return all.filter((b) => (baseChannel(b) === 'relay') === (pref === 'relay'));
+  return all.filter((b) => baseChannel(b) === pref);
 }
 
 /**

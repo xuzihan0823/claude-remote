@@ -21,7 +21,7 @@ import { bus, toast, useBus } from '../../web/core/bus.js';
 import { candidateBases, currentDeviceId, displayName, getDevice, loadDevices, syncBases, updateDevice, upsertDevice } from '../../web/core/devices.js';
 import { applyAppearance, getPref } from './lib/prefs.js';
 import { applyLocale, t } from './lib/i18n.js';
-import { ws } from '../../web/core/ws.js';
+import { probeWebSocket, ws } from '../../web/core/ws.js';
 import { parseDeepLink } from './lib/deep-link.js';
 import { ConnActions } from './lib/conn-context.js';
 import { ProjectsProvider } from './lib/projects-context.js';
@@ -114,10 +114,12 @@ export default function App() {
 
   // 按 daemon 报告的地址同步这台设备的候选通道（手填地址永远保留）。完整连接和 daemon 广播
   // channels 时都走这里：新增或删除 relay 后手机不必再“完整连接一次”。
+  const channelSyncSeq = useRef(0);
   const syncDeviceBases = useCallback((id, connectedBase) => {
     if (!id) return;
+    const seq = ++channelSyncSeq.current;
     api('/api/connect-info').then((info) => {
-      if (!Array.isArray(info?.bases)) return;
+      if (channelSyncSeq.current !== seq || currentDeviceId() !== id || !Array.isArray(info?.bases)) return;
       syncBases(id, info.bases, connectedBase);
       bus.emit('devices');
     }).catch(() => { /* 旧 daemon 无此接口（404）或网络问题：沿用已有地址 */ });
@@ -183,7 +185,7 @@ export default function App() {
     setAuth((a) => (a === 'ok' ? 'ok' : 'checking'));
     setAuthErr('');
     try {
-      const base = await probeBases(bases, tok);
+      const base = await probeBases(bases, tok, { verify: probeWebSocket });
       if (opts?.beforeCommit) await opts.beforeCommit();
       saveBases(bases);
       saveConn(base, tok);
@@ -236,12 +238,17 @@ export default function App() {
       && baseUrl === fromBase && token === fromToken;
     try {
       const candidates = candidateBases(manual ? { ...d, channelPref: preference } : d);
-      const next = await probeBases(candidates, d.token);
+      const next = await probeBases(candidates, d.token, {
+        verify: (base, tok, signal) => {
+          if (base === baseUrl && ws.state.phase === 'open') return;
+          return probeWebSocket(base, tok, signal);
+        },
+      });
       if (!isCurrent()) return false;
       if (manual) updateDevice(d.id, { channelPref: preference });
       if (next === baseUrl) {
         if (manual) bus.emit('devices');
-        if (!manual || ws.state.phase !== 'open') ws.reconnectNow();
+        if (ws.state.phase !== 'open') ws.reconnectNow();
         return true;
       }
       saveConn(next, d.token);

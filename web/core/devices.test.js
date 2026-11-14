@@ -114,17 +114,18 @@ test('candidateBases 按通道偏好过滤；旧记录无偏好按 auto；auto �
   const bases = ['http://100.64.1.1:8787', RELAY, 'http://192.168.1.2:8787'];
   const legacy = { lastBase: RELAY, bases };
   assert.deepEqual(D.candidateBases(legacy), [RELAY, 'http://100.64.1.1:8787', 'http://192.168.1.2:8787']);
-  assert.deepEqual(D.candidateBases({ ...legacy, channelPref: 'direct' }), ['http://100.64.1.1:8787', 'http://192.168.1.2:8787']);
+  assert.equal(D.channelPrefOf({ ...legacy, channelPref: 'direct' }), 'auto');
+  assert.deepEqual(D.candidateBases({ ...legacy, channelPref: 'direct' }), D.candidateBases(legacy));
   assert.deepEqual(D.candidateBases({ ...legacy, channelPref: 'relay' }), [RELAY]);
   assert.deepEqual(D.candidateBases({ ...legacy, channelPref: 'bogus' }), D.candidateBases(legacy));
   assert.equal(D.channelPrefOf({}), 'auto');
 });
 
-test('Serve 地址经 Relay 同步后可独立选择；旧的直连偏好仍包含局域网', () => {
+test('Serve 地址经 Relay 同步后可独立选择；自动模式保留局域网', () => {
   const lan = 'http://192.168.1.2:8787';
   const d = D.upsertDevice({ base: RELAY, token: 't' });
   D.syncBases(d.id, [SERVE, lan, RELAY], RELAY);
-  for (const [pref, expected] of [['tailscale', [SERVE]], ['relay', [RELAY]], ['direct', [SERVE, lan]]]) {
+  for (const [pref, expected] of [['tailscale', [SERVE]], ['relay', [RELAY]], ['auto', [RELAY, SERVE, lan]]]) {
     D.updateDevice(d.id, { channelPref: pref });
     assert.deepEqual(D.candidateBases(D.getDevice(d.id)), expected);
   }

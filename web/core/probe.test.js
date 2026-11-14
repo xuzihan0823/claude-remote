@@ -7,10 +7,12 @@ globalThis.localStorage ??= {
   setItem: (key, value) => values.set(key, String(value)),
 };
 const { connErrMsg, probeBase, probeBases, isRelayBase, DIRECT_GRACE_MS, PROBE_TIMEOUT_MS } = await import('./api.js');
+const { probeWebSocket } = await import('./ws.js');
 
 const DIRECT_A = 'http://100.64.1.2:8787';
 const DIRECT_B = 'http://192.168.1.5:8787';
 const RELAY = 'https://relay.example.com/d/abc123';
+const TAILSCALE = 'https://mac.example.ts.net:8443';
 
 function fakeClock() {
   let now = 0;
@@ -108,15 +110,50 @@ test('relay 成功后直连全部失败 → 不等宽限期直接用 relay', asy
   assert.deepEqual(r.outcome, { base: RELAY });
 });
 
-test('任一 401 立即抛 unauthorized，即使 relay 已成功在等宽限期', async () => {
+test('一个地址返回 401 后仍可使用健康的 relay', async () => {
   const r = start([DIRECT_A, RELAY, DIRECT_B]);
   await flush();
   r.net.calls.get(RELAY).ok();
   await flush();
   r.net.calls.get(DIRECT_A).status(401);
   await flush();
-  assert.equal(r.outcome.error.code, 'unauthorized');
+  assert.equal(r.outcome, undefined);
+  await r.clock.advance(DIRECT_GRACE_MS);
+  assert.deepEqual(r.outcome, { base: RELAY });
   assert.equal(r.net.calls.get(DIRECT_B).signal.aborted, true);
+});
+
+test('全失败时优先报告 401，保留已失效凭据的提示', async () => {
+  const r = start([TAILSCALE, RELAY]);
+  r.net.calls.get(TAILSCALE).status(401);
+  await flush();
+  assert.equal(r.outcome, undefined);
+  r.net.calls.get(RELAY).status(503);
+  await r.p;
+  assert.equal(r.outcome.error.code, 'unauthorized');
+});
+
+test('切换时 HTTP 健康但 WebSocket 不通的 Tailscale 地址不会抢占可用 Relay', async () => {
+  const sockets = new Map();
+  class FakeSocket {
+    constructor(url) { sockets.set(url, this); }
+    close() { this.closed = true; }
+  }
+  const timers = fakeClock();
+  const probe = probeBases([TAILSCALE, RELAY], 'test token', {
+    fetchImpl: async () => Response.json({ ok: true }),
+    timers,
+    verify: (base, tok, signal) => probeWebSocket(base, tok, signal, { WebSocketImpl: FakeSocket, timers }),
+  });
+  await flush();
+  const tailscale = sockets.get('wss://mac.example.ts.net:8443/ws?token=test%20token');
+  const relay = sockets.get('wss://relay.example.com/d/abc123/ws?token=test%20token');
+  assert.ok(tailscale && relay);
+  relay.onopen();
+  tailscale.onerror();
+  assert.equal(await probe, RELAY);
+  assert.equal(tailscale.closed, true);
+  assert.equal(relay.closed, true);
 });
 
 test('全部失败抛最后一个错误；超时记为 network_timeout', async () => {

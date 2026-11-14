@@ -206,7 +206,7 @@ cr
 
 daemon 可以保持默认的 `127.0.0.1`。命令会复用已经指向 daemon 的私有 HTTPS Serve 地址，或在 Tailscale 的 443、8443 端口中选一个空闲端口。已配对且在线的手机会自动收到新地址。
 
-Tailscale 会自动处理直连和 DERP 中继，手机使用同一个 HTTPS 地址。也配置了自建 Relay 时，在 App 的「设置 → 设备 → 设备详情 → 通道偏好」选择「只走 Tailscale」「只走 relay」或「自动」。切换当前设备的通道时，App 会先试连，再保存偏好。
+Tailscale 会自动处理直连和 DERP 中继，手机使用同一个 HTTPS 地址。也配置了自建 Relay 时，在 App 的「设置 → 设备 → 设备详情 → 通道偏好」选择「Relay」「Tailscale」或「自动」。切换当前设备的通道时，App 会先试连，再保存偏好。
 
 只在同一个 Wi-Fi 下使用时，也可以用 `cr config set host 0.0.0.0` 开启局域网直连。默认随 `cr` 启停时，重开 `cr` 使设置生效，再运行 `cr pair`。
 

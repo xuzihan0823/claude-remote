@@ -56,8 +56,8 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 
 逻辑在 `web/core/`（`api.js`、`devices.js`、`ws.js`），由 `app/src/App.js` 调用。
 
-- 一台设备保存多个地址：`bases`（同步而来）、`manualBases`（用户手填，同步时不能删）、`lastBase`、`channelPref`（`auto`/`direct`/`relay`）。
-- `probeBases` 并行探测：直连先通就立即使用；relay 先通则再等 1.5 秒看有没有直连；任一地址返回 401 就停止并提示 token 错误。不要改回串行探测，一个失效的 Tailscale IP 就要等 8 秒超时。
+- 一台设备保存多个地址，包括 `bases`（同步而来）、`manualBases`（用户手填，同步时保留）、`lastBase` 和 `channelPref`（`auto`/`relay`/`tailscale`）。旧版 `direct` 按 `auto` 读取，仍可连接 Tailscale 和局域网。
+- `probeBases` 并行探测。直连先通就立即使用；Relay 先通则再等 1.5 秒看有没有直连。全部候选失败时优先报告 401。扫码配对和通道切换都验证 WebSocket 握手，切换成功后才保存手动偏好。
 - 完整连接时调用 `GET /api/connect-info`，用 `syncBases` 把新通道同步给已配对的手机，并删除 daemon 不再承认的旧通道；手填地址保留。冷启动或点“重新连接”会同步，`reselect` 只重新探测现有候选地址。收到 daemon 的 `channels` 帧时手机重新拉 `connect-info` 并 `syncBases`，所以新增或删除 relay 不必再手动完整连接一次（旧 daemon 仍需）。
 - 多个 relay 没有优先级，选最先探测成功的那个；故障后重选通道，恢复后不会主动切回。Mac 或 daemon 离线时全部 relay 都不可用。
 - WS 应用层心跳：每 10 秒发 `{type:"ping"}`，daemon 先回 `{type:"pong"}` 再做其它检查。收到过 pong 之后 5 秒内无任何帧视为半开连接；连续 2 次连接失败或半开时发出 `ws-reselect`，App 重新选路。App 回到前台时也会重新选路。
