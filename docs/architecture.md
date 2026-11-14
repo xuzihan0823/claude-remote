@@ -56,7 +56,7 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 
 逻辑在 `web/core/`（`api.js`、`devices.js`、`ws.js`），由 `app/src/App.js` 调用。
 
-- 一台设备保存多个地址：`bases`（同步而来）、`manualBases`（用户手填，同步时不能删）、`lastBase`、`channelPref`（`auto`/`direct`/`relay`）。
+- 一台设备保存多个地址，包括 `bases`（同步而来）、`manualBases`（用户手填，同步时保留）、`lastBase` 和 `channelPref`（`auto`/`relay`/`tailscale`）。旧版 `direct` 按 `auto` 读取，仍可连接 Tailscale 和局域网。
 - `probeBases` 并行探测：直连先通就立即使用；relay 先通则再等 1.5 秒看有没有直连；任一地址返回 401 就停止并提示 token 错误。不要改回串行探测，一个失效的 Tailscale IP 就要等 8 秒超时。
 - 完整连接时调用 `GET /api/connect-info`，用 `syncBases` 把新通道同步给已配对的手机，并删除 daemon 不再承认的旧通道；手填地址保留。冷启动或点“重新连接”会同步，`reselect` 只重新探测现有候选地址。收到 daemon 的 `channels` 帧时手机重新拉 `connect-info` 并 `syncBases`，所以新增或删除 relay 不必再手动完整连接一次（旧 daemon 仍需）。
 - 多个 relay 没有优先级，选最先探测成功的那个；故障后重选通道，恢复后不会主动切回。Mac 或 daemon 离线时全部 relay 都不可用。
