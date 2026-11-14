@@ -173,7 +173,7 @@ Tailscale 或自建 Relay
 ### 第一步：Mac 端安装与初始化
 
 ```sh
-npm install -g @anyu/claude-remote
+npm install -g @anyyu/claude-remote
 cr
 ```
 
