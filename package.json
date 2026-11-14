@@ -2,6 +2,7 @@
   "name": "claude-remote",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "//": "engines.node >=22.13.0：interactions 使用 node:sqlite（自 Node 22.13.0 起无需实验开关）",

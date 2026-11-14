@@ -272,6 +272,10 @@ claude-remote/
 
 ---
 
+## 开源许可
+
+项目原创代码采用 [MIT](LICENSE)。随仓库分发的第三方代码保留原许可，详见 [web/vendor](web/vendor/README.md) 和 [iOS 第三方许可](app/THIRD-PARTY-NOTICES.txt)。Claude Agent SDK 由 npm 单独安装，适用 [Anthropic 条款](https://code.claude.com/docs/en/legal-and-compliance)。
+
 ## Friends
 
 [Linux.Do](https://linux.do/) — A new ideal community
