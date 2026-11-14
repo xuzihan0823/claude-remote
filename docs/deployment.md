@@ -124,3 +124,7 @@ cr pair
 - `cr setup`：重新探测 `claude` 路径并检查初始化状态
 
 更多命令与架构说明见 [README](../README.md) 与 [架构说明](architecture.md)。
+
+## 更新 iOS 第三方许可
+
+iOS 构建会把仓库根目录的 `LICENSE` 和 [第三方许可声明](../app/THIRD-PARTY-NOTICES.txt) 复制进 App。更新依赖时，用 Release 模式的 Metro source map 核对实际打包的 npm 模块，再结合 CocoaPods 的 acknowledgements 和产物中的预编译框架更新声明。库没有随安装包附许可文本时，从对应版本的上游源码取原文。发布 `.ipa` 时随 Release 提供同一份第三方声明。

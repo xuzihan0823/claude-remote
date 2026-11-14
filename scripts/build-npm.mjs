@@ -82,7 +82,7 @@ writeFileSync(
       description: "在 iPhone 上接管 Mac 里的 Claude Code 会话：终端控制台 cr + 常驻 daemon",
       type: "module",
       bin: { cr: "dist/cli.js" },
-      files: ["dist", "README.md"],
+      files: ["dist", "README.md", "LICENSE"],
       engines: { node: rootPkg.engines.node },
       os: ["darwin", "linux"],
       dependencies,
@@ -95,7 +95,9 @@ writeFileSync(
   )}\n`,
 );
 
-cpSync(join(root, "README.md"), join(out, "README.md"));
+for (const file of ["README.md", "LICENSE"]) {
+  cpSync(join(root, file), join(out, file));
+}
 
 console.log(`✓ ${name}@${version} → ${out}`);
 console.log(`  依赖：${Object.entries(dependencies).map(([k, v]) => `${k}@${v}`).join(" ")}`);
