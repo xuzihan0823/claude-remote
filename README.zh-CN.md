@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="app/assets/icon.png" alt="claude-remote" width="96" />
+<img src="docs/images/icon.png" alt="claude-remote" width="96" />
 
 # claude-remote
 
@@ -95,7 +95,7 @@ Local-first · 只读 JSONL 历史 · Fail-closed 审批 · Tailscale / 自建 R
 ## 整体结构
 
 ```text
-iPhone App (app/ + web/core/)
+Claude Remote iOS 客户端
    │  HTTP + WebSocket · Bearer Token
    ├── 直连通道：局域网 / Tailscale / mDNS（优先）
    └── 中转通道：https://<RELAY_HOST>/d/<deviceId> ── packages/relay（自建公网服务器）
@@ -244,17 +244,15 @@ node packages/cli/bin/cr.mjs setup
 
 - 源码模式（`repo`）配置位于仓库根目录 `.env`（可参考 [.env.example](.env.example)），`cr setup` 会在 `~/.local/bin/cr` 创建软链；npm 全局安装模式（`package`）配置位于 `~/.claude-remote/config.env`。
 - 开发时 daemon 通过 `tsx` 运行（`pnpm dev`）；`pnpm build:npm` 会构建发布到 `dist/npm/` 的 CLI 与 daemon 产物。
-- 手机端 `app/` 维护独立的 `npm` 依赖与原生工程，不纳入根 `pnpm` workspace。
+- iOS 客户端在私有仓库维护。
 
 ### 开发检查
 
 ```sh
 pnpm typecheck   # 检查工作区 TypeScript
-pnpm test        # 运行核心逻辑、手机端辅助逻辑与各包测试（统一使用 node:test / tsx --test）
+pnpm test        # 运行主机端与 Relay 测试（统一使用 node:test / tsx --test）
 pnpm build:npm   # 构建 npm 发布包
 ```
-
-> 兼容命令 `pnpm test:web` 仅运行 `web/core/` 测试，不代表仍存在浏览器界面；`web/core/` 暂时保留原路径以避免大范围改写手机端 import。
 
 </details>
 
@@ -264,11 +262,8 @@ pnpm build:npm   # 构建 npm 发布包
 claude-remote/
 ├── README.md            英文首页
 ├── README.zh-CN.md      中文首页、Agent 快速部署和命令说明
-├── app/                 React Native + Expo 手机端（独立 npm 依赖；iOS 原生工程生成到 app/ios/）
 ├── docs/                详细部署文档、屏幕截图与架构说明
 ├── packages/            daemon、agent-bridge、interactions、cli、relay
-├── web/core/            手机端共用的连接、缓存、模型与流草稿逻辑及测试
-├── web/vendor/          手机端依赖的 Markdown 解析器与事件 hook 兼容依赖
 ├── deploy/relay/        公网 Relay 一键安装与 Docker/Caddy/systemd 部署文件
 └── scripts/             npm 打包、launchd 入口与历史会话修复脚本
 ```
@@ -277,7 +272,7 @@ claude-remote/
 
 ## 开源许可
 
-项目原创代码采用 [MIT](LICENSE)。随仓库分发的第三方代码保留原许可，详见 [web/vendor](web/vendor/README.md) 和 [iOS 第三方许可](app/THIRD-PARTY-NOTICES.txt)。Claude Agent SDK 由 npm 单独安装，适用 [Anthropic 条款](https://code.claude.com/docs/en/legal-and-compliance)。
+本仓库中的 CLI、daemon 和 Relay 采用 [MIT 许可证](LICENSE)。iOS 客户端闭源，先前已经按 MIT 发布的版本仍保留原许可。第三方代码继续适用各自的许可，参见 [iOS 安装包与第三方许可声明](https://github.com/xuzihan0823/claude-remote/releases/tag/v0.1.0)。Claude Agent SDK 由 npm 单独安装，适用 [Anthropic 条款](https://code.claude.com/docs/en/legal-and-compliance)。
 
 ## Friends
 

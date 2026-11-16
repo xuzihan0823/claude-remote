@@ -18,7 +18,7 @@ Optimize in strict order:
 
 - Reply in the language the user used (e.g., Chinese when asked in Chinese).
 - At session start, check `gh pr list`, `git worktree list`, and `git status --short` to understand active work.
-- Read the nearest `AGENTS.md` (e.g., `app/AGENTS.md`), `docs/architecture.md`, and the target source and tests before editing.
+- Read the nearest applicable `AGENTS.md`, `docs/architecture.md`, and the target source and tests before editing.
 - **Source of truth** is current code, types, `package.json`, and tests. If documentation contradicts implementation, verify the code first and report the drift.
 - Only ask the user when ambiguity affects public contracts, UI/copy, data compatibility, or irreversible actions; otherwise proceed with the smallest reversible assumption.
 
@@ -30,7 +30,7 @@ Optimize in strict order:
 - **Fail-closed approvals**: Timeout, disconnect, daemon restart, or unexpected error must **deny**. Never introduce auto-approve paths.
 - **Loopback pairing guard**: `/api/pair-info` and `/api/pair-qr.svg` are local-only and double-protected by `looksProxied()` and relay connector `PAIR_PATHS` (returning `403` via any relay/proxy). Any new local-only endpoint must also be added to `PAIR_PATHS`; never trust `127.0.0.1` source address alone.
 - **Relay protocol**: Share framing via `@claude-remote/relay/protocol` between `packages/relay` and `packages/daemon/src/relay/connector.ts`; do not duplicate parsers.
-- **No browser client**: Root and static web paths return `404`. (`web/core/` holds shared mobile logic and tests.)
+- **No browser client**: Root and static web paths return `404`.
 
 ---
 

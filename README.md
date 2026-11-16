@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="app/assets/icon.png" alt="claude-remote" width="96" />
+<img src="docs/images/icon.png" alt="claude-remote" width="96" />
 
 # claude-remote
 
@@ -61,12 +61,12 @@ Help me deploy and pair claude-remote from https://github.com/xuzihan0823/claude
 5. Point me to the latest iPhone IPA in GitHub Releases so I can sign and install it, then have me scan the pairing QR code.
 ```
 
-The [deployment guide (Chinese)](docs/deployment.md) covers manual setup and building the iOS app from source.
+The [deployment guide (Chinese)](docs/deployment.md) covers manual host setup, iPhone installation, and pairing.
 
 ## Architecture
 
 ```text
-iPhone app (app/ + web/core/)
+Claude Remote for iOS
     │ HTTP and WebSocket with a bearer token
     ├── Direct: LAN, Tailscale, or mDNS
     └── Relay: https://<RELAY_HOST>/d/<deviceId> (packages/relay)
@@ -119,7 +119,7 @@ node packages/cli/bin/cr.mjs setup
 
 Source installs use `.env` at the repository root (see [the example](.env.example)). The setup command links `cr` into `~/.local/bin`. Global npm installs use `~/.claude-remote/config.env`.
 
-Run `pnpm dev` to start the daemon from source. The mobile app has its own npm dependencies under `app/`. Expo generates the iOS project in `app/ios/`.
+Run `pnpm dev` to start the daemon from source. The iOS client is developed in a private repository.
 
 ```sh
 pnpm typecheck
@@ -127,21 +127,18 @@ pnpm test
 pnpm build:npm
 ```
 
-The npm build writes to `dist/npm/`. The legacy command `pnpm test:web` runs the shared logic tests in `web/core/`.
+The npm build writes to `dist/npm/`.
 
 | Path | Contents |
 | --- | --- |
-| [app/](app/) | React Native and Expo iPhone app |
 | [docs/](docs/) | Deployment, screenshots, and architecture notes |
 | [packages/](packages/) | CLI, daemon, Agent SDK bridge, approvals, and Relay |
-| [web/core/](web/core/) | Shared mobile networking, session state, and tests |
-| [web/vendor/](web/vendor/) | Vendored JavaScript and license notices |
 | [deploy/relay/](deploy/relay/) | Relay installer and Docker, Caddy, and systemd configuration |
 | [scripts/](scripts/) | npm packaging, launchd entry point, and session repair |
 
 ## License
 
-Project code is available under the [MIT License](LICENSE). Third-party code remains under its own licenses. See [vendored JavaScript licenses](web/vendor/README.md) and [iOS third-party notices](app/THIRD-PARTY-NOTICES.txt). The Claude Agent SDK is installed separately by npm and is subject to [Anthropic’s terms](https://code.claude.com/docs/en/legal-and-compliance).
+The CLI, daemon, and Relay in this repository are available under the [MIT License](LICENSE). The iOS client is closed source, and earlier versions published under MIT retain their original license. Third-party code remains under its own licenses. See [iOS releases and third-party notices](https://github.com/xuzihan0823/claude-remote/releases/tag/v0.1.0). The Claude Agent SDK is installed separately by npm and is subject to [Anthropic’s terms](https://code.claude.com/docs/en/legal-and-compliance).
 
 ## Friends
 
