@@ -5,7 +5,7 @@
 ## 整体结构
 
 ```
-iPhone App (app/ + web/core/)
+Claude Remote iOS 客户端
    │  HTTP + WebSocket，Bearer token
    ├── 直连：Tailscale / 局域网 / mDNS
    └── relay：https://<relay>/d/<deviceId>  ──  packages/relay（公网）
@@ -53,8 +53,6 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 - `cr pair --tailscale` 写入私有 HTTPS Serve 地址，配对码与 `connect-info` 共同发布。daemon 只监听回环时，启用 Serve 后省略局域网和 Tailscale IP 直连地址。CLI 通过仅本机可用的 `POST /api/channels/refresh` 通知在线手机同步地址。
 
 ## 手机端多通道
-
-逻辑在 `web/core/`（`api.js`、`devices.js`、`ws.js`），由 `app/src/App.js` 调用。
 
 - 一台设备保存多个地址，包括 `bases`（同步而来）、`manualBases`（用户手填，同步时保留）、`lastBase` 和 `channelPref`（`auto`/`relay`/`tailscale`）。旧版 `direct` 按 `auto` 读取，仍可连接 Tailscale 和局域网。
 - `probeBases` 并行探测。直连先通就立即使用；Relay 先通则再等 1.5 秒看有没有直连。全部候选失败时优先报告 401。扫码配对和通道切换都验证 WebSocket 握手，切换成功后才保存手动偏好。
@@ -135,7 +133,7 @@ CLI 注入的 `<task-notification>` 与 `<system-reminder>` 等包裹内容在�
 
 ### 读取会话文件
 
-Agent 不主动发送文件。它在回复里写出路径，App 用 `web/core/linkify.js` 识别后显示文件卡片，用户点开时才下载到手机临时目录预览，关闭时删除。保存走系统分享面板。
+Agent 不主动发送文件。它在回复里写出路径，App 识别路径后显示文件卡片，用户点开时才下载到手机临时目录预览，关闭时删除。保存走系统分享面板。
 
 ```text
 GET /api/sessions/:id/files/meta?path=<绝对或相对路径>
@@ -160,7 +158,7 @@ GET /api/sessions/:id/files/content?path=<绝对或相对路径>
 - 敏感规则为 `.env*`、`.git`、`.ssh`、`*.pem`、`*.key`、`id_rsa*`、`.npmrc`、`.netrc`，不区分大小写，对请求路径和 `realpath` 后的真实路径的每一段都检查，符号链接绕不过去。
 - 会话 ID 含路径分隔符时直接 404。ID 会拼进 JSONL 路径，不拦截的话可以指向上传目录里伪造的会话文件，篡改相对路径的解析基准。新增信任 JSONL 内容的接口时要保留这条检查。
 
-App 把 HTML 当作不可信内容：不注入令牌，不提供 `onMessage`，关闭跨文件访问，用 `incognito`。导航规则在 `app/src/lib/file-preview.js`：文件自身和页内地址留在预览里，外部链接交给系统浏览器，其他本机文件和自定义协议一律拦截。iOS 只放行真实点击，Android 拿不到导航类型。令牌只放请求头，不放 URL。
+App 把 HTML 当作不可信内容：不注入令牌，不提供 `onMessage`，关闭跨文件访问，用 `incognito`。导航规则为：文件自身和页内地址留在预览里，外部链接交给系统浏览器，其他本机文件和自定义协议一律拦截。iOS 只放行真实点击，Android 拿不到导航类型。令牌只放请求头，不放 URL。
 
 WebView 只在首次请求带请求头，所以目前只保证单文件 HTML，同目录资源会加载失败，视频音频也不能边传边播。解决办法是增加短期预览地址，长期令牌不能放进 URL。
 
@@ -201,7 +199,7 @@ run.state 为 started/done/error；`error` 和 `permissionMode` 可选，permiss
 
 流帧为 `{ "type": "stream", "sessionId": "<uuid>", "key": "<apiMessageId>:<index>", "offset": 0, "text": "回答" }`，block 结束时带 `done: true`；offset 是 JavaScript 字符串偏移，按偏移合并可重复投递。订阅草稿快照从 offset 0 开始，终止清理为 `{ "type": "stream", "sessionId": "<uuid>", "clear": true }`。草稿仅供即时显示，正式正文以消息接口和 message 帧为准，二者需对账。
 
-客户端 `{ "type": "ping" }` 收到 `{ "type": "pong" }`，与订阅无关。会话快照及上述 HTTP/WS 行为由 `server.test.ts` 集成测试覆盖；App 恢复顺序由 `app/src/lib/__tests__/chat-streaming.test.mjs` 覆盖。
+客户端 `{ "type": "ping" }` 收到 `{ "type": "pong" }`，与订阅无关。会话快照及上述 HTTP/WS 行为由 `server.test.ts` 集成测试覆盖。
 
 ### Auto 执行环境与兼容配置
 
