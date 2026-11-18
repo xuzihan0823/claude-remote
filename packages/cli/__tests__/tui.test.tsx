@@ -352,12 +352,73 @@ test("会话详情：PgUp 翻历史停在原地，PgDn 回到底部跟随新消�
   ui.unmount();
 });
 
+test("命令面板：筛选、方向键执行与 Esc 恢复搜索", async (t) => {
+  const { deps, calls } = fakeDeps();
+  const ui = render(<App deps={deps} onExit={() => {}} />);
+  t.after(ui.unmount);
+  await settle(200);
+  ui.stdin.write("/");
+  await settle();
+  ui.stdin.write("filter");
+  await settle(300);
+  ui.stdin.write("\x1b[Z");
+  await settle();
+  assert.match(ui.lastFrame() ?? "", /命令面板/);
+  ui.stdin.write("not-a-command");
+  await settle();
+  ui.stdin.write("\r");
+  await settle();
+  assert.match(ui.lastFrame() ?? "", /没有匹配的命令/);
+  ui.stdin.write("\x1b");
+  await settle();
+  assert.match(ui.lastFrame() ?? "", /filter/);
+  assert.deepEqual(calls.search, [["filter", false]]);
+
+  ui.stdin.write("\x1b[Z");
+  await settle();
+  ui.stdin.write("\x1b[B");
+  await settle();
+  ui.stdin.write("\r");
+  await settle();
+  assert.match(ui.lastFrame() ?? "", /Run Bash\?/);
+  assert.deepEqual(calls.decide, []);
+  ui.stdin.write("\x1b");
+  await settle();
+  ui.stdin.write(":");
+  await settle();
+  ui.stdin.write("配对");
+  await settle();
+  assert.match(ui.lastFrame() ?? "", /\/pair/);
+  assert.doesNotMatch(ui.lastFrame() ?? "", /\/logs/);
+  ui.stdin.write("\r");
+  await settle();
+  assert.match(ui.lastFrame() ?? "", /\[QR\]/);
+});
+
+test("会话详情：长回复完整换行，保留代码缩进和空行", async (t) => {
+  const longLine = `${"中".repeat(45)}回答末尾`;
+  const { deps } = fakeDeps();
+  deps.api = { ...deps.api!, messages: async () => ({
+    messages: [{ seq: 1, blockIndex: 0, uuid: "u", role: "assistant", kind: "text", text: `回复开头\n${longLine}\n\n代码：\n    const value = 1;` }],
+    hasMore: false,
+  }) };
+  const ui = render(<App deps={deps} onExit={() => {}} />);
+  t.after(ui.unmount);
+  await settle(200);
+  ui.stdin.write("\r");
+  await settle();
+  const frame = ui.lastFrame() ?? "";
+  assert.match(frame, /回复开头/);
+  assert.match(frame, /回答末尾\n *\n *代码：\n {12}const value = 1;/);
+  assert.doesNotMatch(frame, /中…/);
+});
+
 test("底部提示只留常用键，其余收进帮助页", async () => {
   const { deps } = fakeDeps();
   const ui = render(<App deps={deps} onExit={() => {}} />);
   await settle(200);
   const main = ui.lastFrame() ?? "";
-  assert.match(main, /搜索 a 审批/);
+  assert.match(main, /\/ 搜索 · : 命令 · a 审批/);
   assert.doesNotMatch(main, /p 配对/);
   ui.stdin.write("?");
   await settle();

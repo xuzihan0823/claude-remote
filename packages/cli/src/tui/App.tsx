@@ -15,6 +15,7 @@
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import wrapAnsi from "wrap-ansi";
 
 import type { ApprovalCard, RenderMessage, SearchMatch, ServerFrame, SessionSummary } from "../api.js";
 import { ApiError } from "../api.js";
@@ -30,6 +31,7 @@ import {
   summarizeInput,
 } from "../format.js";
 import { snapshotRelayLine } from "../relay.js";
+import { CommandPalette, type PaletteCommand } from "./CommandPalette.js";
 import type { ConfigValue, TuiDeps } from "./deps.js";
 
 export type View = "main" | "session" | "approvals" | "pair" | "logs" | "help" | "settings";
@@ -79,15 +81,18 @@ function mergeMessages(current: RenderMessage[], incoming: RenderMessage[]): Ren
 
 type MessageLine = { who: string; text: string; color: string };
 
-function wrapMessages(messages: RenderMessage[], width: number): MessageLine[] {
+function wrapMessages(messages: RenderMessage[], width: number, preview = false): MessageLine[] {
   const lines: MessageLine[] = [];
   for (const m of messages) {
     if (m.kind === "thinking" || m.kind === "meta") continue;
     const { who, text } = describeMessage(m);
-    const color = m.role === "user" && m.kind === "text" ? "cyan" : m.kind === "text" ? "white" : "gray";
+    const color = m.isError ? "red" : m.role === "user" && m.kind === "text" ? "cyan" : m.kind === "text" ? "white" : "gray";
     if (m.kind === "text") {
-      const chunks = text.trim().split(/\n+/).filter((l) => l.trim() !== "");
-      chunks.forEach((chunk, i) => lines.push({ who: i === 0 ? who : "", text: fit(chunk, width - 8, false), color }));
+      if (text.trim() === "") continue;
+      const chunks = preview
+        ? text.trim().split(/\n+/).filter((line) => line.trim() !== "").map((line) => fit(line, width - 8, false))
+        : wrapAnsi(text, width - 7, { hard: true, trim: false }).split("\n");
+      chunks.forEach((line, i) => lines.push({ who: i === 0 ? who : "", text: line, color }));
     } else {
       lines.push({ who, text: fit(text, width - 10, false), color });
     }
@@ -96,7 +101,7 @@ function wrapMessages(messages: RenderMessage[], width: number): MessageLine[] {
 }
 
 function messageLines(messages: RenderMessage[], width: number, maxLines: number): MessageLine[] {
-  return wrapMessages(messages, width).slice(-maxLines);
+  return wrapMessages(messages, width, true).slice(-maxLines);
 }
 
 export function App({
@@ -116,6 +121,7 @@ export function App({
   const [pending, setPending] = useState<ApprovalCard[]>([]);
   const [view, setView] = useState<View>(initialView);
   const [focus, setFocus] = useState<"list" | "search">("list");
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [fullText, setFullText] = useState(false);
   const [results, setResults] = useState<Row[] | undefined>(undefined);
@@ -415,6 +421,37 @@ export function App({
     });
   };
 
+  const commands: PaletteCommand[] = [
+    { name: "search", label: "搜索会话", shortcut: "/", run: () => setFocus("search") },
+    { name: "approvals", label: "查看待审批", shortcut: "a", run: () => {
+      setFocus("list");
+      setApprovalIdx(0);
+      setView("approvals");
+    } },
+    { name: "pair", label: "显示配对二维码", shortcut: "p", run: () => {
+      setFocus("list");
+      setView("pair");
+      setPairData(undefined);
+      void deps.pair().then(setPairData, (error: unknown) => flash(errorText(error)));
+    } },
+    { name: "logs", label: "查看 daemon 日志", shortcut: "l", run: () => {
+      setFocus("list");
+      setView("logs");
+    } },
+    { name: "settings", label: "打开 daemon 设置", shortcut: "c", run: () => {
+      setFocus("list");
+      setConfig(deps.config.read());
+      setEditing(undefined);
+      setConfirmToken(false);
+      setView("settings");
+    } },
+    { name: "refresh", label: "刷新连接状态和会话", shortcut: "g", run: () => void refresh().then(() => flash("已刷新")) },
+    { name: "help", label: "查看快捷键", shortcut: "?", run: () => {
+      setFocus("list");
+      setView("help");
+    } },
+  ];
+
   // -- 键盘 ---------------------------------------------------------------------
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
@@ -483,6 +520,11 @@ export function App({
     }
 
     // main
+    if (paletteOpen) return;
+    if ((key.shift && key.tab) || (focus === "list" && input === ":")) {
+      setPaletteOpen(true);
+      return;
+    }
     if (focus === "search") {
       if (key.escape) {
         if (query === "") setFocus("list");
@@ -493,7 +535,6 @@ export function App({
     }
 
     if (input === "q") quit({ kind: "quit" });
-    else if (input === "/" ) setFocus("search");
     else if (key.tab) setFullText((f) => !f);
     else if (key.escape && query !== "") setQuery("");
     else if (key.upArrow || input === "k") {
@@ -504,25 +545,11 @@ export function App({
     else if (key.pageUp) setSelected((i) => Math.max(0, i - 10));
     else if (key.return && current !== undefined) openDetail(current);
     else if (input === "o") tryResume(current);
-    else if (input === "a") {
-      setApprovalIdx(0);
-      setView("approvals");
-    } else if (input === "p") {
-      setView("pair");
-      void deps.pair().then(setPairData);
-    } else if (input === "l") setView("logs");
-    else if (input === "?") setView("help");
-    else if (input === "c") {
-      setConfig(deps.config.read());
-      setEditing(undefined);
-      setConfirmToken(false);
-      setView("settings");
-    }
     else if (input === "r") void runControl("重启中", deps.control.restart, "daemon 已重启");
     else if (input === "s") {
       if (daemonUp) void runControl("停止中", deps.control.down, "daemon 已停止（取消开机自启，按 s 再启动）");
       else void runControl("启动中", deps.control.up, "daemon 已启动");
-    } else if (input === "g") void refresh().then(() => flash("已刷新"));
+    } else commands.find((command) => command.shortcut === input)?.run();
   });
 
   // -- 渲染 ---------------------------------------------------------------------
@@ -532,7 +559,7 @@ export function App({
   const header = (
     <Box borderStyle="round" borderColor={daemonUp ? "green" : "red"} flexDirection="column" paddingX={1} width={width}>
       <Box justifyContent="space-between">
-        <Text bold>Claude Remote</Text>
+        <Text bold><Text color="cyan">cr</Text> <Text color="gray">/</Text> Claude Remote</Text>
         <Text>
           {snap === undefined ? (
             <Text color="gray">连接中…</Text>
@@ -568,6 +595,16 @@ export function App({
     </Box>
   );
 
+  if (paletteOpen) {
+    return (
+      <Box flexDirection="column" width={width}>
+        {header}
+        {approvalBanner}
+        <CommandPalette commands={commands} width={width} rows={rows} close={() => setPaletteOpen(false)} />
+      </Box>
+    );
+  }
+
   if (view === "help") {
     return (
       <Box flexDirection="column" width={width}>
@@ -577,6 +614,7 @@ export function App({
           <Text>  ↑↓ / j k   选择              Enter  查看并回复（经 daemon，手机同步）</Text>
           <Text>  o          在本终端接管（仅空闲）   /      搜索，Tab 切 标题/路径 ⇄ 全文</Text>
           <Text>  a          待审批            p      配对二维码</Text>
+          <Text>  : / Shift+Tab 打开命令面板</Text>
           <Text bold>{"\n"}会话详情</Text>
           <Text>  PgUp/PgDn  翻历史（新消息不会顶走正在看的内容）</Text>
           <Text>  Enter      发送回复          Esc    返回列表</Text>
@@ -598,6 +636,7 @@ export function App({
     return (
       <Box flexDirection="column" width={width}>
         {header}
+        {toastLine}
         <Box flexDirection="column" paddingX={2}>
           {pairData === undefined ? (
             <Text color="gray">生成中…（没有 token 时先运行 cr setup）</Text>
@@ -833,7 +872,7 @@ export function App({
         ))}
       </Box>
       {toastLine}
-      <Text color="gray"> ↑↓ 选择 ⏎ 查看/回复 / 搜索 a 审批 ? 帮助 q 退出</Text>
+      <Text color="gray"> ↑↓ 选择 · Enter 打开 · / 搜索 · : 命令 · a 审批</Text>
     </Box>
   );
 }
