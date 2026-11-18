@@ -6,6 +6,7 @@ import type { Api, EventStream, ServerFrame, SessionSummary } from "../api.js";
 import {
   autostartEnabled,
   pairInfo,
+  runContextRelay,
   snapshot,
   terminalQr,
   waitHealthy,
@@ -28,6 +29,7 @@ export interface TuiDeps {
     down: () => Promise<void>;
     restart: () => Promise<boolean>;
   };
+  relay: (args: string[], out: (line: string) => void, signal: AbortSignal) => Promise<number>;
   pair: () => Promise<{ qr: string; bases: string[] } | undefined>;
   readLogTail: (maxLines: number) => string[];
   config: {
@@ -92,9 +94,10 @@ export function realDeps(ctx: Context): TuiDeps {
           },
           restart: () => ctx.attached.restart(),
         },
+    relay: (args, out, signal) => runContextRelay(ctx, args, out, signal),
     pair: async () => {
       const info = pairInfo(ctx);
-      if (info === undefined) return undefined;
+      if (info === undefined || info.bases.length === 0) return undefined;
       return { qr: await terminalQr(info), bases: info.bases };
     },
     readLogTail: (n) => readTailLines(ctx.env.logFile, n),

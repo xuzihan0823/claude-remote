@@ -12,7 +12,7 @@ import { Api, ApiError, type ApprovalCard, type ConnectInfo, type SessionSummary
 import { AttachedDaemon } from "./attached.js";
 import { readDotenv, type CliEnv } from "./env.js";
 import { Launchd, packageProgram, repoProgram, type LaunchdState, type LaunchProgram } from "./launchd.js";
-import { readRelayFile, type RelayFileState, type RestartResult } from "./relay.js";
+import { readRelayFile, runRelay, type RelayFileState, type RestartResult } from "./relay.js";
 
 export interface Context {
   env: CliEnv;
@@ -223,6 +223,40 @@ export async function restartForRelay(ctx: Context): Promise<RestartResult> {
   }
   if (!(await probeHealth(ctx.env.baseUrl))) return { kind: "skipped", note: "已保存。daemon 没在运行：下次启动（打开 cr）时生效" };
   return { kind: "skipped", note: "已保存。daemon 不归 launchd 托管（随 cr 运行或手动启动）：在 cr 里按 r 重启，或重启 daemon 后生效" };
+}
+
+export function runContextRelay(
+  ctx: Context,
+  args: string[],
+  out: (line: string) => void,
+  signal?: AbortSignal,
+): Promise<number> {
+  const api = ctx.api;
+  return runRelay(args, {
+    envFile: ctx.env.envFile,
+    out,
+    fetch,
+    ...(signal === undefined ? {} : { signal }),
+    restart: () => restartForRelay(ctx),
+    reload: async () => {
+      if (api === undefined) return { kind: "inactive", note: "已保存。没有找到 BRIDGE_TOKEN，启动 daemon 后生效" };
+      try {
+        await api.reloadRelay();
+        return { kind: "reloaded" };
+      } catch (error) {
+        if (error instanceof ApiError) {
+          // 旧 daemon 没有这个接口，或 daemon 只监听非回环地址：退回重启
+          if (error.status === 404 || error.status === 403) return { kind: "unsupported" };
+          if (error.status === 400) return { kind: "invalid", message: error.detail ?? error.code };
+        }
+        return { kind: "inactive", note: "已保存。daemon 没在运行：下次启动（打开 cr）时生效" };
+      }
+    },
+    connectInfo: () => {
+      if (api === undefined) return Promise.reject(new Error("没有找到 BRIDGE_TOKEN，先运行 cr setup"));
+      return api.connectInfo();
+    },
+  });
 }
 
 export { pairPayload };

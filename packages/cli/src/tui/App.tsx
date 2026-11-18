@@ -15,6 +15,7 @@
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import wrapAnsi from "wrap-ansi";
 
 import type { ApprovalCard, RenderMessage, SearchMatch, ServerFrame, SessionSummary } from "../api.js";
 import { ApiError } from "../api.js";
@@ -30,15 +31,19 @@ import {
   summarizeInput,
 } from "../format.js";
 import { snapshotRelayLine } from "../relay.js";
+import { CommandPalette, type PaletteCommand } from "./CommandPalette.js";
+import { RelayForm } from "./RelayForm.js";
 import type { ConfigValue, TuiDeps } from "./deps.js";
 
-export type View = "main" | "session" | "approvals" | "pair" | "logs" | "help" | "settings";
+export type View = "main" | "session" | "approvals" | "pair" | "logs" | "help" | "settings" | "relay";
 export type TuiExit =
   | { kind: "quit" }
   | { kind: "resume"; session: SessionSummary }
   /** 连接参数（地址/端口/token）变了：main 重新加载 CliEnv 后再开 TUI，落在 then 视图。 */
   | { kind: "reload"; then: View };
 type Row = SessionSummary & { match?: SearchMatch };
+type PairData = Awaited<ReturnType<TuiDeps["pair"]>>;
+type RelayOutput = { action: string; lines: string[]; code?: number };
 
 const STATUS_COLOR: Record<SessionSummary["status"], string> = {
   idle: "gray",
@@ -79,15 +84,18 @@ function mergeMessages(current: RenderMessage[], incoming: RenderMessage[]): Ren
 
 type MessageLine = { who: string; text: string; color: string };
 
-function wrapMessages(messages: RenderMessage[], width: number): MessageLine[] {
+function wrapMessages(messages: RenderMessage[], width: number, preview = false): MessageLine[] {
   const lines: MessageLine[] = [];
   for (const m of messages) {
     if (m.kind === "thinking" || m.kind === "meta") continue;
     const { who, text } = describeMessage(m);
-    const color = m.role === "user" && m.kind === "text" ? "cyan" : m.kind === "text" ? "white" : "gray";
+    const color = m.isError ? "red" : m.role === "user" && m.kind === "text" ? "cyan" : m.kind === "text" ? "white" : "gray";
     if (m.kind === "text") {
-      const chunks = text.trim().split(/\n+/).filter((l) => l.trim() !== "");
-      chunks.forEach((chunk, i) => lines.push({ who: i === 0 ? who : "", text: fit(chunk, width - 8, false), color }));
+      if (text.trim() === "") continue;
+      const chunks = preview
+        ? text.trim().split(/\n+/).filter((line) => line.trim() !== "").map((line) => fit(line, width - 8, false))
+        : wrapAnsi(text, width - 7, { hard: true, trim: false }).split("\n");
+      chunks.forEach((line, i) => lines.push({ who: i === 0 ? who : "", text: line, color }));
     } else {
       lines.push({ who, text: fit(text, width - 10, false), color });
     }
@@ -96,7 +104,7 @@ function wrapMessages(messages: RenderMessage[], width: number): MessageLine[] {
 }
 
 function messageLines(messages: RenderMessage[], width: number, maxLines: number): MessageLine[] {
-  return wrapMessages(messages, width).slice(-maxLines);
+  return wrapMessages(messages, width, true).slice(-maxLines);
 }
 
 export function App({
@@ -116,6 +124,7 @@ export function App({
   const [pending, setPending] = useState<ApprovalCard[]>([]);
   const [view, setView] = useState<View>(initialView);
   const [focus, setFocus] = useState<"list" | "search">("list");
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [fullText, setFullText] = useState(false);
   const [results, setResults] = useState<Row[] | undefined>(undefined);
@@ -129,7 +138,10 @@ export function App({
   const [toast, setToast] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState<string | undefined>(undefined);
   const [approvalIdx, setApprovalIdx] = useState(0);
-  const [pairData, setPairData] = useState<{ qr: string; bases: string[] } | undefined>(undefined);
+  const [pairState, setPairState] = useState<{ data: PairData; error?: string }>();
+  const [relayOutput, setRelayOutput] = useState<RelayOutput>();
+  const [relayOffset, setRelayOffset] = useState(0);
+  const relayRequest = useRef<AbortController | undefined>(undefined);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [detailSession, setDetailSession] = useState<SessionSummary | undefined>(undefined);
   const [config, setConfig] = useState<ConfigValue[]>(() => (initialView === "settings" ? deps.config.read() : []));
@@ -250,8 +262,16 @@ export function App({
   }, [current?.sessionId, deps.api, view]);
 
   useEffect(() => {
-    if (initialView === "pair") void deps.pair().then(setPairData);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    if (view !== "pair" || paletteOpen) return;
+    let active = true;
+    void deps.pair().then(
+      (data) => { if (active) setPairState({ data }); },
+      (error: unknown) => { if (active) setPairState({ data: undefined, error: errorText(error) }); },
+    );
+    return () => { active = false; };
+  }, [deps, paletteOpen, view]);
+
+  useEffect(() => () => { relayRequest.current?.abort(); }, []);
 
   // -- 日志视图刷新 -----------------------------------------------------------
   useEffect(() => {
@@ -415,10 +435,93 @@ export function App({
     });
   };
 
+  const openPair = (): void => {
+    setFocus("list");
+    setPairState(undefined);
+    setView("pair");
+  };
+
+  const openRelayForm = (): void => {
+    setFocus("list");
+    setRelayOutput(undefined);
+    setView("relay");
+  };
+
+  const runRelayAction = async (action: "status" | "on" | "off" | "add", ...args: string[]): Promise<void> => {
+    if (relayRequest.current !== undefined) return;
+    const request = new AbortController();
+    relayRequest.current = request;
+    setFocus("list");
+    setRelayOffset(0);
+    setRelayOutput({ action, lines: [] });
+    setView("relay");
+    const report = (line: string): void => {
+      if (request.signal.aborted) return;
+      setRelayOutput((current) => current && { ...current, lines: [...current.lines, ...line.split("\n")] });
+    };
+    let code = 1;
+    try {
+      code = await deps.relay([action, ...args], report, request.signal);
+    } catch (error) {
+      report(`✗ ${errorText(error)}`);
+    } finally {
+      relayRequest.current = undefined;
+      if (!request.signal.aborted) setRelayOutput((current) => current && { ...current, code });
+    }
+  };
+
+  const relayHeight = Math.max(1, rows - 8);
+  const commands: PaletteCommand[] = [
+    { name: "search", label: "搜索会话", run: () => {
+      setView("main");
+      setFocus("search");
+    } },
+    { name: "approvals", label: "查看待审批", shortcut: "a", run: () => {
+      setFocus("list");
+      setApprovalIdx(0);
+      setView("approvals");
+    } },
+    { name: "pair", label: "显示手机配对二维码", shortcut: "p", run: openPair },
+    { name: "relay status", label: "查看 Relay 连接和手机地址", run: () => void runRelayAction("status") },
+    { name: "relay add", label: "添加 Relay 或更新密钥", run: openRelayForm },
+    { name: "relay on", label: "启用已配置的 Relay", run: () => void runRelayAction("on") },
+    { name: "relay off", label: "停用 Relay 并保留配置", run: () => void runRelayAction("off") },
+    { name: "logs", label: "查看 daemon 日志", shortcut: "l", run: () => {
+      setFocus("list");
+      setView("logs");
+    } },
+    { name: "config", label: "查看和修改 daemon 配置", shortcut: "c", run: () => {
+      setFocus("list");
+      setConfig(deps.config.read());
+      setEditing(undefined);
+      setConfirmToken(false);
+      setView("settings");
+    } },
+    { name: "refresh", label: "刷新连接状态和会话", shortcut: "g", run: () => void refresh().then(() => flash("已刷新")) },
+    { name: "help", label: "查看快捷键", shortcut: "?", run: () => {
+      setFocus("list");
+      setView("help");
+    } },
+  ];
+
   // -- 键盘 ---------------------------------------------------------------------
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
       quit({ kind: "quit" });
+      return;
+    }
+
+    if (paletteOpen) return;
+    if (view === "relay") {
+      if (relayOutput !== undefined && relayOutput.code === undefined) return;
+      if (key.escape) setView("main");
+      if (relayOutput === undefined) return;
+      if (input === "a") openRelayForm();
+      else if (input === "p") openPair();
+      else if (input === "g") void runRelayAction("status");
+      else if (input === "/") setPaletteOpen(true);
+      else if (key.pageUp) setRelayOffset((offset) => Math.max(0, offset - relayHeight));
+      else if (key.pageDown) setRelayOffset((offset) => Math.min(Math.max(0, relayOutput.lines.length - relayHeight), offset + relayHeight));
       return;
     }
 
@@ -478,11 +581,16 @@ export function App({
     }
 
     if (view === "pair" || view === "logs" || view === "help") {
-      if (key.escape || input === "q") setView("main");
+      if (input === "/") setPaletteOpen(true);
+      else if (key.escape || input === "q") setView("main");
       return;
     }
 
     // main
+    if ((key.shift && key.tab) || (focus === "list" && (input === "/" || input === ":"))) {
+      setPaletteOpen(true);
+      return;
+    }
     if (focus === "search") {
       if (key.escape) {
         if (query === "") setFocus("list");
@@ -493,7 +601,6 @@ export function App({
     }
 
     if (input === "q") quit({ kind: "quit" });
-    else if (input === "/" ) setFocus("search");
     else if (key.tab) setFullText((f) => !f);
     else if (key.escape && query !== "") setQuery("");
     else if (key.upArrow || input === "k") {
@@ -504,25 +611,11 @@ export function App({
     else if (key.pageUp) setSelected((i) => Math.max(0, i - 10));
     else if (key.return && current !== undefined) openDetail(current);
     else if (input === "o") tryResume(current);
-    else if (input === "a") {
-      setApprovalIdx(0);
-      setView("approvals");
-    } else if (input === "p") {
-      setView("pair");
-      void deps.pair().then(setPairData);
-    } else if (input === "l") setView("logs");
-    else if (input === "?") setView("help");
-    else if (input === "c") {
-      setConfig(deps.config.read());
-      setEditing(undefined);
-      setConfirmToken(false);
-      setView("settings");
-    }
     else if (input === "r") void runControl("重启中", deps.control.restart, "daemon 已重启");
     else if (input === "s") {
       if (daemonUp) void runControl("停止中", deps.control.down, "daemon 已停止（取消开机自启，按 s 再启动）");
       else void runControl("启动中", deps.control.up, "daemon 已启动");
-    } else if (input === "g") void refresh().then(() => flash("已刷新"));
+    } else commands.find((command) => command.shortcut === input)?.run();
   });
 
   // -- 渲染 ---------------------------------------------------------------------
@@ -532,7 +625,7 @@ export function App({
   const header = (
     <Box borderStyle="round" borderColor={daemonUp ? "green" : "red"} flexDirection="column" paddingX={1} width={width}>
       <Box justifyContent="space-between">
-        <Text bold>Claude Remote</Text>
+        <Text bold><Text color="cyan">cr</Text> <Text color="gray">/</Text> Claude Remote</Text>
         <Text>
           {snap === undefined ? (
             <Text color="gray">连接中…</Text>
@@ -568,6 +661,16 @@ export function App({
     </Box>
   );
 
+  if (paletteOpen) {
+    return (
+      <Box flexDirection="column" width={width}>
+        {header}
+        {approvalBanner}
+        <CommandPalette commands={commands} width={width} rows={rows} close={() => setPaletteOpen(false)} />
+      </Box>
+    );
+  }
+
   if (view === "help") {
     return (
       <Box flexDirection="column" width={width}>
@@ -575,8 +678,9 @@ export function App({
         <Box flexDirection="column" paddingX={2} paddingY={1}>
           <Text bold>会话列表</Text>
           <Text>  ↑↓ / j k   选择              Enter  查看并回复（经 daemon，手机同步）</Text>
-          <Text>  o          在本终端接管（仅空闲）   /      搜索，Tab 切 标题/路径 ⇄ 全文</Text>
-          <Text>  a          待审批            p      配对二维码</Text>
+          <Text>  o 在本终端接管（仅空闲） · a 待审批 · p 配对二维码</Text>
+          <Text>  / 打开命令面板 · /search 搜索，Tab 切 标题/路径 ⇄ 全文</Text>
+          <Text>  /relay add 添加 Relay · /pair 配对 · /logs 日志 · /config 设置</Text>
           <Text bold>{"\n"}会话详情</Text>
           <Text>  PgUp/PgDn  翻历史（新消息不会顶走正在看的内容）</Text>
           <Text>  Enter      发送回复          Esc    返回列表</Text>
@@ -594,24 +698,51 @@ export function App({
     );
   }
 
+  if (view === "relay") {
+    return (
+      <Box flexDirection="column" width={width}>
+        {header}
+        {relayOutput === undefined ? (
+          <RelayForm width={width} save={(url, secret) => void runRelayAction("add", url, secret)} />
+        ) : (
+          <Box flexDirection="column" paddingX={1}>
+            <Text bold>/relay {relayOutput.action}</Text>
+            {relayOutput.lines.slice(relayOffset, relayOffset + relayHeight).map((line, index) => (
+              <Text key={index} wrap="truncate-end" {...(line.startsWith("✗") ? { color: "red" } : {})}>{line}</Text>
+            ))}
+            {relayOutput.code === undefined ? <Text color="yellow">处理中…</Text> : (
+              <Text color="gray">a 添加 · p 扫码 · g 刷新 · / 命令 · Esc 返回
+                {relayOutput.lines.length > relayHeight ? " · PgUp/PgDn 翻页" : ""}
+              </Text>
+            )}
+          </Box>
+        )}
+      </Box>
+    );
+  }
+
   if (view === "pair") {
     return (
       <Box flexDirection="column" width={width}>
         {header}
+        {toastLine}
         <Box flexDirection="column" paddingX={2}>
-          {pairData === undefined ? (
-            <Text color="gray">生成中…（没有 token 时先运行 cr setup）</Text>
+          <Text bold>/pair · 手机配对</Text>
+          {pairState === undefined ? (
+            <Text color="gray">正在生成二维码…</Text>
+          ) : pairState.data === undefined ? (
+            <Text color="yellow">{pairState.error ?? "没有可配对的地址。可用 /relay add 添加 Relay，或检查本机网络。"}</Text>
           ) : (
             <>
-              <Text>{pairData.qr}</Text>
+              <Text>{pairState.data.qr}</Text>
               <Text>iPhone 相机扫码，点「在 Claude Remote 中打开」即可配对</Text>
-              {pairData.bases.map((b) => (
-                <Text key={b} color="gray">  {b}</Text>
+              {pairState.data.bases.map((base) => (
+                <Text key={base} color="gray" wrap="truncate-end">  {base}</Text>
               ))}
               <Text color="yellow">二维码就是凭据，别截图外传</Text>
             </>
           )}
-          <Text color="gray">Esc 返回</Text>
+          <Text color="gray">/ 命令 · Esc 返回</Text>
         </Box>
       </Box>
     );
@@ -677,16 +808,17 @@ export function App({
   }
 
   if (view === "logs") {
-    const visible = logLines.slice(-Math.max(5, rows - 6));
+    const visible = logLines.slice(-Math.max(1, rows - 6));
     return (
       <Box flexDirection="column" width={width}>
         {header}
         <Box flexDirection="column" paddingX={1}>
+          <Text bold>/logs · daemon 日志</Text>
           {visible.length === 0 ? <Text color="gray">（日志为空）</Text> : visible.map((line, i) => (
             <Text key={i} {...(/error|fail|错误/i.test(line) ? { color: "red" } : {})}>{fit(line, inner, false)}</Text>
           ))}
         </Box>
-        <Text color="gray"> 每秒刷新 · Esc 返回</Text>
+        <Text color="gray"> 每秒刷新 · / 命令 · Esc 返回</Text>
       </Box>
     );
   }
@@ -794,7 +926,7 @@ export function App({
       <Box borderStyle="single" borderColor={focus === "search" ? "cyan" : "gray"} paddingX={1} width={width}>
         <Text>🔍 </Text>
         <Box flexGrow={1}>
-          <TextInput value={query} onChange={setQuery} focus={focus === "search"} placeholder="按 / 搜索会话" showCursor={focus === "search"} />
+          <TextInput value={query} onChange={setQuery} focus={focus === "search"} placeholder="输入 /search 搜索会话" showCursor={focus === "search"} />
         </Box>
         <Text color="gray">{searching ? "搜索中… " : ""}[Tab] </Text>
         <Text color={fullText ? "gray" : "cyan"}>标题/路径</Text>
@@ -833,7 +965,7 @@ export function App({
         ))}
       </Box>
       {toastLine}
-      <Text color="gray"> ↑↓ 选择 ⏎ 查看/回复 / 搜索 a 审批 ? 帮助 q 退出</Text>
+      <Text color="gray"> ↑↓ 选择 · Enter 打开 · / 命令 · a 审批</Text>
     </Box>
   );
 }

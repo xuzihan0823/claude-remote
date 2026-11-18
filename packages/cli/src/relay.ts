@@ -1,5 +1,7 @@
 // cr relay：RELAY_* 由这里管理，设备身份由所有 relay 共用。
 
+import { setTimeout as delay } from "node:timers/promises";
+
 import { isRelaySecret, MIN_RELAY_SECRET_LENGTH, normalizeRelayUrl, relayBase, relayConfigIndexes } from "@claude-remote/daemon/config";
 import { deriveDeviceId, generateDeviceKey, isDeviceKey } from "@claude-remote/relay/protocol";
 
@@ -35,10 +37,11 @@ export function checkRelaySecret(secret: string): void {
   if (!isRelaySecret(secret)) throw new Error(`relay 密钥至少 ${MIN_RELAY_SECRET_LENGTH} 个字符，且不能含空格、中文、引号、# 或反斜杠`);
 }
 
-export async function probeRelay(url: string, fetchImpl: typeof fetch): Promise<void> {
+export async function probeRelay(url: string, fetchImpl: typeof fetch, signal?: AbortSignal): Promise<void> {
   let res: Response;
   try {
-    res = await fetchImpl(`${url}/healthz`, { signal: AbortSignal.timeout(8000) });
+    const timeout = AbortSignal.timeout(8000);
+    res = await fetchImpl(`${url}/healthz`, { signal: signal === undefined ? timeout : AbortSignal.any([timeout, signal]) });
   } catch (error) {
     const { cause } = error as { cause?: { code?: string; message?: string } };
     const reason = cause?.code ?? cause?.message ?? (error as Error).message;
@@ -199,6 +202,7 @@ export interface RelayDeps {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   waitMs?: number;
+  signal?: AbortSignal;
 }
 
 type Expectation = { kind: "connected"; bases: string[] } | { kind: "disconnected"; bases?: string[] };
@@ -210,11 +214,12 @@ type WaitResult =
   | { kind: "no_daemon" };
 
 async function waitForRelay(deps: RelayDeps, expect: Expectation): Promise<WaitResult> {
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const sleep = deps.sleep ?? ((ms: number) => delay(ms, undefined, deps.signal === undefined ? {} : { signal: deps.signal }));
   const now = deps.now ?? Date.now;
   const deadline = now() + (deps.waitMs ?? 15_000);
   let last: WaitResult = { kind: "no_daemon" };
   for (;;) {
+    deps.signal?.throwIfAborted();
     try {
       const { relays } = await deps.connectInfo();
       if (!Array.isArray(relays)) return { kind: "old_daemon" };
@@ -311,6 +316,7 @@ async function relayStatus(deps: RelayDeps): Promise<number> {
 }
 
 export async function runRelay(args: string[], deps: RelayDeps): Promise<number> {
+  deps.signal?.throwIfAborted();
   const [sub, ...rest] = args;
   switch (sub) {
     case "add": {
@@ -320,7 +326,8 @@ export async function runRelay(args: string[], deps: RelayDeps): Promise<number>
       checkRelaySecret(secret);
       const previous = readRelayFile(deps.envFile);
       deps.out(`… 检查 ${url}`);
-      await probeRelay(url, deps.fetch);
+      await probeRelay(url, deps.fetch, deps.signal);
+      deps.signal?.throwIfAborted();
       deps.out("✓ relay 在线");
       const { deviceId, reusedKey } = writeRelayConfig(deps.envFile, url, secret);
       deps.out(`✓ 已写入配置（设备 ID ${deviceId}，${reusedKey ? "沿用已有设备私钥" : "已生成设备私钥"}）`);
