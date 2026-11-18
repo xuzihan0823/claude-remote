@@ -11,7 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { readConfig, rotateToken, setConfig } from "../src/config.js";
-import type { DaemonSnapshot } from "../src/daemon-control.js";
+import { configuredRelayBases, type DaemonSnapshot } from "../src/daemon-control.js";
+import { readRelayFile, runRelay } from "../src/relay.js";
 import { App, type TuiExit } from "../src/tui/App.js";
 import type { TuiDeps } from "../src/tui/deps.js";
 
@@ -75,6 +76,7 @@ function fakeDeps(overrides: Partial<TuiDeps> = {}) {
       set: (field, raw) => setConfig(envFile, field, raw),
       rotateToken: () => void rotateToken(envFile),
     },
+    relay: async () => 0,
     pair: async () => ({ qr: "[QR]", bases: ["http://100.64.0.10:8787"] }),
     readLogTail: () => ["line 1", "error: boom"],
     ...overrides,
@@ -84,6 +86,15 @@ function fakeDeps(overrides: Partial<TuiDeps> = {}) {
 
 async function settle(ms = 80): Promise<void> {
   await delay(ms);
+}
+
+async function slashCommand(ui: ReturnType<typeof render>, name: string): Promise<void> {
+  ui.stdin.write("/");
+  await settle();
+  ui.stdin.write(name);
+  await settle();
+  ui.stdin.write("\r");
+  await settle();
 }
 
 test("主界面：会话列表、运行状态、待审批横幅、预览", async () => {
@@ -125,12 +136,11 @@ test("审批：a 进入、y 允许一次；WS resolved 后横幅消失", async (
   ui.unmount();
 });
 
-test("搜索：/ 输入关键词，Tab 切全文，结果带片段", async () => {
+test("搜索：/search 输入关键词，Tab 切全文，结果带片段", async () => {
   const { deps, calls } = fakeDeps();
   const ui = render(<App deps={deps} onExit={() => {}} />);
   await settle(200);
-  ui.stdin.write("/");
-  await settle(30);
+  await slashCommand(ui, "search");
   ui.stdin.write("filter");
   await settle(30);
   ui.stdin.write("\t");
@@ -357,8 +367,7 @@ test("命令面板：筛选、方向键执行与 Esc 恢复搜索", async (t) =>
   const ui = render(<App deps={deps} onExit={() => {}} />);
   t.after(ui.unmount);
   await settle(200);
-  ui.stdin.write("/");
-  await settle();
+  await slashCommand(ui, "search");
   ui.stdin.write("filter");
   await settle(300);
   ui.stdin.write("\x1b[Z");
@@ -395,6 +404,123 @@ test("命令面板：筛选、方向键执行与 Esc 恢复搜索", async (t) =>
   assert.match(ui.lastFrame() ?? "", /\[QR\]/);
 });
 
+test("斜杠命令：添加 Relay、用新地址扫码、在控制台查看日志和设置", async (t) => {
+  const { deps, envFile } = fakeDeps();
+  const url = "https://relay.example.com";
+  const secret = "x".repeat(40);
+  let reloads = 0;
+  deps.relay = (args, out, signal) => runRelay(args, {
+    envFile, out, signal,
+    fetch: async (input) => {
+      assert.equal(String(input), `${url}/healthz`);
+      return Response.json({ ok: true });
+    },
+    reload: async () => { reloads += 1; return { kind: "reloaded" }; },
+    restart: async () => assert.fail("应使用热加载"),
+    connectInfo: async () => ({ bases: [], relays: readRelayFile(envFile).relays.map((entry) => ({
+      state: "connected", base: entry.base!, since: now,
+    })) }),
+  });
+  deps.pair = async () => ({ qr: "[QR]", bases: configuredRelayBases(envFile) });
+  const ui = render(<App deps={deps} onExit={() => {}} />);
+  t.after(ui.unmount);
+  await settle();
+  await slashCommand(ui, "relay add");
+  assert.match(ui.lastFrame() ?? "", /地址 ❯/);
+  ui.stdin.write("invalid");
+  await settle();
+  ui.stdin.write("\r");
+  await settle();
+  assert.match(ui.lastFrame() ?? "", /请输入有效的 Relay 地址/);
+  ui.stdin.write("\x1b");
+  await settle();
+  assert.equal(readRelayFile(envFile).configured, false);
+
+  await slashCommand(ui, "relay add");
+  ui.stdin.write(`${url}/`);
+  await settle();
+  ui.stdin.write("\r");
+  await settle();
+  assert.match(ui.lastFrame() ?? "", /密钥 ❯/);
+  ui.stdin.write("bad");
+  await settle();
+  ui.stdin.write("\r");
+  await settle();
+  assert.match(ui.lastFrame() ?? "", /relay 密钥至少/);
+  assert.equal(readRelayFile(envFile).configured, false);
+  ui.stdin.write("\x7f");
+  await settle(30);
+  ui.stdin.write("\x7f");
+  await settle(30);
+  ui.stdin.write("\x7f");
+  await settle(30);
+  ui.stdin.write(secret);
+  await settle();
+  assert.match(ui.lastFrame() ?? "", /\*{20}/);
+  assert.ok(ui.frames.every((frame) => !frame.includes(secret)));
+  ui.stdin.write("\r");
+  await settle(150);
+  assert.match(ui.lastFrame() ?? "", /已连接 relay/);
+  assert.equal(readRelayFile(envFile).relays[0]?.url, url);
+  assert.equal(reloads, 1);
+
+  await slashCommand(ui, "pair");
+  assert.match(ui.lastFrame() ?? "", /\[QR\]/);
+  assert.match(ui.lastFrame() ?? "", /https:\/\/relay\.example\.com\/d\//);
+  await slashCommand(ui, "pair");
+  assert.match(ui.lastFrame() ?? "", /\[QR\]/);
+  await slashCommand(ui, "logs");
+  assert.match(ui.lastFrame() ?? "", /\/logs · daemon 日志/);
+  assert.match(ui.lastFrame() ?? "", /error: boom/);
+  await slashCommand(ui, "config");
+  assert.match(ui.lastFrame() ?? "", /重置 token/);
+  assert.ok(ui.frames.every((frame) => !frame.includes(secret)));
+});
+
+test("Relay 检查失败时显示错误，可在控制台重试，离开后中止检查", async (t) => {
+  const { deps, envFile } = fakeDeps();
+  let activeSignal: AbortSignal | undefined;
+  let waitForAbort = false;
+  deps.relay = (args, out, signal) => runRelay(args, {
+    envFile, out, signal,
+    fetch: async () => {
+      activeSignal = signal;
+      if (!waitForAbort) return Response.json({ ok: false }, { status: 503 });
+      await delay(10_000, undefined, { signal });
+      return Response.json({ ok: true });
+    },
+    restart: async () => assert.fail("未写入配置时不能重启"),
+    connectInfo: async () => ({ bases: [], relays: [] }),
+  });
+  const ui = render(<App deps={deps} onExit={() => {}} />);
+  t.after(ui.unmount);
+  await settle();
+  await slashCommand(ui, "relay add");
+  const fill = async (): Promise<void> => {
+    ui.stdin.write("https://relay.example.com");
+    await settle();
+    ui.stdin.write("\r");
+    await settle();
+    ui.stdin.write("x".repeat(40));
+    await settle();
+    ui.stdin.write("\r");
+    await settle();
+  };
+  await fill();
+  assert.match(ui.lastFrame() ?? "", /503/);
+  assert.match(ui.lastFrame() ?? "", /a 添加/);
+  assert.equal(readRelayFile(envFile).configured, false);
+  ui.stdin.write("a");
+  await settle();
+  waitForAbort = true;
+  await fill();
+  assert.match(ui.lastFrame() ?? "", /处理中/);
+  ui.unmount();
+  await settle();
+  assert.equal(activeSignal?.aborted, true);
+  assert.equal(readRelayFile(envFile).configured, false);
+});
+
 test("会话详情：长回复完整换行，保留代码缩进和空行", async (t) => {
   const longLine = `${"中".repeat(45)}回答末尾`;
   const { deps } = fakeDeps();
@@ -418,7 +544,7 @@ test("底部提示只留常用键，其余收进帮助页", async () => {
   const ui = render(<App deps={deps} onExit={() => {}} />);
   await settle(200);
   const main = ui.lastFrame() ?? "";
-  assert.match(main, /\/ 搜索 · : 命令 · a 审批/);
+  assert.match(main, /\/ 命令 · a 审批/);
   assert.doesNotMatch(main, /p 配对/);
   ui.stdin.write("?");
   await settle();

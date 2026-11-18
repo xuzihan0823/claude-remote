@@ -7,7 +7,7 @@ import { fit } from "../format.js";
 export interface PaletteCommand {
   name: string;
   label: string;
-  shortcut: string;
+  shortcut?: string;
   run: () => void;
 }
 
@@ -19,7 +19,7 @@ export function CommandPalette({ commands, width, rows, close }: {
 }): React.JSX.Element {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
-  const needle = query.trim().toLowerCase().replace(/^\//, "");
+  const needle = query.trim().toLowerCase().replace(/^\//, "").replace(/\s+/g, " ");
   const matches = commands.filter(({ name, label }) => name.includes(needle) || label.includes(needle));
   const listHeight = Math.max(1, rows - 11);
   const start = Math.max(0, selected - listHeight + 1);
@@ -35,7 +35,7 @@ export function CommandPalette({ commands, width, rows, close }: {
       <Box borderStyle="round" borderColor="cyan" paddingX={1} flexDirection="column">
         <Text bold>命令面板</Text>
         <Box>
-          <Text color="cyan">❯ </Text>
+          <Text color="cyan">/</Text>
           <TextInput
             value={query}
             placeholder="输入命令名或用途"

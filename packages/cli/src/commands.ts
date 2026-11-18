@@ -9,7 +9,7 @@ import { ApiError, type SessionSummary } from "./api.js";
 import {
   autostartEnabled,
   pairInfo,
-  restartForRelay,
+  runContextRelay,
   resumeInTerminal,
   makeContext,
   snapshot,
@@ -22,7 +22,7 @@ import { CONFIG_FIELDS, findField, readConfig, rotateToken, setConfig } from "./
 import { countProjects, detectClaude, inspectClaude, type DetectDeps, type DetectedClaude } from "./detect.js";
 import { ensureToken, loadCliEnv } from "./env.js";
 import { isTailscaleAddress, normalizeTailscaleServeUrl } from "@claude-remote/daemon/pair";
-import { readRelayFile, runRelay, snapshotRelayLine } from "./relay.js";
+import { readRelayFile, snapshotRelayLine } from "./relay.js";
 import { configureTailscaleServe } from "./tailscale.js";
 import {
   describeMessage,
@@ -56,7 +56,7 @@ export const HELP = `cr — Claude Remote 控制台
   cr open <id>          在当前终端 claude --resume 接着聊
   cr uninstall          移除 launchd 服务（不删数据）
 
-控制台里这些操作都有快捷键（进去按 ? 查看）；子命令更适合脚本和一次性查看。
+进入控制台后按 /，可使用 /relay add、/pair、/logs、/config 等命令。
 `;
 
 function touch(file: string): void {
@@ -224,31 +224,7 @@ function channelLines(snap: DaemonSnapshot, localBases: string[], envFile: strin
 }
 
 export async function cmdRelay(ctx: Context, args: string[]): Promise<void> {
-  const api = ctx.api;
-  process.exitCode = await runRelay(args, {
-    envFile: ctx.env.envFile,
-    out: (line) => console.log(line),
-    fetch,
-    restart: () => restartForRelay(ctx),
-    reload: async () => {
-      if (api === undefined) return { kind: "inactive", note: "已保存。没有找到 BRIDGE_TOKEN，启动 daemon 后生效" };
-      try {
-        await api.reloadRelay();
-        return { kind: "reloaded" };
-      } catch (error) {
-        if (error instanceof ApiError) {
-          // 旧 daemon 没有这个接口，或 daemon 只监听非回环地址：退回重启
-          if (error.status === 404 || error.status === 403) return { kind: "unsupported" };
-          if (error.status === 400) return { kind: "invalid", message: error.detail ?? error.code };
-        }
-        return { kind: "inactive", note: "已保存。daemon 没在运行：下次启动（打开 cr）时生效" };
-      }
-    },
-    connectInfo: () => {
-      if (api === undefined) return Promise.reject(new Error("没有找到 BRIDGE_TOKEN，先运行 cr setup"));
-      return api.connectInfo();
-    },
-  });
+  process.exitCode = await runContextRelay(ctx, args, (line) => console.log(line));
 }
 
 export async function cmdLogs(ctx: Context): Promise<void> {
@@ -395,7 +371,7 @@ export async function cmdSetup(ctx: Context, binPath: string): Promise<void> {
   if (action === "migrated") {
     console.log("提示：菜单栏 App 已不再需要，可从「登录项」里移除并删掉 ClaudeRemote.app");
   }
-  console.log("\n下一步：运行 cr 打开控制台，按 p 用 iPhone 扫码配对");
+  console.log("\n下一步：运行 cr 打开控制台，输入 /pair 用 iPhone 扫码配对");
 }
 
 export function describeError(error: unknown): string {
