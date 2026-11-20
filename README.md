@@ -36,13 +36,22 @@ The host needs macOS or Linux, **Node.js 22.13.0 or later**, and an installed an
    cr
    ```
 
-2. Pick a network route. Keep the daemon running during pairing.
+2. Pick a network route. Keep `cr` open during pairing. To run a console command, press `/`, type its name, then press Enter.
 
    - **Tailscale Serve:** Sign the host and iPhone into the same tailnet, then run `cr pair --tailscale` on the host.
    - **Same Wi-Fi:** Run `cr config set host 0.0.0.0` and restart the daemon as prompted.
-   - **Self-hosted Relay:** [Deploy Relay on a public Linux server](deploy/relay/README.md), then run the generated `cr relay add` command on the Claude Code host.
+   - **Self-hosted Relay:** [Deploy Relay on a public Linux server](deploy/relay/README.md), then use `/relay add` in the host console. Enter the Relay URL and secret when prompted. The secret is masked.
 3. Download the [latest iPhone `.ipa`](https://github.com/xuzihan0823/claude-remote/releases/latest). Sign it with your own signing setup before sideloading it.
-4. Run `cr pair` on the host and scan the QR code. If you set up Tailscale Serve with `cr pair --tailscale`, you can scan the QR code from that command.
+4. Use `/pair` in the host console and scan the QR code. If you set up Tailscale Serve with `cr pair --tailscale`, you can scan the QR code from that command.
+
+### Update an npm installation
+
+```sh
+npm install -g @anyyu/claude-remote@latest
+cr --version
+```
+
+Reopen `cr` after updating. The slash commands are available in `0.2.0` and later.
 
 ### Set up with a terminal agent
 
@@ -93,7 +102,19 @@ The daemon exposes HTTP APIs, WebSocket, and local pairing endpoints. The root U
 
 ## CLI reference
 
-Run `cr` for the full-screen console. It supports browsing and searching sessions, live output, approvals, pairing, and logs. Press `?` for keyboard shortcuts.
+Run `cr` for the full-screen console. Press `/` to open the command menu or `?` for keyboard shortcuts.
+
+| Console command | What it does |
+| --- | --- |
+| `/relay add` | Add a self-hosted Relay or update its secret. The console reports the connection result. |
+| `/relay status` | Show Relay connections and phone addresses. |
+| `/relay on` / `/relay off` | Enable or disable Relay while keeping its settings. |
+| `/pair` | Show the pairing QR code for the current connection settings. |
+| `/logs` | Follow recent daemon logs. The view refreshes every second. |
+| `/config` | View or change daemon settings. |
+| `/search` | Search sessions. Press Tab to switch between title and path search and full-text search. |
+
+Shell commands are also available for scripts and quick operations.
 
 | Command | What it does |
 | --- | --- |
