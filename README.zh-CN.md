@@ -133,7 +133,7 @@ cr 命令行 (packages/cli)：全屏 TUI 控制台 · 启停 · 配对 · Relay 
 
 **安装 `cr`**
 
-`npm i -g @anyyu/claude-remote`
+`npm i -g @anyyu/claude-remote` 后运行 `cr`
 
 </td>
 
@@ -143,7 +143,7 @@ cr 命令行 (packages/cli)：全屏 TUI 控制台 · 启停 · 配对 · Relay 
 
 **打通网络**
 
-Tailscale Serve 或自建 Relay
+Tailscale Serve 或自建 Relay。部署 Relay 后，在 `cr` 中用 `/relay add` 输入地址和密钥。
 
 </td>
 
@@ -163,12 +163,21 @@ Tailscale Serve 或自建 Relay
 
 **扫码配对**
 
-运行 `cr pair` 开始使用
+在 `cr` 中用 `/pair` 显示二维码，再用 iPhone 扫码
 
 </td>
 
 </tr>
 </table>
+
+### 升级 npm 安装
+
+```sh
+npm install -g @anyyu/claude-remote@latest
+cr --version
+```
+
+升级后重新打开 `cr`。斜杠命令从 `0.2.0` 开始提供。
 
 ### 一键交给 Agent 自动部署
 
@@ -209,7 +218,19 @@ Tailscale Serve 或自建 Relay
 
 ## `cr` 控制台与常用命令
 
-直接运行 `cr` 会进入全屏 TUI 控制台（支持会话列表、搜索、详情回看、实时输出、审批、配对二维码与日志查看；进入后按 `?` 查看全部快捷键）。子命令适合脚本或快速操作：
+运行 `cr` 进入全屏控制台。按 `/` 打开命令菜单，输入命令名后按 Enter。按 `?` 可查看快捷键。
+
+| 控制台命令 | 用途 |
+|---|---|
+| `/relay add` | 添加自建 Relay 或更新密钥。按提示输入地址和密钥，密钥用掩码显示，界面会显示连接结果。 |
+| `/relay status` | 查看 Relay 连接状态和手机访问地址。 |
+| `/relay on` / `/relay off` | 启用或停用 Relay，保留已保存的配置。 |
+| `/pair` | 根据当前连接配置显示配对二维码。首次配置 Tailscale Serve 时，使用 `cr pair --tailscale`。 |
+| `/logs` | 查看最近的 daemon 日志，每秒刷新。 |
+| `/config` | 查看或修改 daemon 配置。 |
+| `/search` | 搜索会话，按 Tab 在标题和路径搜索与全文搜索之间切换。 |
+
+在 shell 中也可以直接运行以下子命令，用于脚本或快速操作。
 
 | 命令 | 用途 |
 |---|---|
