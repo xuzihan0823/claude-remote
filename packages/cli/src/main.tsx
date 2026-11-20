@@ -1,6 +1,7 @@
 // cr 入口：无参数且在 TTY 中 → 全屏 TUI；否则执行子命令。
 
 import { render } from "ink";
+import pkg from "../package.json" with { type: "json" };
 
 import {
   cmdConfig,
@@ -74,7 +75,7 @@ export async function main(argv: string[], binPath: string): Promise<void> {
     return;
   }
   if (cmd === "-v" || cmd === "--version") {
-    console.log("cr 0.1.0");
+    console.log(`cr ${pkg.version}`);
     return;
   }
 

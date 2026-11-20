@@ -1,6 +1,6 @@
 {
   "name": "@claude-remote/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "cr：终端里的 Claude Remote 控制台（替代 macOS 菜单栏 App）",
