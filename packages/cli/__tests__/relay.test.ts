@@ -364,3 +364,59 @@ test("relay add：daemon 没在运行时只保存，不尝试重启", async () =
   assert.equal(h.restarts, 0);
   assert.ok(h.lines.some((line) => line.includes("下次启动")));
 });
+
+test("relay status：error + unreachable → 分层探测标注失败阶段", async () => {
+  const base = `${URL_}/d/testdevice`;
+
+  // 阶段1：fetch 失败 → 公网或进程不可达
+  const hFail = harness(envFile(), {
+    statuses: [{ state: "error", error: "unreachable", base, since: 0 }],
+    fetch: async () => Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } })),
+  });
+  await runRelay(["status"], hFail.deps);
+  assert.match(hFail.lines.find((l) => l.startsWith("状态")) ?? "", /阶段1/);
+
+  // 阶段3：/healthz 通 → relay 进程正常，WS 连接失败
+  const hOk = harness(envFile(), {
+    statuses: [{ state: "error", error: "unreachable", base, since: 0 }],
+  });
+  await runRelay(["status"], hOk.deps);
+  assert.match(hOk.lines.find((l) => l.startsWith("状态")) ?? "", /阶段3/);
+});
+
+test("relay status：daemon 未运行 → 分层探测告知 relay 进程在线状态", async () => {
+  const file = envFile();
+  await runRelay(["add", URL_, SECRET], harness(file).deps);
+
+  // relay 进程无响应
+  const hDown = harness(file, {
+    statuses: [new Error("fetch failed")],
+    fetch: async () => Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } })),
+  });
+  await runRelay(["status"], hDown.deps);
+  assert.match(hDown.lines.find((l) => l.startsWith("状态")) ?? "", /relay 进程也无响应/);
+
+  // relay 进程在线
+  const hOnline = harness(file, { statuses: [new Error("fetch failed")] });
+  await runRelay(["status"], hOnline.deps);
+  assert.match(hOnline.lines.find((l) => l.startsWith("状态")) ?? "", /relay 进程在线/);
+});
+
+test("relay status：鉴权类错误（auth/replaced）不触发分层探测", async () => {
+  const base = `${URL_}/d/testdevice`;
+  let probed = false;
+  const fetchSpy: typeof fetch = async (input) => {
+    probed = true;
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  for (const error of ["auth", "replaced"] as const) {
+    probed = false;
+    const h = harness(envFile(), {
+      statuses: [{ state: "error", error, base, since: 0 }],
+      fetch: fetchSpy,
+    });
+    await runRelay(["status"], h.deps);
+    assert.equal(probed, false, `${error} 不应触发 /healthz 探测`);
+    assert.doesNotMatch(h.lines.find((l) => l.startsWith("状态")) ?? "", /阶段/);
+  }
+});

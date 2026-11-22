@@ -289,6 +289,20 @@ async function applyRelay(deps: RelayDeps, expect: Expectation): Promise<number>
   }
 }
 
+/** 探测 relay 进程是否在线；不抛异常，只返回阶段标记。 */
+async function probeRelayStage(
+  url: string,
+  fetchImpl: typeof fetch,
+  signal?: AbortSignal,
+): Promise<"tls_fail" | "process_ok"> {
+  try {
+    await probeRelay(url, fetchImpl, signal);
+    return "process_ok";
+  } catch {
+    return "tls_fail";
+  }
+}
+
 async function relayStatus(deps: RelayDeps): Promise<number> {
   const file = readRelayFile(deps.envFile);
   let statuses: RelayStatus[] | undefined;
@@ -305,11 +319,41 @@ async function relayStatus(deps: RelayDeps): Promise<number> {
       entries.push({ url: status.base.replace(/\/d\/[^/]+$/, ""), base: status.base });
     }
   }
+
+  // 并发探测需要分层诊断的 relay：
+  //   - error 且非鉴权类 → 区分阶段1（公网/进程）vs 阶段3（WS 握手）
+  //   - daemon 未运行 → 告知 relay 进程本身是否在线
+  // 鉴权类错误（AUTH_CLASS）relay 已在线且已明确拒绝，describeRelayError 已足够，不再探测。
+  const probeResults = await Promise.all(
+    entries.map((entry): Promise<"tls_fail" | "process_ok" | null> => {
+      const status = statuses?.find((c) => entry.base !== undefined && c.base === entry.base);
+      const needProbe =
+        (status?.state === "error" && !DEFINITIVE_ERRORS.has(status.error ?? "")) ||
+        (statuses === undefined && Boolean(entry.url));
+      return needProbe ? probeRelayStage(entry.url, deps.fetch, deps.signal) : Promise.resolve(null);
+    }),
+  );
+
   for (const [index, entry] of entries.entries()) {
     deps.out(`relay ${index + 1}  ${entry.url}`);
     if (entry.base !== undefined) deps.out(`手机地址 ${entry.base}`);
     const status = statuses?.find((candidate) => entry.base !== undefined && candidate.base === entry.base);
-    deps.out(`状态     ${status === undefined ? relayLine(statuses === undefined ? undefined : [], { ...file, configured: true, relays: [entry] }, now) : relayDetail(status, now)}`);
+    const probe = probeResults[index];
+    let stageHint = "";
+    if (probe !== null) {
+      if (status?.state === "error") {
+        stageHint = probe === "tls_fail"
+          ? "（阶段1：公网或进程不可达）"
+          : "（阶段3：relay 进程正常，Mac WS 连接失败）";
+      } else {
+        // statuses === undefined — daemon 未运行
+        stageHint = probe === "tls_fail" ? "（relay 进程也无响应）" : "（relay 进程在线）";
+      }
+    }
+    const stateStr = status === undefined
+      ? relayLine(statuses === undefined ? undefined : [], { ...file, configured: true, relays: [entry] }, now)
+      : relayDetail(status, now);
+    deps.out(`状态     ${stateStr}${stageHint}`);
   }
   deps.out(`汇总     ${relayLine(statuses, file, now)}`);
   return 0;
