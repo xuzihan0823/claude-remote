@@ -35,6 +35,7 @@ import { readBefore, readTail } from "./transcript/reader.js";
 import { searchSessions } from "./transcript/search.js";
 import type { ActivityTracker } from "./watch/activity.js";
 import type { SessionWatcher } from "./watch/watcher.js";
+import { E2eeServerSession } from "./e2ee-session.js";
 
 
 const BODY_LIMIT_BYTES = 1024 * 1024;
@@ -82,6 +83,7 @@ export interface RelayStatus {
 interface ClientState {
   subs: Set<string>;
   alive: boolean;
+  e2ee?: E2eeServerSession;
 }
 
 function sha256(value: string): Buffer {
@@ -1037,8 +1039,15 @@ export class DaemonServer {
     ws.on("pong", () => {
       state.alive = true;
     });
-    ws.on("message", (data) => {
-      void this.#onClientFrame(ws, state, data.toString());
+    ws.on("message", (data, isBinary) => {
+      if (isBinary && state.e2ee) {
+        // E2EE 帧：二进制，解密后得到 JSON 文本
+        const plaintext = state.e2ee.openFrame(data as Buffer, "binary");
+        if (plaintext === null) return; // MAC/counter 失败：静默丢弃
+        void this.#onClientFrame(ws, state, Buffer.from(plaintext).toString("utf8"));
+      } else {
+        void this.#onClientFrame(ws, state, (data as Buffer).toString());
+      }
     });
     ws.on("close", () => {
       this.#clients.delete(ws);
@@ -1056,9 +1065,42 @@ export class DaemonServer {
     }
     if (typeof frame !== "object" || frame === null) return;
     const { type, sessionId } = frame as { type?: unknown; sessionId?: unknown };
+
+    // E2EE 握手：cr_e2ee_hello 在 token 鉴权之后、应用层消息之前完成
+    if (type === "cr_e2ee_hello") {
+      const privKeyB64 = this.#options.config.e2eePrivateKeyB64;
+      if (privKeyB64 === undefined) {
+        // 未配置私钥：发 not_supported，客户端回退明文
+        this.#sendToClient(ws, state, { type: "cr_e2ee_not_supported" });
+        return;
+      }
+      // 检测请求是否经 relay（x-forwarded-host 存在）：由 connector.forwardHeaders 注入
+      // 注：握手已完成 upgrade，从 frame 的 context 读 transport/relayHostId 更可靠
+      const ctx = (frame as Record<string, unknown>)["context"];
+      const transport: "relay" | "direct" =
+        typeof ctx === "object" && ctx !== null && (ctx as Record<string, unknown>)["transport"] === "relay"
+          ? "relay" : "direct";
+      const relayHostId = typeof ctx === "object" && ctx !== null
+        ? ((ctx as Record<string, unknown>)["relayHostId"] as string | undefined)
+        : undefined;
+      const accepted = E2eeServerSession.acceptHello(frame, {
+        privateKeyB64: privKeyB64,
+        transport,
+        ...(relayHostId !== undefined ? { relayHostId } : {}),
+      });
+      if (accepted === null) {
+        this.#sendToClient(ws, state, { type: "cr_e2ee_error", reason: "bad_hello" });
+        return;
+      }
+      // ready 在 E2EE 建立前用明文发送（尚无会话密钥）
+      this.#sendToClient(ws, state, accepted.ready);
+      state.e2ee = accepted.session;
+      return;
+    }
+
     // 应用层心跳：RN 的 WebSocket 看不到协议层 ping，客户端靠 pong 判断半开连接
     if (type === "ping") {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "pong" }));
+      this.#sendToClient(ws, state, { type: "pong" });
       return;
     }
     if (typeof sessionId !== "string" || sessionId === "") return;
@@ -1084,7 +1126,7 @@ export class DaemonServer {
       state.subs.add(sessionId);
       if (sessionId !== "*") this.#sendSessionState(ws, sessionId);
       // 中途打开 / 断线重连：补发正在流式输出的草稿
-      for (const f of this.#streams.snapshot(sessionId)) if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(f));
+      for (const f of this.#streams.snapshot(sessionId)) this.#sendToClient(ws, state, f);
       return;
     }
     if (type === "unsubscribe") {
@@ -1105,19 +1147,33 @@ export class DaemonServer {
     return undefined;
   }
 
+  /** 向单个客户端发送 JSON 帧；若 E2EE 已就绪则加密后以二进制发送。 */
+  #sendToClient(ws: WebSocket, state: ClientState, payload: unknown): void {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const json = JSON.stringify(payload);
+    if (state.e2ee) {
+      const frame = state.e2ee.sealFrame(Buffer.from(json, "utf8"), "binary");
+      ws.send(frame, { binary: true });
+    } else {
+      ws.send(json);
+    }
+  }
+
   #sendSessionState(ws: WebSocket, sessionId: string): void {
     if (ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({
+    const state = this.#clients.get(ws);
+    if (!state) return;
+    this.#sendToClient(ws, state, {
       type: "session-state",
       sessionId,
       status: this.#options.tracker.getStatus(sessionId),
       activeRunId: this.#options.runner.activeRunId(sessionId) ?? null,
       ...this.#options.runner.activeState(sessionId),
-    }));
+    });
     for (const event of this.#options.runner.activeDiagnostics(sessionId)) {
       if (event.type !== "worker") continue;
       const frame = this.#diagnosticFrame(sessionId, event.runId, event.event);
-      if (frame) ws.send(JSON.stringify(frame));
+      if (frame) this.#sendToClient(ws, state, frame);
     }
   }
 
@@ -1225,10 +1281,15 @@ export class DaemonServer {
   }
 
   #broadcast(frame: unknown, match: (subs: Set<string>) => boolean): void {
-    const payload = JSON.stringify(frame);
+    const json = JSON.stringify(frame);
     for (const [ws, state] of this.#clients) {
       if (ws.readyState !== WebSocket.OPEN || !match(state.subs)) continue;
-      ws.send(payload);
+      if (state.e2ee) {
+        const encrypted = state.e2ee.sealFrame(Buffer.from(json, "utf8"), "binary");
+        ws.send(encrypted, { binary: true });
+      } else {
+        ws.send(json);
+      }
     }
   }
 }
