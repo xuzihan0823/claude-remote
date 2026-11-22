@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./protocol": "./src/protocol.ts"
+    "./protocol": "./src/protocol.ts",
+    "./e2ee": "./src/e2ee.ts"
   },
   "scripts": {
     "start": "tsx src/index.ts",

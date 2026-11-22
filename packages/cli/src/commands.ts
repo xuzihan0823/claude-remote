@@ -20,7 +20,7 @@ import {
 } from "./daemon-control.js";
 import { CONFIG_FIELDS, findField, readConfig, rotateToken, setConfig } from "./config.js";
 import { countProjects, detectClaude, inspectClaude, type DetectDeps, type DetectedClaude } from "./detect.js";
-import { ensureToken, loadCliEnv } from "./env.js";
+import { ensureE2eeKey, ensureToken, loadCliEnv } from "./env.js";
 import { isTailscaleAddress, normalizeTailscaleServeUrl } from "@claude-remote/daemon/pair";
 import { readRelayFile, snapshotRelayLine } from "./relay.js";
 import { configureTailscaleServe } from "./tailscale.js";
@@ -324,6 +324,10 @@ export async function cmdSetup(ctx: Context, binPath: string): Promise<void> {
     generated: `已生成访问 token，写入 ${where}`,
   }[action];
   console.log(`✓ ${tokenMsg}`);
+
+  const e2ee = ensureE2eeKey(ctx.env);
+  const e2eeMsg = e2ee.action === "generated" ? `已生成 E2EE 私钥，写入 ${where}` : `沿用 ${where} 里的 DAEMON_E2EE_PRIVATE_KEY`;
+  console.log(`✓ ${e2eeMsg}`);
 
   if (process.stdout.isTTY) process.stdout.write("… 查找 claude");
   const claude = setupClaude(ctx.env.envFile);

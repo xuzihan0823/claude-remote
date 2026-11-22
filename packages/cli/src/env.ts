@@ -5,7 +5,7 @@
 // 这样 launchd 起的 daemon 和 CLI 永远拿到同一个 token，已配对的手机不受迁移影响。
 
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -195,6 +195,19 @@ export function generateToken(): string {
  * 保证 .env 里有 BRIDGE_TOKEN（setup 用）。
  * 已有 → 不动；Keychain 里有旧 token → 迁移进 .env（手机不用重新配对）；都没有 → 生成新的。
  */
+/** 生成 X25519 私钥（base64 32 字节原始私钥），写入 .env DAEMON_E2EE_PRIVATE_KEY。幂等。 */
+export function ensureE2eeKey(cliEnv: CliEnv): { action: "kept" | "generated" } {
+  const dotenv = readDotenv(cliEnv.envFile);
+  if (dotenv.DAEMON_E2EE_PRIVATE_KEY) return { action: "kept" };
+  const { privateKey } = generateKeyPairSync("x25519");
+  const der = privateKey.export({ type: "pkcs8", format: "der" }) as Buffer;
+  const raw = der.subarray(-32).toString("base64");
+  const current = existsSync(cliEnv.envFile) ? readFileSync(cliEnv.envFile, "utf8") : "";
+  mkdirSync(dirname(cliEnv.envFile), { recursive: true, mode: 0o700 });
+  writeFileSync(cliEnv.envFile, upsertDotenv(current, "DAEMON_E2EE_PRIVATE_KEY", raw), { mode: 0o600 });
+  return { action: "generated" };
+}
+
 export function ensureToken(cliEnv: CliEnv): { token: string; action: "kept" | "migrated" | "generated" } {
   const dotenv = readDotenv(cliEnv.envFile);
   if (dotenv.BRIDGE_TOKEN) return { token: dotenv.BRIDGE_TOKEN, action: "kept" };

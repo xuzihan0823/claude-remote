@@ -30,6 +30,8 @@ export interface DaemonConfig {
   cooldownMs: number;
   interactionsDbPath: string;
   permissionTimeoutMs: number;
+  /** 守护进程 X25519 私钥（base64 32 字节）；未配置时关闭 E2EE。用 cr init 生成写入 .env DAEMON_E2EE_PRIVATE_KEY。 */
+  e2eePrivateKeyB64?: string;
   barkUrl?: string;
   ntfyUrl?: string;
   /** 已启用的 relay；未配置或关闭时为空数组。 */
@@ -154,6 +156,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   const barkUrl = readString(env, "BARK_URL");
   const ntfyUrl = readString(env, "NTFY_URL");
   const relays = loadRelaySettings(env);
+  const e2eePrivateKeyB64 = readString(env, "DAEMON_E2EE_PRIVATE_KEY");
+  if (e2eePrivateKeyB64 !== undefined) {
+    const raw = Buffer.from(e2eePrivateKeyB64, "base64");
+    if (raw.length !== 32) throw new ConfigError(`DAEMON_E2EE_PRIVATE_KEY must be base64 of 32 bytes, got ${raw.length}`);
+  }
   return {
     token,
     host: readString(env, "BRIDGE_HOST") ?? "127.0.0.1",
@@ -163,6 +170,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     cooldownMs: readInt(env, "ACTIVITY_COOLDOWN_MS", 120_000),
     interactionsDbPath: dbPath === ":memory:" || isAbsolute(dbPath) ? dbPath : join(process.cwd(), dbPath),
     permissionTimeoutMs: readInt(env, "PERMISSION_TIMEOUT_MS", 300_000),
+    ...(e2eePrivateKeyB64 === undefined ? {} : { e2eePrivateKeyB64 }),
     ...(barkUrl === undefined ? {} : { barkUrl }),
     ...(ntfyUrl === undefined ? {} : { ntfyUrl }),
     relays,
