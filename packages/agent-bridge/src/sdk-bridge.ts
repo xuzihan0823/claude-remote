@@ -1,5 +1,7 @@
 import { query, type CanUseTool, type PermissionMode, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
+import type { ContextUsage } from "./types.js";
+
 export type QueryFactory = typeof query;
 
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -11,7 +13,10 @@ export function configuredClaudeExecutable(): string | undefined {
 }
 export interface StartQueryOptions {
   cwd: string;
-  prompt: string;
+  prompt?: string;
+  /** Metadata probes keep stdin open and send no user message. */
+  persistSession?: boolean;
+  readOnlySideChat?: boolean;
   clientMessageId?: string;
   canUseTool: CanUseTool;
   resume?: string;
@@ -37,8 +42,9 @@ class InputStream implements AsyncIterable<SDKUserMessage> {
     else this.#pending.push(message);
   }
 
-  close(): void {
+  close(discardPending = false): void {
     this.#closed = true;
+    if (discardPending) this.#pending.length = 0;
     for (const waiter of this.#waiters.splice(0)) waiter({ done: true, value: undefined });
   }
 
@@ -56,7 +62,12 @@ class InputStream implements AsyncIterable<SDKUserMessage> {
 
 export interface SdkQueryHandle {
   readonly messages: AsyncIterable<SDKMessage>;
-  steer(prompt: string): Promise<void>;
+  steer(prompt: string, clientMessageId?: string): Promise<void>;
+  supportedCommands(): ReturnType<Query["supportedCommands"]>;
+  reloadSkills(): ReturnType<Query["reloadSkills"]>;
+  getContextUsage(): Promise<ContextUsage>;
+  mcpServerStatus(): ReturnType<Query["mcpServerStatus"]>;
+  closeAndWait(): Promise<void>;
   interrupt(): Promise<void>;
   close(): void;
 }
@@ -66,13 +77,18 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
     throw new TypeError("resume and sessionId are mutually exclusive");
   }
   const input = new InputStream();
-  input.push(userMessage(options.prompt, options.clientMessageId));
+  if (options.prompt !== undefined) input.push(userMessage(options.prompt, options.clientMessageId));
   const sdkOptions = {
     cwd: options.cwd,
     canUseTool: options.canUseTool,
-    permissionMode: options.permissionMode ?? "default",
+    permissionMode: options.readOnlySideChat ? "dontAsk" as const : options.permissionMode ?? "default",
     includePartialMessages: true,
-    persistSession: true,
+    persistSession: options.readOnlySideChat ? false : options.persistSession ?? true,
+    ...(options.readOnlySideChat ? {
+      settingSources: [], tools: [], skills: [], mcpServers: {}, strictMcpConfig: true,
+      settings: { disableAllHooks: true }, maxTurns: 1,
+    } : {}),
+    extraArgs: { "replay-user-messages": null },
     // SDK options.env replaces the subprocess env entirely, so we must spread
     // process.env ourselves. Overriding CLAUDE_CODE_ENTRYPOINT to "claude-remote"
     // keeps the session visible in the Mac terminal's /resume list (CLI hides
@@ -86,17 +102,39 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
     ...(options.effort === undefined ? {} : { effort: options.effort }),
   };
   const sdkQuery: Query = queryFactory({ prompt: input, options: sdkOptions });
-  const abort = (): void => { void sdkQuery.interrupt().catch(() => undefined); };
+  const abort = (): void => {
+    input.close(true);
+    void sdkQuery.interrupt().catch(() => undefined);
+  };
   if (options.signal.aborted) abort();
   else options.signal.addEventListener("abort", abort, { once: true });
+  const closeInput = (): void => {
+    input.close();
+    options.signal.removeEventListener("abort", abort);
+  };
   return {
     messages: sdkQuery,
-    async steer(prompt: string): Promise<void> { input.push(userMessage(prompt)); },
+    async steer(prompt: string, clientMessageId?: string): Promise<void> {
+      if (options.signal.aborted) throw new Error("query input is aborted");
+      input.push(userMessage(prompt, clientMessageId));
+    },
+    supportedCommands: () => sdkQuery.supportedCommands(),
+    reloadSkills: () => sdkQuery.reloadSkills(),
+    async getContextUsage(): Promise<ContextUsage> {
+      const { gridRows: _gridRows, ...usage } = await sdkQuery.getContextUsage();
+      return usage;
+    },
+    mcpServerStatus: () => sdkQuery.mcpServerStatus(),
     async interrupt(): Promise<void> { await sdkQuery.interrupt(); },
     close(): void {
-      input.close();
-      options.signal.removeEventListener("abort", abort);
+      closeInput();
       sdkQuery.close();
+    },
+    async closeAndWait(): Promise<void> {
+      closeInput();
+      // The SDK's Query.return() waits for transport cleanup and child exit.
+      if (typeof sdkQuery.return === "function") await sdkQuery.return();
+      else sdkQuery.close();
     },
   };
 }
@@ -117,5 +155,6 @@ function userMessage(prompt: string, uuid?: string): SDKUserMessage {
     ...(uuid === undefined ? {} : { uuid: uuid as NonNullable<SDKUserMessage["uuid"]> }),
     message: { role: "user", content: prompt },
     parent_tool_use_id: null,
+    origin: { kind: "human" },
   };
 }

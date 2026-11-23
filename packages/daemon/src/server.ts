@@ -22,16 +22,17 @@ import { WebSocket, WebSocketServer } from "ws";
 
 import { EFFORT_LEVELS, type EffortLevel, type ExternalPermissionMode, type WorkerEvent } from "@claude-remote/agent-bridge";
 import { readEffortOptions, type EffortOptions } from "./effort-levels.js";
+import { readGitWorkspace } from "./git-workspace.js";
 import type { DaemonConfig } from "./config.js";
 import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
 import { FileAccessError, fileMeta, fileTypeOf, parseRange, resolveRequestedFile, type SessionFile } from "./session-file-access.js";
 import { readSessionCwd, resolveSessionFile } from "./session-files.js";
 import { StreamBuffer } from "./run/stream-buffer.js";
-import { approvalLink, NotIdleError, sessionLink, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
+import { approvalLink, NotIdleError, sessionLink, RunRequestError, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
 import { listSessions } from "./transcript/indexer.js";
 import { buildProjectIndex } from "./transcript/projects.js";
-import { readBefore, readTail } from "./transcript/reader.js";
+import { readBefore, readTail, readTranscriptUsage } from "./transcript/reader.js";
 import { searchSessions } from "./transcript/search.js";
 import type { ActivityTracker } from "./watch/activity.js";
 import type { SessionWatcher } from "./watch/watcher.js";
@@ -46,6 +47,8 @@ const IMAGE_TYPES: Record<string, string> = {
 const MESSAGES_LIMIT_DEFAULT = 100;
 const MESSAGES_LIMIT_MAX = 500;
 const WS_HEARTBEAT_MS = 30_000;
+const MAX_SIDE_QUESTION_BYTES = 32 * 1024;
+const MAX_COMPACT_INSTRUCTIONS_BYTES = 8 * 1024;
 
 const VALID_PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "auto", "bypassPermissions"]);
 type PermissionMode = ExternalPermissionMode;
@@ -81,6 +84,7 @@ export interface RelayStatus {
 
 interface ClientState {
   subs: Set<string>;
+  subscribing: Map<string, symbol>;
   alive: boolean;
 }
 
@@ -180,6 +184,7 @@ export class DaemonServer {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    this.#options.runner.closeMetadata();
     if (this.#heartbeat !== undefined) clearInterval(this.#heartbeat);
     for (const timer of this.#watchRetryTimers.values()) clearTimeout(timer);
     this.#watchRetryTimers.clear();
@@ -215,7 +220,7 @@ export class DaemonServer {
       res.setHeader("Access-Control-Allow-Origin", "*");
       if (req.method === "OPTIONS") {
         res.writeHead(204, {
-          "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+          "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
           "Access-Control-Allow-Headers": "Authorization, Content-Type",
           "Access-Control-Max-Age": "86400",
         });
@@ -307,6 +312,41 @@ export class DaemonServer {
     if (method === "POST" && path === "/api/sessions") {
       await this.#handleCreateSession(req, res);
       return;
+    }
+
+    if (method === "GET" && path === "/api/commands") {
+      await this.#handleCommands(res, url);
+      return;
+    }
+
+    const p1Match = /^\/api\/sessions\/([^/]+)\/(state|context|usage|steer|compact|btw|workspace)(?:\/([^/]+)(\/send-now)?)?$/.exec(path);
+    if (p1Match) {
+      const [, encodedId, operation, messageId, sendNow] = p1Match;
+      let sessionId: string;
+      try { sessionId = decodeURIComponent(encodedId ?? ""); } catch { sessionId = ""; }
+      if (!isUuid(sessionId)) { this.#json(res, 400, { error: "invalid_session_id" }); return; }
+      if (operation === "steer" && messageId !== undefined &&
+        ((sendNow === undefined && (method === "PATCH" || method === "DELETE")) || (sendNow !== undefined && method === "POST"))) {
+        await this.#handleSteerUpdate(req, res, url, sessionId, messageId, method);
+        return;
+      }
+      if (messageId !== undefined) { this.#json(res, 404, { error: "not_found" }); return; }
+      if (method === "POST" && operation === "btw") {
+        await this.#handleSideChat(req, res, sessionId);
+        return;
+      }
+      if (method === "GET" && operation === "workspace") {
+        await this.#handleWorkspace(res, sessionId);
+        return;
+      }
+      if (method === "GET" && (operation === "state" || operation === "context" || operation === "usage")) {
+        await this.#handleP1Read(res, sessionId, operation);
+        return;
+      }
+      if (method === "POST" && (operation === "steer" || operation === "compact")) {
+        await this.#handleP1Mutation(req, res, sessionId, operation);
+        return;
+      }
     }
 
     const abortMatch = /^\/api\/sessions\/([^/]+)\/abort$/.exec(path);
@@ -506,6 +546,259 @@ export class DaemonServer {
     this.#json(res, 200, await (this.#options.effortOptions ?? readEffortOptions)(cwd, model));
   }
 
+  async #p1SessionFile(res: ServerResponse, sessionId: string): Promise<string | undefined> {
+    try {
+      return await resolveSessionFile(this.#options.config.projectsDir, sessionId);
+    } catch (error) {
+      if (!isEnoent(error)) throw error;
+      this.#json(res, 404, { error: "session_not_found" });
+      return undefined;
+    }
+  }
+
+  async #handleCommands(res: ServerResponse, url: URL): Promise<void> {
+    const sessionId = url.searchParams.get("sessionId");
+    const cwdParam = url.searchParams.get("cwd");
+    const { runner, tracker } = this.#options;
+    if (sessionId !== null && cwdParam !== null) { this.#json(res, 400, { error: "ambiguous_scope" }); return; }
+    let cwd: string;
+    if (sessionId === null) {
+      cwd = cwdParam?.trim() || homedir();
+      if (!(await this.#knownCwds()).has(cwd)) { this.#json(res, 400, { error: "unknown_cwd" }); return; }
+    } else {
+      if (!isUuid(sessionId)) { this.#json(res, 400, { error: "invalid_session_id" }); return; }
+      const activeCwd = runner.activeCwd(sessionId);
+      if (activeCwd !== undefined) cwd = activeCwd;
+      else {
+        const file = await this.#p1SessionFile(res, sessionId);
+        if (!file) return;
+        cwd = (await readSessionCwd(file)) || homedir();
+      }
+    }
+    if (sessionId !== null && tracker.getStatus(sessionId) === "terminal-driving") {
+      this.#json(res, 200, { status: "unavailable", reason: "terminal_driving" });
+      return;
+    }
+    const runId = sessionId === null ? undefined : runner.activeRunId(sessionId);
+    const catalog = await runner.commands(cwd, sessionId ?? undefined);
+    if (sessionId !== null && (runner.activeRunId(sessionId) !== runId || tracker.getStatus(sessionId) === "terminal-driving")) {
+      this.#json(res, 200, { status: "unavailable", reason: "session_changed" });
+      return;
+    }
+    this.#json(res, 200, catalog
+      ? { status: "available", ...catalog }
+      : { status: "unavailable", reason: runId === undefined ? "sdk_unavailable" : "initializing" });
+  }
+
+  async #handleP1Read(res: ServerResponse, sessionId: string, operation: "state" | "context" | "usage"): Promise<void> {
+    const { runner, tracker } = this.#options;
+    const activeCwd = runner.activeCwd(sessionId);
+    const file = activeCwd === undefined
+      ? await this.#p1SessionFile(res, sessionId)
+      : operation === "usage" ? await resolveSessionFile(this.#options.config.projectsDir, sessionId).catch((error: unknown) => {
+        if (!isEnoent(error)) throw error;
+        return undefined;
+      }) : undefined;
+    if (file === undefined && activeCwd === undefined) return;
+    if (operation === "state") {
+      this.#json(res, 200, this.#sessionState(sessionId));
+      return;
+    }
+    if (operation === "context") {
+      if (tracker.getStatus(sessionId) === "terminal-driving") {
+        this.#json(res, 200, { status: "unavailable", reason: "terminal_driving" });
+        return;
+      }
+      const value = await runner.context(sessionId);
+      this.#json(res, 200, tracker.getStatus(sessionId) === "terminal-driving"
+        ? { status: "unavailable", reason: "terminal_driving" } : value);
+      return;
+    }
+    let transcript = {};
+    if (file !== undefined) {
+      try { transcript = await readTranscriptUsage(file, sessionId); }
+      catch (error) {
+        if (!isEnoent(error)) throw error;
+        if (runner.activeRunId(sessionId) === undefined) {
+          this.#json(res, 404, { error: "session_not_found" });
+          return;
+        }
+      }
+    }
+    const { latestTurn, quotas } = runner.p1State(sessionId);
+    this.#json(res, 200, { sessionId, ...transcript, latestTurn, quotas, gatewayBilling: { status: "unavailable" } });
+  }
+
+  #validateSteerText(res: ServerResponse, text: unknown): text is string {
+    if (typeof text !== "string" || !text.trim()) {
+      this.#json(res, 400, { error: "invalid_text" });
+      return false;
+    }
+    if (/^\s*\/(clear|reset|new)(?:\s|$)/i.test(text)) {
+      this.#json(res, 400, { error: "command_unavailable" });
+      return false;
+    }
+    return true;
+  }
+
+  async #handleSteerUpdate(
+    req: IncomingMessage, res: ServerResponse, url: URL, sessionId: string, encodedMessageId: string,
+    method: "PATCH" | "DELETE" | "POST",
+  ): Promise<void> {
+    let clientMessageId: string;
+    try { clientMessageId = decodeURIComponent(encodedMessageId).toLowerCase(); } catch { clientMessageId = ""; }
+    if (!isUuid(clientMessageId)) { this.#json(res, 400, { error: "invalid_client_message_id" }); return; }
+    const body = await this.#readJsonBody(req, res, method === "DELETE");
+    if (body === undefined) return;
+    const { runId: bodyRunId, text } = body as Record<string, unknown>;
+    const queryRunId = method === "DELETE" ? url.searchParams.get("runId") : null;
+    const runId = queryRunId ?? bodyRunId;
+    const invalidRunId = (runId !== undefined || method !== "DELETE") && (typeof runId !== "string" || !isUuid(runId));
+    const disagree = queryRunId !== null && bodyRunId !== undefined &&
+      (typeof bodyRunId !== "string" || bodyRunId.toLowerCase() !== queryRunId.toLowerCase());
+    if (invalidRunId || disagree) {
+      this.#json(res, 400, { error: "invalid_run_id" });
+      return;
+    }
+    const { runner, tracker } = this.#options;
+    try {
+      const targetRun = typeof runId === "string" ? runId.toLowerCase() : undefined;
+      let receipt;
+      if (method === "PATCH") {
+        if (!this.#validateSteerText(res, text)) return;
+        receipt = runner.mutateSteer(sessionId, targetRun, clientMessageId, { type: "edit", text });
+      } else {
+        receipt = runner.mutateSteer(sessionId, targetRun, clientMessageId, { type: method === "DELETE" ? "cancel" : "send_now" });
+      }
+      this.#json(res, method === "POST" ? 202 : 200, { sessionId, ...receipt });
+    } catch (error) {
+      if (!(error instanceof RunRequestError)) throw error;
+      if (error.code === "run_mismatch") {
+        this.#json(res, 409, { error: error.code, activeRunId: runner.activeRunId(sessionId) ?? null, status: tracker.getStatus(sessionId) });
+      } else {
+        this.#json(res, error.code === "steer_not_found" ? 404 : 409, { error: error.code, state: error.state });
+      }
+    }
+  }
+
+  async #handleSideChat(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
+    const body = await this.#readJsonBody(req, res);
+    if (body === undefined) return;
+    const { question } = body as Record<string, unknown>;
+    if (typeof question !== "string" || !question.trim() || question.includes("\0") || Buffer.byteLength(question) > MAX_SIDE_QUESTION_BYTES) {
+      this.#json(res, 400, { error: "invalid_question" });
+      return;
+    }
+    const clientMessageId = this.#clientMessageId(res, body);
+    if (clientMessageId === false) return;
+    const file = await this.#p1SessionFile(res, sessionId);
+    if (!file) return;
+    const cwd = await readSessionCwd(file);
+    if (!isAbsolute(cwd)) { this.#json(res, 503, { error: "btw_unavailable" }); return; }
+    const controller = new AbortController();
+    const disconnect = (): void => controller.abort();
+    res.once("close", disconnect);
+    if (res.destroyed) disconnect();
+    try {
+      const reply = await this.#options.runner.sideChat(cwd, sessionId, question, clientMessageId, controller.signal);
+      if (res.destroyed) return;
+      if (reply) this.#json(res, 200, { sessionId, question, ...reply });
+      else this.#json(res, 503, { error: "btw_unavailable" });
+    } finally {
+      res.off("close", disconnect);
+    }
+  }
+
+  async #handleWorkspace(res: ServerResponse, sessionId: string): Promise<void> {
+    const file = await this.#p1SessionFile(res, sessionId);
+    if (!file) return;
+    const cwd = await readSessionCwd(file);
+    if (!isAbsolute(cwd) || cwd.includes("\0")) { this.#json(res, 503, { error: "workspace_unavailable" }); return; }
+    const controller = new AbortController();
+    const disconnect = (): void => controller.abort();
+    res.once("close", disconnect);
+    if (res.destroyed) disconnect();
+    try {
+      const [git, mcp] = await Promise.all([
+        readGitWorkspace(cwd, controller.signal),
+        this.#options.runner.mcpOverview(sessionId),
+      ]);
+      if (res.destroyed) return;
+      if (git) this.#json(res, 200, { git, mcp });
+      else this.#json(res, 503, { error: "workspace_unavailable" });
+    } finally {
+      res.off("close", disconnect);
+    }
+  }
+
+  async #handleP1Mutation(req: IncomingMessage, res: ServerResponse, sessionId: string, operation: "steer" | "compact"): Promise<void> {
+    const body = await this.#readJsonBody(req, res);
+    if (body === undefined) return;
+    const clientMessageId = this.#clientMessageId(res, body);
+    if (clientMessageId === false) return;
+    if (clientMessageId === undefined) { this.#json(res, 400, { error: "invalid_client_message_id" }); return; }
+    const { runner, tracker } = this.#options;
+    if (operation === "steer") {
+      const { runId, text } = body as Record<string, unknown>;
+      if (typeof runId !== "string" || !isUuid(runId)) { this.#json(res, 400, { error: "invalid_run_id" }); return; }
+      if (!this.#validateSteerText(res, text)) return;
+      if (!runner.steerReceipt(sessionId, clientMessageId) && runner.activeRunId(sessionId) === undefined &&
+        !await this.#p1SessionFile(res, sessionId)) return;
+      if (this.#hasMessageRequest(sessionId, clientMessageId) || runner.compactReceipt(sessionId, clientMessageId)) {
+        this.#json(res, 409, { error: "message_id_conflict" });
+        return;
+      }
+      try {
+        const { receipt, replayed } = runner.steer(sessionId, runId.toLowerCase(), clientMessageId, text);
+        this.#json(res, 202, { ...receipt, sessionId, ...(replayed ? { replayed: true } : {}) });
+      } catch (error) {
+        if (!(error instanceof RunRequestError)) throw error;
+        this.#json(res, 409, { error: error.code, status: tracker.getStatus(sessionId), activeRunId: runner.activeRunId(sessionId) ?? null });
+      }
+      return;
+    }
+
+    const instructions = (body as Record<string, unknown>).instructions;
+    if (instructions !== undefined && (typeof instructions !== "string" ||
+      Buffer.byteLength(instructions) > MAX_COMPACT_INSTRUCTIONS_BYTES || instructions.includes("\0"))) {
+      this.#json(res, 400, { error: "invalid_instructions" });
+      return;
+    }
+    let previous = runner.compactReceipt(sessionId, clientMessageId);
+    if (previous) { this.#json(res, 202, { ...previous, sessionId, replayed: true }); return; }
+    if (tracker.getStatus(sessionId) !== "idle") {
+      this.#json(res, 409, { error: "not_idle", status: tracker.getStatus(sessionId) });
+      return;
+    }
+    const file = await this.#p1SessionFile(res, sessionId);
+    if (!file) return;
+    const cwd = (await readSessionCwd(file)) || homedir();
+    const cliAlive = await this.#options.isCliAlive(sessionId);
+    previous = runner.compactReceipt(sessionId, clientMessageId);
+    if (previous) { this.#json(res, 202, { ...previous, sessionId, replayed: true }); return; }
+    if (cliAlive || this.#closed) {
+      this.#json(res, 409, { error: "not_idle", status: cliAlive ? "terminal-driving" : tracker.getStatus(sessionId) });
+      return;
+    }
+    if (this.#hasMessageRequest(sessionId, clientMessageId) || runner.steerReceipt(sessionId, clientMessageId)) {
+      this.#json(res, 409, { error: "message_id_conflict" });
+      return;
+    }
+    const focus = instructions?.trim();
+    const text = focus ? `/compact ${focus}` : "/compact";
+    let handle: TurnHandle;
+    try {
+      handle = runner.startTurn({ sessionId, cwd, text, compact: { clientMessageId } });
+    } catch (error) {
+      if (!(error instanceof NotIdleError || error instanceof RunRequestError)) throw error;
+      this.#json(res, 409, { error: error instanceof RunRequestError ? error.code : "not_idle", status: tracker.getStatus(sessionId) });
+      return;
+    }
+    this.#activeRuns.set(handle.runId, handle);
+    void this.#pumpRun(sessionId, text, handle, false);
+    this.#json(res, 202, { sessionId, runId: handle.runId, clientMessageId, state: "compacting" });
+  }
+
   #validateEffort(res: ServerResponse, value: unknown): EffortLevel | undefined | false {
     if (value === undefined) return undefined;
     if (typeof value !== "string" || !EFFORT_LEVELS.includes(value as EffortLevel)) {
@@ -522,6 +815,11 @@ export class DaemonServer {
       return false;
     }
     return id.toLowerCase();
+  }
+
+  #hasMessageRequest(scope: string, id: string): boolean {
+    const request = this.#messageRequests.get(`${scope}:${id}`);
+    return request !== undefined && request.expiresAt > Date.now();
   }
 
   #repeatMessage(res: ServerResponse, scope: string, id: string | undefined): boolean {
@@ -597,6 +895,7 @@ export class DaemonServer {
     this.#newSessions.add(sessionId);
     this.#activeRuns.set(handle.runId, handle);
     this.#rememberMessage("new", sessionId, handle.runId, clientMessageId);
+    this.#rememberMessage(sessionId, sessionId, handle.runId, clientMessageId);
     void this.#pumpRun(sessionId, textValue, handle);
     this.#json(res, 202, { sessionId, runId: handle.runId, ...(clientMessageId === undefined ? {} : { clientMessageId }) });
   }
@@ -704,6 +1003,11 @@ export class DaemonServer {
     const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
     if (effort === false) return;
     if (this.#repeatMessage(res, sessionId, clientMessageId)) return;
+    if (clientMessageId !== undefined && (this.#options.runner.steerReceipt(sessionId, clientMessageId) ||
+      this.#options.runner.compactReceipt(sessionId, clientMessageId))) {
+      this.#json(res, 409, { error: "message_id_conflict" });
+      return;
+    }
     let handle: TurnHandle;
     try {
       handle = this.#options.runner.startTurn({
@@ -733,11 +1037,24 @@ export class DaemonServer {
   }
 
   /** 消费 run 事件流：run 帧 → 订阅者；终态 → notifier。message 帧走 watcher，不在此转发。 */
-  async #pumpRun(sessionId: string, text: string, handle: TurnHandle): Promise<void> {
+  async #pumpRun(sessionId: string, text: string, handle: TurnHandle, notify = true): Promise<void> {
     try {
       for await (const event of handle.events) {
         const currentRunId = this.#options.runner.activeRunId(sessionId);
+        if (event.type === "steer" || event.type === "compaction") {
+          this.#broadcastToSubscribers(sessionId, { type: event.type, sessionId, ...event.receipt });
+          continue;
+        }
+        if (event.type === "usage" || event.type === "quota" || event.type === "commands") {
+          const type = event.type === "usage" ? "run-usage" : event.type === "quota" ? "subscription-quota" : "commands";
+          this.#broadcastToSubscribers(sessionId, { ...event, type });
+          continue;
+        }
         if (currentRunId !== undefined && currentRunId !== event.runId) continue;
+        if (event.type === "stream_reset") {
+          this.#streams.end(sessionId);
+          continue;
+        }
         if (event.type === "worker") {
           const worker = event.event;
           const diagnostic = this.#diagnosticFrame(sessionId, event.runId, worker);
@@ -763,6 +1080,7 @@ export class DaemonServer {
         if (event.error !== undefined) frame.error = event.error;
         if (event.permissionMode !== undefined) frame.permissionMode = event.permissionMode;
         this.#broadcastToSubscribers(sessionId, frame);
+        if (!notify) continue;
         if (event.state === "done") {
           void this.#options.notifier("Claude 已完成", snippet(text), { url: sessionLink(sessionId), group: "run" });
         } else if (event.state === "error") {
@@ -1032,7 +1350,7 @@ export class DaemonServer {
   }
 
   #onConnection(ws: WebSocket): void {
-    const state: ClientState = { subs: new Set(), alive: true };
+    const state: ClientState = { subs: new Set(), subscribing: new Map(), alive: true };
     this.#clients.set(ws, state);
     ws.on("pong", () => {
       state.alive = true;
@@ -1042,6 +1360,7 @@ export class DaemonServer {
     });
     ws.on("close", () => {
       this.#clients.delete(ws);
+      state.subscribing.clear();
       for (const sessionId of state.subs) this.#releaseWatch(sessionId);
     });
     ws.on("error", () => ws.terminate());
@@ -1064,12 +1383,20 @@ export class DaemonServer {
     if (typeof sessionId !== "string" || sessionId === "") return;
 
     if (type === "subscribe") {
-      if (state.subs.has(sessionId)) return;
+      if (state.subs.has(sessionId) || state.subscribing.has(sessionId)) return;
       if (sessionId !== "*") {
+        const attempt = Symbol(sessionId);
+        state.subscribing.set(sessionId, attempt);
+        const isCurrent = (): boolean => state.subscribing.get(sessionId) === attempt && ws.readyState === WebSocket.OPEN;
         try {
           await this.#acquireWatch(sessionId);
+          if (!isCurrent()) {
+            this.#releaseWatch(sessionId);
+            return;
+          }
           this.#newSessions.delete(sessionId);
         } catch (error) {
+          if (!isCurrent()) return;
           if (isEnoent(error) && this.#newSessions.has(sessionId)) {
             state.subs.add(sessionId);
             this.#sendSessionState(ws, sessionId);
@@ -1079,6 +1406,8 @@ export class DaemonServer {
           if (isEnoent(error)) return; // 未知会话：静默忽略（HTTP 侧已 404）
           console.warn(`watch(${sessionId}) failed:`, error);
           return;
+        } finally {
+          if (state.subscribing.get(sessionId) === attempt) state.subscribing.delete(sessionId);
         }
       }
       state.subs.add(sessionId);
@@ -1088,6 +1417,7 @@ export class DaemonServer {
       return;
     }
     if (type === "unsubscribe") {
+      state.subscribing.delete(sessionId);
       if (!state.subs.delete(sessionId)) return;
       if (sessionId !== "*") this.#releaseWatch(sessionId);
     }
@@ -1102,19 +1432,31 @@ export class DaemonServer {
       const { type, ...details } = event;
       return { ...details, type: type === "permission_denied" ? "permission-denied" : "agent-notice", sessionId, runId };
     }
+    if (event.type === "command_output" || event.type === "command_lifecycle" ||
+      event.type === "compact_status" || event.type === "compact_boundary") {
+      const { type, ...details } = event;
+      return { ...details, type: type.replaceAll("_", "-"), sessionId, runId };
+    }
     return undefined;
+  }
+
+  #sessionState(sessionId: string) {
+    const { runner, tracker } = this.#options;
+    return {
+      type: "session-state",
+      sessionId,
+      status: tracker.getStatus(sessionId),
+      activeRunId: runner.activeRunId(sessionId) ?? null,
+      ...runner.activeState(sessionId),
+      ...runner.p1State(sessionId),
+    };
   }
 
   #sendSessionState(ws: WebSocket, sessionId: string): void {
     if (ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({
-      type: "session-state",
-      sessionId,
-      status: this.#options.tracker.getStatus(sessionId),
-      activeRunId: this.#options.runner.activeRunId(sessionId) ?? null,
-      ...this.#options.runner.activeState(sessionId),
-    }));
-    for (const event of this.#options.runner.activeDiagnostics(sessionId)) {
+    ws.send(JSON.stringify(this.#sessionState(sessionId)));
+    const { runner } = this.#options;
+    for (const event of [...runner.activeDiagnostics(sessionId), ...runner.activeCommandReplay(sessionId)]) {
       if (event.type !== "worker") continue;
       const frame = this.#diagnosticFrame(sessionId, event.runId, event.event);
       if (frame) ws.send(JSON.stringify(frame));

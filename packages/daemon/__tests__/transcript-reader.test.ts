@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
-import { parseTranscriptLine, readBefore, readTail, stripWrapperTags } from "../src/transcript/reader.js";
+import { parseTranscriptLine, readBefore, readTail, readTranscriptUsage, stripWrapperTags } from "../src/transcript/reader.js";
 
 const fixturesDir = fileURLToPath(new URL("./fixtures/projects", import.meta.url));
 const basicFile = join(fixturesDir, "-home-alice-projA", "11111111-aaaa-4aaa-8aaa-111111111111.jsonl");
@@ -173,4 +175,49 @@ test("assistant upstream message id survives parsing with original block indexes
     ["msg_upstream", 0], ["msg_upstream", 1], ["msg_upstream", 2],
   ]);
   assert.equal(messages[0]?.uuid, "row-id");
+});
+
+test("P1 native and legacy command results survive history pagination without leaking reminders", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "cr-p1-history-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, "fixture.jsonl");
+  const assistant = { role: "assistant", id: "api-1", content: [{ type: "text", text: "reply" }],
+    usage: { input_tokens: 12, output_tokens: 1, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 } };
+  const lines = [
+    { type: "user", uuid: "u", parentUuid: null, message: { role: "user", content: "hello" } },
+    { type: "assistant", uuid: "a1", parentUuid: "u", message: assistant },
+    { type: "assistant", uuid: "a2", parentUuid: "a1", message: assistant },
+    { type: "assistant", uuid: "side", parentUuid: "a2", isSidechain: true, message: { ...assistant, id: "api-side" } },
+    { type: "user", uuid: "old", parentUuid: "a2", message: { role: "user", content: [
+      { type: "text", text: "<task-notification><local-command-stdout>hidden</local-command-stdout></task-notification>real user" },
+      { type: "text", text: "<local-command-stdout>one\ntwo<system-reminder>hidden</system-reminder></local-command-stdout>\n<local-command-stderr>notice</local-command-stderr>" },
+    ] } },
+    { type: "system", subtype: "local_command", uuid: "native", parentUuid: "old", isMeta: true,
+      content: "<local-command-stdout>native output</local-command-stdout>" },
+    { type: "system", subtype: "compact_boundary", uuid: "boundary", parentUuid: "native",
+      compactMetadata: { trigger: "manual", preTokens: 400, postTokens: 100, durationMs: 30 } },
+    { type: "cost-state", sessionId: "fixture", totalCostUSD: 0.2, modelUsage: { sonnet: { inputTokens: 12 } } },
+    { type: "cost-state", sessionId: "fixture", totalCostUSD: 0.3, modelUsage: { sonnet: { inputTokens: 24 } } },
+    { type: "cost-state", sessionId: "different", totalCostUSD: 9 },
+  ];
+  await writeFile(file, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+
+  const tail = await readTail(file, 2);
+  assert.deepEqual(tail.messages.map(({ kind }) => kind), ["command_output", "compact_boundary"]);
+  assert.equal(tail.messages[0]?.text, "native output");
+  assert.deepEqual(tail.messages[1]?.compactMetadata, { trigger: "manual", pre_tokens: 400, post_tokens: 100, duration_ms: 30 });
+  const previous = await readBefore(file, tail.firstSeq!, 10);
+  assert.equal(previous.messages.find(({ uuid }) => uuid === "a2")?.usage?.input_tokens, 12);
+  assert.deepEqual(previous.messages.filter(({ uuid }) => uuid === "old").map(({ role, text, output }) => ({ role, text, output })), [
+    { role: "user", text: "real user", output: undefined },
+    { role: "assistant", text: "one\ntwo\nnotice", output: [{ stream: "stdout", text: "one\ntwo" }, { stream: "stderr", text: "notice" }] },
+  ]);
+  await appendFile(file, JSON.stringify({ type: "user", uuid: "after", parentUuid: "native",
+    message: { role: "user", content: "after compact" } }) + "\n");
+  assert.deepEqual((await readTail(file, 2)).messages.map(({ kind }) => kind), ["compact_boundary", "text"]);
+  assert.deepEqual(await readTranscriptUsage(file, "fixture"), {
+    mainAgent: { source: "transcript", apiResponses: 1,
+      usage: { input_tokens: 12, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 } },
+    sdkSession: { source: "sdk_estimate", scope: "session", total_cost_usd: 0.3, modelUsage: { sonnet: { inputTokens: 24 } } },
+  });
 });

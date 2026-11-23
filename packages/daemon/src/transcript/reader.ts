@@ -10,11 +10,13 @@
 
 import { open } from "node:fs/promises";
 
+import { commandOutputParts, localCommandOutput, type CommandOutputPart } from "@claude-remote/agent-bridge";
 import type { ReadPage, RenderMessage, RenderRole } from "./types.js";
 
 /** 已知的元数据行 type：不渲染、不报 meta 卡。新版本 CLI 的未知 type 走 kind:meta 兜底。 */
 const KNOWN_META_TYPES = new Set([
   "mode",
+  "cost-state",
   "permission-mode",
   "file-history-snapshot",
   "file-history-delta",
@@ -90,36 +92,32 @@ function baseOf(o: Record<string, unknown>, seq: number): MessageBase | null {
   return { seq, uuid, parentUuid, ...(timestamp === undefined ? {} : { timestamp }) };
 }
 
+function outputMessage(base: MessageBase, blockIndex: number, output: CommandOutputPart[]): RenderMessage {
+  return { ...base, blockIndex, role: "assistant", kind: "command_output", output, text: output.map((part) => part.text).join("\n") };
+}
+
 function userMessages(base: MessageBase, content: unknown): RenderMessage[] {
-  if (typeof content === "string") {
-    const text = stripWrapperTags(content).trim();
-    if (text === "") return [];
-    return [{ ...base, blockIndex: 0, role: "user", kind: "text", text }];
-  }
-  if (!Array.isArray(content)) return [];
+  const parts = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  if (!Array.isArray(parts)) return [];
   const messages: RenderMessage[] = [];
-  content.forEach((part, blockIndex) => {
+  parts.forEach((part, blockIndex) => {
     if (!isRecord(part)) return;
     if (part.type === "text" && typeof part.text === "string") {
       const text = stripWrapperTags(part.text).trim();
       if (text !== "") messages.push({ ...base, blockIndex, role: "user", kind: "text", text });
+      const output = commandOutputParts(part.text);
+      if (output.length > 0) messages.push(outputMessage(base, text ? parts.length + blockIndex : blockIndex, output));
       return;
     }
     if (part.type === "tool_result") {
       const toolUseId = typeof part.tool_use_id === "string" ? part.tool_use_id : undefined;
       messages.push({
-        ...base,
-        blockIndex,
-        role: "user",
-        kind: "tool_result",
-        text: contentText(part.content),
-        isError: part.is_error === true,
-        ...(toolUseId === undefined ? {} : { toolUseId }),
+        ...base, blockIndex, role: "user", kind: "tool_result", text: contentText(part.content),
+        isError: part.is_error === true, ...(toolUseId === undefined ? {} : { toolUseId }),
       });
     }
-    // 其余 block（image 等）阶段一跳过
   });
-  return messages;
+  return messages.sort((a, b) => a.blockIndex - b.blockIndex);
 }
 
 function assistantMessages(base: MessageBase, content: unknown): RenderMessage[] {
@@ -179,19 +177,43 @@ export function parseTranscriptLine(line: string, seq: number): RenderMessage[] 
   }
   if (!isRecord(o)) return [];
   if (o.isSidechain === true) return [];
-  if (o.isMeta === true) return [];
   const type = typeof o.type === "string" ? o.type : "";
-  const message = isRecord(o.message) ? o.message : undefined;
-  if (message === undefined) return [];
   const base = baseOf(o, seq);
   if (base === null) return [];
+  if (specialSubtype(o) === "command_output" && typeof o.content === "string") {
+    const output = localCommandOutput(o.content);
+    return output.length ? [outputMessage(base, 0, output)] : [];
+  }
+  if (specialSubtype(o) === "compact_boundary") {
+    const raw = o.compactMetadata ?? o.compact_metadata;
+    if (!isRecord(raw) || (raw.trigger !== "auto" && raw.trigger !== "manual")) return [];
+    const { trigger } = raw;
+    const pre = raw.preTokens ?? raw.pre_tokens;
+    const post = raw.postTokens ?? raw.post_tokens;
+    const duration = raw.durationMs ?? raw.duration_ms;
+    if (!isCount(pre)) return [];
+    return [{ ...base, blockIndex: 0, role: "assistant", kind: "compact_boundary", compactMetadata: {
+      trigger, pre_tokens: pre,
+      ...(isCount(post) ? { post_tokens: post } : {}),
+      ...(isCount(duration) ? { duration_ms: duration } : {}),
+    } }];
+  }
+  if (o.isMeta === true) return [];
+  const message = isRecord(o.message) ? o.message : undefined;
+  if (message === undefined) return [];
 
   if (type === "user") return userMessages(base, message.content);
   if (type === "assistant") {
+    if (typeof o.local_command_source === "string") {
+      const output = localCommandOutput(o.local_command_source);
+      return output.length ? [outputMessage(base, 0, output)] : [];
+    }
     const messages = assistantMessages(base, message.content);
     if (typeof message.id === "string" && message.id !== "") {
       for (const item of messages) item.apiMessageId = message.id;
     }
+    const first = messages[0];
+    if (first && isRecord(message.usage)) first.usage = message.usage;
     return messages;
   }
   if (KNOWN_META_TYPES.has(type) || type === "") return [];
@@ -215,6 +237,13 @@ export function parseTranscriptLine(line: string, seq: number): RenderMessage[] 
 // 轻量行索引 + 主链
 // ---------------------------------------------------------------------------
 
+function specialSubtype(o: Record<string, unknown>): "command_output" | "compact_boundary" | undefined {
+  if (o.type !== "system") return undefined;
+  if (o.subtype === "compact_boundary") return "compact_boundary";
+  if (o.subtype === "local_command" || o.subtype === "local_command_output") return "command_output";
+  return undefined;
+}
+
 interface LineEntry {
   seq: number;
   offset: number;
@@ -225,6 +254,7 @@ interface LineEntry {
   sidechain: boolean;
   meta: boolean;
   hasMessage: boolean;
+  special?: ReturnType<typeof specialSubtype>;
   bad: boolean;
 }
 
@@ -260,6 +290,7 @@ function indexLine(text: string, seq: number, offset: number, length: number): L
   entry.sidechain = o.isSidechain === true;
   entry.meta = o.isMeta === true;
   entry.hasMessage = isRecord(o.message);
+  entry.special = specialSubtype(o);
   return entry;
 }
 
@@ -271,6 +302,11 @@ interface ScanResult {
 /** 顺序分块流过全文件，产出每行的定位索引。行内容解析后立即丢弃。 */
 async function scanLines(file: string): Promise<ScanResult> {
   const entries: LineEntry[] = [];
+  await visitLines(file, (line, seq, offset, length) => entries.push(indexLine(line, seq, offset, length)));
+  return { entries, badLines: entries.filter((entry) => entry.bad).length };
+}
+
+async function visitLines(file: string, visit: (line: string, seq: number, offset: number, length: number) => void): Promise<void> {
   const handle = await open(file, "r");
   try {
     const chunkSize = 256 * 1024;
@@ -282,7 +318,7 @@ async function scanLines(file: string): Promise<ScanResult> {
 
     const finishLine = (lineBuffer: Buffer, offset: number): void => {
       seq += 1;
-      entries.push(indexLine(lineBuffer.toString("utf8"), seq, offset, lineBuffer.length));
+      visit(lineBuffer.toString("utf8"), seq, offset, lineBuffer.length);
     };
 
     for (;;) {
@@ -307,7 +343,6 @@ async function scanLines(file: string): Promise<ScanResult> {
   } finally {
     await handle.close();
   }
-  return { entries, badLines: entries.filter((entry) => entry.bad).length };
 }
 
 /**
@@ -318,14 +353,14 @@ async function scanLines(file: string): Promise<ScanResult> {
 function computeMainChain(entries: LineEntry[]): Set<number> {
   const byUuid = new Map<string, LineEntry>();
   for (const entry of entries) {
-    if (entry.uuid !== null) byUuid.set(entry.uuid, entry);
+    if (entry.uuid !== null && !entry.sidechain) byUuid.set(entry.uuid, entry);
   }
   let tail: LineEntry | undefined;
   for (let i = entries.length - 1; i >= 0; i -= 1) {
     const entry = entries[i];
     if (entry === undefined) continue;
     if (entry.bad || entry.sidechain) continue;
-    if (entry.type === "user" || entry.type === "assistant") {
+    if (entry.type === "user" || entry.type === "assistant" || (entry.special !== undefined && entry.uuid !== null)) {
       tail = entry;
       break;
     }
@@ -345,8 +380,11 @@ function computeMainChain(entries: LineEntry[]): Set<number> {
 
 /** 主链上会参与渲染窗口计数的行（user/assistant 或未知含 message 的行）。 */
 function isRenderableChainLine(entry: LineEntry, chain: Set<number>): boolean {
-  if (entry.bad || entry.sidechain || entry.meta) return false;
+  if (entry.bad || entry.sidechain) return false;
+  if (entry.special === "compact_boundary" && entry.uuid !== null) return true;
   if (!chain.has(entry.seq)) return false;
+  if (entry.special === "command_output" && entry.uuid !== null) return true;
+  if (entry.meta) return false;
   if (entry.type === "user" || entry.type === "assistant") return true;
   return entry.type !== null && !KNOWN_META_TYPES.has(entry.type) && entry.hasMessage;
 }
@@ -391,4 +429,64 @@ export function readTail(file: string, limit: number): Promise<ReadPage> {
 /** 取 seq < beforeSeq 的最后 limit 个主链行的消息（向上翻页）。 */
 export function readBefore(file: string, beforeSeq: number, limit: number): Promise<ReadPage> {
   return readPage(file, beforeSeq, limit);
+}
+
+const INPUT_FIELDS = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"] as const;
+type InputField = typeof INPUT_FIELDS[number];
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+interface TranscriptUsage {
+  mainAgent?: { source: "transcript"; apiResponses: number; usage: Partial<Record<InputField, number>> };
+  sdkSession?: {
+    source: "sdk_estimate";
+    scope: "session";
+    total_cost_usd?: number;
+    modelUsage?: Record<string, unknown>;
+  };
+}
+
+/** All recorded main-agent API responses, independent of the requested message page. */
+export async function readTranscriptUsage(file: string, sessionId: string): Promise<TranscriptUsage> {
+  const seen = new Map<string, Set<InputField>>();
+  const counts: Partial<Record<InputField, number>> = {};
+  const recorded: Partial<Record<InputField, number>> = {};
+  let sdkSession: TranscriptUsage["sdkSession"];
+  await visitLines(file, (line) => {
+    let entry: unknown;
+    try { entry = JSON.parse(line); } catch { return; }
+    if (!isRecord(entry) || entry.isSidechain === true || (entry.sessionId !== undefined && entry.sessionId !== sessionId)) return;
+    if (entry.type === "cost-state") {
+      const { totalCostUSD, modelUsage } = entry;
+      const cost = typeof totalCostUSD === "number" && Number.isFinite(totalCostUSD) && totalCostUSD >= 0;
+      const models = isRecord(modelUsage);
+      if (cost || models) sdkSession = { source: "sdk_estimate", scope: "session",
+        ...(cost ? { total_cost_usd: totalCostUSD } : {}), ...(models ? { modelUsage } : {}),
+      };
+      return;
+    }
+    if (entry.type !== "assistant" || entry.isMeta === true || entry.parent_tool_use_id || typeof entry.local_command_source === "string") return;
+    const message = entry.message;
+    if (!isRecord(message) || typeof message.id !== "string" || !message.id || message.model === "<synthetic>" ||
+      !isRecord(message.usage)) return;
+    const usage = message.usage;
+    if (!INPUT_FIELDS.some((field) => isCount(usage[field]))) return;
+    const fields = seen.get(message.id) ?? new Set<InputField>();
+    seen.set(message.id, fields);
+    for (const field of INPUT_FIELDS) {
+      const value = usage[field];
+      if (isCount(value) && !fields.has(field)) {
+        fields.add(field);
+        counts[field] = (counts[field] ?? 0) + value;
+        recorded[field] = (recorded[field] ?? 0) + 1;
+      }
+    }
+  });
+  for (const field of INPUT_FIELDS) if (recorded[field] !== seen.size) delete counts[field];
+  return {
+    ...(seen.size ? { mainAgent: { source: "transcript", apiResponses: seen.size, usage: counts } } : {}),
+    ...(sdkSession === undefined ? {} : { sdkSession }),
+  };
 }

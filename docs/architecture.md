@@ -201,6 +201,124 @@ run.state 为 started/done/error；`error` 和 `permissionMode` 可选，permiss
 
 客户端 `{ "type": "ping" }` 收到 `{ "type": "pong" }`，与订阅无关。会话快照及上述 HTTP/WS 行为由 `server.test.ts` 集成测试覆盖。
 
+
+### P1 命令、补充指令、上下文与用量
+
+本节 HTTP 接口沿用 Bearer token，WS 帧沿用指定会话订阅。以下写入接口接受 JSON 请求体，运行依旧经过 CLI/Agent SDK。daemon 只读取 JSONL。客户端使用 `GET /api/sessions/:id/state` 或重新订阅取得相同格式的 `session-state`，并按 `sessionId` 和 `runId` 对账。
+
+#### 命令与 Skills（V2-01）
+
+| HTTP | 响应 |
+| --- | --- |
+| `GET /api/commands?cwd=<cwd>` | 新会话发现。cwd 省略时使用主目录，也可传现有会话使用的目录 |
+| `GET /api/commands?sessionId=<uuid>` | 会话发现。活跃 run 使用其当前 SDK 目录，空闲时按转录解析 cwd 并请求 SDK 发现 |
+| `POST /api/sessions` 或 `POST /api/sessions/:id/messages` | 按原契约发送 `text: "/<name> <args>"`，保留权限、模型与普通消息幂等语义 |
+
+目录响应为 `200 { status: "available", source, commands }`。每项有 `name`（无前导 `/`）、`kind: "skill" | "command" | "unknown"`、`availability: "available" | "unverified"`，及 SDK 提供时的 `description`、`argumentHint`、`aliases`。进入可执行列表的条件是 `availability: "available"`。`sdk_discovery` 使用无用户输入、不持久化的控制进程。只有已确认支持无交互执行的内置命令，或者 SDK 目录与 Skill 列表都确认的用户可调用 Skill，才在该来源标为可执行。活跃轮次的 `sdk_init` 使用 SDK 声明的列表和 CLI 报告的终端专用集合。推荐目录过滤已知终端专用命令和会话重置命令；仅供模型调用的 Skill 不暴露。`sdk_update` 全量替换原列表，新条目缺少可执行性依据时为 `unverified`。SDK 初始化继承目录配置，实际调用由 SDK 和项目权限决定。参考 [Claude Code 命令和 Skills](https://code.claude.com/docs/en/agent-sdk/skills)。
+
+目录不可用时仍返回 200，响应为 `{ status: "unavailable", reason }`。reason 可为 `initializing`（活跃 SDK 尚未公布）、`sdk_unavailable`（控制不受支持、失败或超时）、`terminal_driving`、`session_changed`。同时传 sessionId 和 cwd 返回 400 `ambiguous_scope`，cwd 未知返回 400 `unknown_cwd`。
+
+```json
+{ "type": "commands", "sessionId": "<uuid>", "runId": "<uuid>", "catalog": { "source": "sdk_update", "commands": [{ "name": "review", "kind": "skill", "availability": "available", "argumentHint": "<path>" }] } }
+{ "type": "command-output", "sessionId": "<uuid>", "runId": "<uuid>", "eventId": "<id>", "command": "compact", "failed": true, "output": [{ "stream": "stderr", "text": "Error: No messages to compact" }] }
+{ "type": "command-lifecycle", "sessionId": "<uuid>", "runId": "<uuid>", "eventId": "<id>", "clientMessageId": "<uuid>", "state": "started" }
+```
+
+`command-output.output[].stream` 可为 `stdout`、`stderr`、`output`（CLI 未区分流），`command` 和 `failed` 可缺省。实时输出按 `(runId,eventId)` 去重，活跃 run 最近 100 条命令输出及压缩边界随订阅补发。刷新、重连后以转录分页和 `message` 帧恢复落盘内容。`message.kind: "command_output"` 的 role 为 assistant，包含 `output` 和供简化渲染的 `text`。旧版标签与新版 `system/local_command` 转录均可恢复，系统提示和任务通知仍过滤。部分 CLI 为实时合成输出和落盘行签发不同 UUID，实时帧可作短期预览，重载历史时采用落盘消息身份。`command-lifecycle` 仅在 CLI 发送该事件时透传，原生状态为 `queued | started | completed`，最终 result 之后的原生帧可能缺省。
+
+#### 运行中补充指令（V2-02）
+
+`POST /api/sessions/:id/steer` 接收 `{ runId: "<uuid>", clientMessageId: "<uuid>", text: "补充要求" }`。接受后返回 202 及 `{ sessionId, runId, clientMessageId, text, state, revision }`，失败终态可带 `error`。同一会话、同一 run、同一 clientMessageId 重试返回当前回执并附 `replayed: true`，不因重连重新排队。保持客户端生成的 ID，切换会话时重新绑定会话和当前 run。普通 `POST /messages` 保持 idle-only 语义。
+
+Runner 在生成或工具执行期间接收请求，常规发送在 SDK Query 的 result 边界依 FIFO 逐条传入。补充指令沿用原 run 的模型、工作目录、思考强度和请求权限模式。此交付方式兼容 SDK 0.3.212 无法稳定关联并行输入的情况。一个 run 可以包含多个 SDK turn，当前生成继续执行到结果边界。客户端以 `(sessionId,runId,clientMessageId)` 为键，仅应用更高的 revision。
+
+| 状态 | 含义 |
+| --- | --- |
+| `queued` | daemon 已登记，待交付前可以编辑、撤回或立即发送 |
+| `delivered` | 正文已交给 SDK 输入流或续跑 Query，等待处理结果 |
+| `processed` | 对应 SDK turn 已收到成功 result，CLI 已处理该输入 |
+| `cancelled` | 排队消息被撤回，或对应输入被中断。已交付的输入可能已写入转录 |
+| `failed` | SDK 失败或未返回所需 result，本 run 未完成该条输入 |
+
+光标停留在当前会话时接收 `{ "type": "steer", "sessionId": "<uuid>", "runId": "<uuid>", "clientMessageId": "<uuid>", "text": "补充要求", "state": "delivered", "revision": 2 }`。切回或重连时，`session-state.steering` 提供当前和最近回执，待交付项目按实际队列顺序排在前面。每个 run 最多 16 条等待交付，再加一条正在交付或处理的输入。回执在 run 活跃期间保留，结束后约 10 分钟，在 daemon 进程内生效。队列和回执容量满时返回 409 `queue_full`。停机重启后用转录确认已落盘输入，再发起新的补充请求。
+
+| 操作 | 请求与成功响应 |
+| --- | --- |
+| 编辑 | `PATCH /api/sessions/:id/steer/:clientMessageId`，请求 `{ runId, text }`。返回 200，回执保持 `queued`，正文更新，revision 加 1 |
+| 撤回 | `DELETE /api/sessions/:id/steer/:clientMessageId`，runId 可置于 query 或 JSON body；同时使用时须一致。全省略时按当前活跃 run 校验。返回 200，回执更新为 `cancelled`，revision 加 1 |
+| 立即发送 | `POST /api/sessions/:id/steer/:clientMessageId/send-now`，请求 `{ runId }`。返回 202 和优先排队的 `queued` 回执；后续以 `steer` 帧跟踪交付与完成 |
+
+三个操作均返回完整回执 `{ sessionId, runId, clientMessageId, text, state, revision }`，状态变化广播相同字段的 `steer` 帧。编辑正文须非空，过滤会改变会话身份的 `/clear`、`/reset`、`/new`。未知回执返回 404 `{ error: "steer_not_found" }`。指定的 runId 与回执或活跃 run 不一致时返回 409 `{ error: "run_mismatch", activeRunId, status }`。回执已交付或已达终态时，返回 409 `{ error, state }`，编辑、撤回和立即发送分别使用 `steer_not_editable`、`steer_not_cancellable`、`steer_not_sendable`。
+
+立即发送把目标移到队首并中断当前 SDK turn。daemon 撤销旧 turn 的未决审批，等待结果、流关闭或中断宽限期，再关闭旧 Query 并用同一 sessionId 续跑。整个过程保持 runId 和驾驶锁，其他待发送消息保留相对顺序。正在中断时重复选择同一条回执，返回相同 revision；选择另一条会把新选择移到队首，并共用当前中断。停止整个 run 的 `/abort` 仍取消队列，优先于任何尚未开始的续跑。明确撤回优先消息时，已发出的中断仍会完成，之后按剩余队列续跑。
+
+#### 旁白对话（`/btw`）
+
+`POST /api/sessions/:id/btw` 接受 `{ question, clientMessageId? }`，question 去空白后须非空，最多 32 KiB UTF-8，禁止 NUL；clientMessageId 若提供须为 UUID，用于关联临时 SDK 输入。成功返回 `200 { sessionId, question, answer, model?, usage? }`，model 和 usage 取 SDK 实际返回。格式错误为 400 `invalid_question` 或 `invalid_client_message_id`，未知会话为 404 `session_not_found`。
+
+旁白从会话 JSONL 解析 cwd，以独立的 SDK Query 恢复该会话上下文，关闭持久化、文件设置来源、hooks、工具和 MCP 自动加载，并继续由拒绝回调处理工具请求。question 作为普通问题传入。旁白可以与主线 run 并行，返回值仅经本次 HTTP 请求交付。每会话允许 1 个旁白 Query，daemon 最多同时 4 个，等待上限 60 秒，连接断开时关闭 Query。达到并发限制、SDK 失败、超时或无法获取真实 cwd 返回 503 `btw_unavailable`，可带 `message`。SDK 原始错误不向客户端转发。
+
+#### 会话工作区
+
+`GET /api/sessions/:id/workspace` 响应 `200 { git, mcp }`，只使用已知会话 JSONL 的 cwd。未知会话返回 404 `session_not_found`，cwd 无效或 Git 查询失败时返回 503 `workspace_unavailable`。
+
+- 非 Git 工作区返回 `git: { isGitRepo: false }`。Git 工作区返回 `{ isGitRepo: true, branch, dirty, files, diff, truncated }`。branch 是分支名，游离 HEAD 使用提交短 SHA。files 项为 `{ path, status, additions?, deletions? }`，path 相对仓库根目录，status 为 Git porcelain 两位状态，如 `" M"`、`"MM"` 或 `"??"`。重命名按增删记录。行数来自 Git numstat。
+- diff 为统一补丁，比较 HEAD 和最终工作树，纳入已跟踪文件的暂存和未暂存变化。未跟踪路径出现在 files。现有敏感路径规则同时作用于列表和补丁。Git 查询无 shell，禁用外部 diff、textconv 和仓库内容过滤器，查询预算为 3 秒。补丁输出最多 128 KiB，输出或路径预算导致截断时 `truncated: true`。
+- mcp 为 `{ status: "available", servers: [{ name, status }] }` 或 `{ status: "unavailable" }`。从活跃 SDK 查询，只投影服务器名和连接状态 `connected | failed | needs-auth | pending | disabled`。控制失败、超时、查询切换或无活跃 SDK 时返回 unavailable。配置、URL、环境变量、请求头和错误正文均留在 daemon 内部。
+
+#### 上下文与压缩（V2-03）
+
+`GET /api/sessions/:id/context` 返回 `200 { status: "available", source: "sdk", context }`。活跃 SDK 读取 `getContextUsage()`，其中 `context` 含 `model`、`totalTokens`、`maxTokens`、`rawMaxTokens`、`percentage`、`categories: [{name,tokens,color,isDeferred?}]`。SDK 提供时还可含 `memoryFiles`、`mcpTools`、`agents`、`systemTools`、`systemPromptSections`、`deferredBuiltinTools`、`slashCommands`、`skills`、`autoCompactThreshold`、`isAutoCompactEnabled`、`messageBreakdown`、`apiUsage`。percentage 按 SDK 原值返回，分类中可有缓冲或空闲分类。无活跃 Query 返回 `{ status: "unavailable", reason: "no_active_sdk" }`。冷启动的独立 SDK 控制会话无法保证反映原会话上下文。终端占用、控制不受支持或等待期间轮次变更分别返回 `terminal_driving`、`sdk_unavailable` 或 `session_changed`。
+
+`POST /api/sessions/:id/compact` 接受 `{ clientMessageId: "<uuid>", instructions?: "<重点>" }`。instructions 可省略或为空，最多 8 KiB UTF-8，禁止 NUL。返回 202 `{ sessionId, runId, clientMessageId, state: "compacting" }`。空闲且终端没有占用时，为该会话注册独占 run，CLI 公布支持后才向 SDK 发送原生 `/compact` 和重点说明。并发同 ID 或重连重试返回原回执并带 `replayed: true`，异 ID 遇占用返回 409 `not_idle`。同一客户端 ID 在 daemon 进程内登记，终态后约 10 分钟内可重试。已受理的压缩使用原 `/abort` 加对应 runId 停止。
+
+```json
+{ "type": "compaction", "sessionId": "<uuid>", "runId": "<uuid>", "clientMessageId": "<uuid>", "state": "success", "boundary": { "eventId": "<id>", "metadata": { "trigger": "manual", "pre_tokens": 12000, "post_tokens": 4000 } } }
+{ "type": "compact-status", "sessionId": "<uuid>", "runId": "<uuid>", "eventId": "<id>", "state": "compacting" }
+{ "type": "compact-boundary", "sessionId": "<uuid>", "runId": "<uuid>", "eventId": "<id>", "metadata": { "trigger": "auto", "pre_tokens": 12000 } }
+```
+
+专用压缩回执状态为 `compacting | success | not_needed | failed | cancelled`。`success` 依据原生成功状态或手动边界，`not_needed` 依据 CLI 明确提示。失败可带 SDK 错误文本、`compact_unavailable`、`compact_outcome_unavailable` 或 `sdk_ended_without_result`。停止可附 `error: "aborted"`，已经发出的边界仍有效。`session-state.compactions` 恢复回执。`compact-status.state` 为 `compacting | success | failed`，失败时可带 `error`。手动或自动的正式转录结果为 `message.kind: "compact_boundary"`，`compactMetadata` 包含 `trigger`、`pre_tokens` 和 CLI 提供时的 `post_tokens`、`duration_ms`。压缩边界在后续转录重接后仍可通过分页读取。收到 `resync` 后按现有约定重拉。
+
+#### Token、费用和订阅额度（V2-04）
+
+`GET /api/sessions/:id/usage` 返回 `{ sessionId, mainAgent?, sdkSession?, latestTurn?, quotas?, gatewayBilling: { status: "unavailable" } }`。WS 和快照提供同样的 `latestTurn` 与 `quotas` 数据形状。
+
+| 字段 | 来源与统计范围 |
+| --- | --- |
+| `latestTurn.usage` | SDK result 的原始 `usage`，覆盖一个 SDK turn 的主代理。错误 result 也可带用量 |
+| `latestTurn.turnModelUsage` | CLI 实际提供 `model_usage_since_last_result` 时转发，按模型拆解本 SDK turn 的用量。字段可能缺失 |
+| `latestTurn.sdkTotals` | SDK result 的 `modelUsage`、`total_cost_usd`，可部分缺失。带 `source: "sdk_estimate"`；CLI 2.1.277 起为 `scope: "session"`，旧版为 `"query"`，版本未知时为 `"unknown"` |
+| `sdkSession` | 最新有效的 JSONL `cost-state`，带相同估算来源及 `scope: "session"`。用于跨进程恢复 CLI 已落盘的会话累计估算 |
+| `mainAgent` | `{ source: "transcript", apiResponses, usage }`。整个转录文件中已记录的主代理请求，按 API message ID 去重，排除子代理分支与合成输出。仅统计已观察到的 input/cache tokens，遇缺字段省略对应汇总 |
+| `quotas` | SDK 初始化后明确发送订阅窗口类型的 `rate_limit_event` 时才给出。CLI 已报告使用 API Key 或第三方后端时省略，按 `rateLimitType` 替换，保留 SDK 提供的 `status`、`resetsAt`、`utilization` 等字段，并带 `runId`、`eventId`、`observedAt`（epoch 毫秒）。新 run 重新采集，未观察到时缺省 |
+
+```json
+{ "type": "run-usage", "sessionId": "<uuid>", "runId": "<uuid>", "turn": { "runId": "<uuid>", "resultId": "<id>", "turnIndex": 2, "clientMessageId": "<uuid>", "isError": false, "usage": { "input_tokens": 110, "output_tokens": 30 }, "sdkTotals": { "source": "sdk_estimate", "scope": "session", "total_cost_usd": 0.05 } } }
+{ "type": "subscription-quota", "sessionId": "<uuid>", "runId": "<uuid>", "quota": { "runId": "<uuid>", "eventId": "<id>", "rateLimitType": "five_hour", "status": "allowed", "utilization": 0.4, "observedAt": 1795417709308 } }
+```
+
+`turnIndex` 在每个 run 从 1 开始，实时结果以 `(sessionId,runId,resultId)` 去重，`clientMessageId` 仅已知时返回。同一会话的 SDK 累计值由新值替换，不累加每条 result 或 HTTP 分页。活跃期间可读 `latestTurn.sdkTotals`，结合 scope 解释；已经落盘的会话总额可读 `sdkSession`。在部分旧转录中，仅有 assistant 消息的逐 API `usage`，此时输出 Token、子代理开销与账单可能缺省。正式消息可含原始 `usage`，前端按 `apiMessageId` 去重且不要将每步 `output_tokens` 当成最终累计。晚于最后一个 result 的外部终端开销以其原生落盘为准。第三方网关账单另以 `gatewayBilling` 表示，当前无账单数据源。订阅额度仅消费原生事件，未调用实验性 usage 控制。参考 [Agent SDK 用量和费用口径](https://code.claude.com/docs/en/agent-sdk/cost-tracking)。
+
+#### P1 状态快照与错误
+
+`session-state` 新增可选字段 `commands`（当前活跃目录）、`steering`、`compactions`（含最近终态）、`latestTurn` 和 `quotas`。`GET /api/sessions/:id/state` 返回完整快照；WS 订阅先发快照，再补发活跃 run 的输出、边界、诊断和流草稿。`sessionId: "*"` 仍只接收状态广播。事件中的运行身份、消息身份和 revision 用于处理重试、切会话或迟到帧。
+
+| HTTP | 错误码 | 条件 |
+| --- | --- | --- |
+| 400 | `invalid_session_id`、`ambiguous_scope`、`unknown_cwd` | 会话或命令目录参数非法 |
+| 400 | `invalid_json`、`invalid_client_message_id`、`invalid_run_id`、`invalid_text`、`invalid_instructions` | 请求体缺字段、格式非法或超出字段限制 |
+| 400 | `command_unavailable` | steer 不接受会重置会话身份的 `/clear`、`/reset`、`/new` |
+| 401 / 404 / 413 | `unauthorized` / `session_not_found` / `payload_too_large` | 鉴权失败、会话未知、请求体超 1 MiB |
+| 409 | `not_idle` | steer 没有可接收的 daemon run，或 compact 遇到会话占用。终端占用时 status 为 `terminal-driving` |
+| 409 | `run_mismatch` | steer 的 runId 与目标运行身份不一致。响应含 status 和 `activeRunId`，后者可为 null |
+| 404 | `steer_not_found` | 目标队列回执未知或已过保留期 |
+| 409 | `steer_not_editable`、`steer_not_cancellable`、`steer_not_sendable` | 目标回执已经交付或结束，响应含其 state |
+| 409 | `run_stopping` | 当前 run 已受理停止，拒绝新补充指令 |
+| 409 | `queue_full`、`message_id_conflict` | 队列或回执容量已满，或同一会话的消息 ID 已用于另一种写入 |
+| 500 | `internal` | 未预期的服务器错误 |
+| 503 | `btw_unavailable`、`workspace_unavailable` | 旁白或工作区查询不可用 |
+
 ### Auto 执行环境与兼容配置
 
 auto 由 Claude Code 原生分类器审核，应用不新增审核模型服务，也不推断分类器模型。保持已有模型映射和原生服务端审核/回退，不自动关闭服务端审核、不自动切 Bypass。

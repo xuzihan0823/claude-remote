@@ -1,4 +1,5 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { localCommandOutput } from "./command-output.js";
 import type { WorkerEvent } from "./types.js";
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -20,12 +21,53 @@ function contentText(value: unknown): string {
   return typeof item?.text === "string" ? item.text : "";
 }
 
+function strings(value: unknown): string[] | undefined {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : undefined;
+}
+
 export function adaptSdkMessage(message: SDKMessage): WorkerEvent[] {
   const source = message as unknown as Record<string, unknown>;
   const sessionId = typeof source.session_id === "string" ? source.session_id : undefined;
   const events: WorkerEvent[] = sessionId === undefined ? [] : [{ type: "session", sessionId }];
 
+  if (source.type === "command_lifecycle" && typeof source.uuid === "string" && typeof source.command_uuid === "string"
+    && (source.state === "queued" || source.state === "started" || source.state === "completed")) {
+    events.push({ type: "command_lifecycle", eventId: source.uuid, clientMessageId: source.command_uuid, state: source.state });
+  }
+
   if (message.type === "system") {
+    const fromMain = !source.agent_id && !source.parent_tool_use_id;
+    if (fromMain && message.subtype === "init") {
+      const commands = strings(message.slash_commands);
+      const skills = strings(message.skills);
+      const terminalCommands = strings(source.terminal_slash_commands);
+      const apiKeySource = source.apiKeySource;
+      const subscriptionQuotas = source.served_by_anthropic === false ? false
+        : typeof apiKeySource === "string" ? apiKeySource === "oauth" : undefined;
+      if (commands) events.push({
+        type: "command_init", commands,
+        ...(skills === undefined ? {} : { skills }),
+        ...(terminalCommands === undefined ? {} : { terminalCommands }),
+        ...(subscriptionQuotas === undefined ? {} : { subscriptionQuotas }),
+        ...(typeof message.claude_code_version === "string" ? { cliVersion: message.claude_code_version } : {}),
+      });
+    } else if (fromMain && message.subtype === "commands_changed" && Array.isArray(message.commands)) {
+      events.push({ type: "commands_changed", commands: message.commands, eventId: message.uuid });
+    } else if (fromMain && message.subtype === "local_command_output" && typeof message.content === "string") {
+      const output = localCommandOutput(message.content);
+      if (output.length > 0) events.push({ type: "command_output", output, eventId: message.uuid });
+    } else if (fromMain && message.subtype === "compact_boundary" && message.compact_metadata) {
+      const { trigger, pre_tokens } = message.compact_metadata;
+      if ((trigger === "manual" || trigger === "auto") && Number.isSafeInteger(pre_tokens) && pre_tokens >= 0) {
+        events.push({ type: "compact_boundary", metadata: message.compact_metadata, eventId: message.uuid });
+      }
+    } else if (fromMain && message.subtype === "status") {
+      const state = message.compact_result ?? (message.status === "compacting" ? "compacting" : undefined);
+      if (state === "compacting" || state === "success" || state === "failed") events.push({
+        type: "compact_status", state, eventId: message.uuid,
+        ...(typeof message.compact_error === "string" ? { error: message.compact_error } : {}),
+      });
+    }
     if ((source.subtype === "init" || source.subtype === "status") && !source.agent_id && !source.parent_tool_use_id
       && typeof source.permissionMode === "string" && source.permissionMode !== "") {
       events.push({ type: "permission_mode", effectiveMode: source.permissionMode });
@@ -64,7 +106,24 @@ export function adaptSdkMessage(message: SDKMessage): WorkerEvent[] {
     return events;
   }
 
+  if (message.type === "rate_limit_event" && message.rate_limit_info && typeof message.uuid === "string") {
+    events.push({ type: "rate_limit", info: message.rate_limit_info, eventId: message.uuid });
+    return events;
+  }
+
   if (message.type === "assistant") {
+    // Some CLI builds encode local output as a synthetic assistant with a source wrapper.
+    if (!message.parent_tool_use_id && typeof source.local_command_source === "string") {
+      const command = record(source.local_command_run)?.command;
+      const failed = record(source.local_command_outcome)?.kind === "failed";
+      const output = localCommandOutput(source.local_command_source);
+      if (output.length > 0) events.push({
+        type: "command_output", output, eventId: message.uuid,
+        ...(typeof command === "string" ? { command } : {}),
+        ...(failed ? { failed } : {}),
+      });
+      return events;
+    }
     const content = (message.message as unknown as { content?: unknown }).content;
     const text = contentText(content);
     if (text) events.push({ type: "assistant", text, messageId: message.uuid });
@@ -80,6 +139,9 @@ export function adaptSdkMessage(message: SDKMessage): WorkerEvent[] {
   }
 
   if (message.type === "user") {
+    if (source.isReplay === true && !message.parent_tool_use_id && typeof message.uuid === "string") {
+      events.push({ type: "input_ack", clientMessageId: message.uuid });
+    }
     const content = (message.message as unknown as { content?: unknown }).content;
     if (Array.isArray(content)) {
       for (const part of content) {
@@ -100,12 +162,19 @@ export function adaptSdkMessage(message: SDKMessage): WorkerEvent[] {
   }
 
   if (message.type === "result") {
+    const turnModelUsage = record(source.model_usage_since_last_result);
+    const inputIds = strings(source.user_message_uuids) ?? (typeof source.user_message_uuid === "string" ? [source.user_message_uuid] : undefined);
     events.push({
       type: "result",
       subtype: message.subtype,
       isError: message.is_error,
       ...(message.subtype === "success" ? { result: message.result } : { errors: message.errors }),
       messageId: message.uuid,
+      ...(inputIds === undefined ? {} : { inputIds }),
+      ...(record(message.usage) ? { usage: message.usage } : {}),
+      ...(record(message.modelUsage) ? { modelUsage: message.modelUsage } : {}),
+      ...(turnModelUsage ? { turnModelUsage } : {}),
+      ...(Number.isFinite(message.total_cost_usd) && message.total_cost_usd >= 0 ? { total_cost_usd: message.total_cost_usd } : {}),
     });
   }
   return events;

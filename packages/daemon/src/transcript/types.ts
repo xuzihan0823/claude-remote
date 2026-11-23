@@ -1,3 +1,5 @@
+import type { CommandOutputPart, CompactMetadata } from "@claude-remote/agent-bridge";
+
 // 会话转录数据结构 —— 字段与 docs/api-contract.md 一致。
 // 本文件是 03 卡（watcher / HTTP 层）的依赖，交付后不可破坏性变更。
 
@@ -23,7 +25,7 @@ export interface SessionSummary {
 }
 
 export type RenderRole = "user" | "assistant";
-export type RenderKind = "text" | "tool_use" | "tool_result" | "thinking" | "meta";
+export type RenderKind = "text" | "tool_use" | "tool_result" | "thinking" | "meta" | "command_output" | "compact_boundary";
 
 /** JSONL 行映射出的渲染用统一结构。一行可拆出多条（blocks），seq 相同、blockIndex 不同。 */
 export interface RenderMessage {
@@ -34,6 +36,10 @@ export interface RenderMessage {
   uuid: string;
   parentUuid: string | null;
   apiMessageId?: string;
+  /** SDK/API per-step usage as recorded by the CLI. Shared API IDs can repeat. */
+  usage?: Record<string, unknown>;
+  output?: CommandOutputPart[];
+  compactMetadata?: Pick<CompactMetadata, "trigger" | "pre_tokens" | "post_tokens" | "duration_ms">;
   role: RenderRole;
   kind: RenderKind;
   /** text / thinking / tool_result / meta 的文本。 */
@@ -49,7 +55,7 @@ export interface RenderMessage {
   rawType?: string;
 }
 
-/** readTail / readBefore 的返回。messages 按 seq 升序，只含主链。 */
+/** readTail / readBefore 的返回。messages 按 seq 升序，含主链与主会话的压缩边界。 */
 export interface ReadPage {
   messages: RenderMessage[];
   /**

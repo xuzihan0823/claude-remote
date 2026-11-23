@@ -30,7 +30,7 @@ export class FileAccessError extends Error {
 // macOS 默认不区分大小写，.ENV 和 .env 是同一个文件
 const SENSITIVE_SEGMENT = /^(?:\.env.*|\.git|\.ssh|.*\.pem|.*\.key|id_rsa.*|\.npmrc|\.netrc)$/i;
 
-function isSensitive(path: string): boolean {
+export function isSensitivePath(path: string): boolean {
   return path.split(sep).some((segment) => SENSITIVE_SEGMENT.test(segment));
 }
 
@@ -45,14 +45,14 @@ export async function resolveRequestedFile(cwd: string, requested: string | null
   if (cwd === "" && !isAbsolute(requested)) throw new FileAccessError("invalid_path");
 
   const target = resolve(cwd, requested);
-  if (isSensitive(target)) throw new FileAccessError("sensitive_file");
+  if (isSensitivePath(target)) throw new FileAccessError("sensitive_file");
   let real: string;
   try {
     real = await realpath(target);
   } catch {
     throw new FileAccessError("file_not_found");
   }
-  if (isSensitive(real)) throw new FileAccessError("sensitive_file");
+  if (isSensitivePath(real)) throw new FileAccessError("sensitive_file");
 
   let stats: Stats;
   try {

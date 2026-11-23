@@ -19,7 +19,13 @@ import {
   type EffortLevel,
   type ExternalPermissionMode,
   type WorkerEvent,
+  type CommandDescriptor,
+  type StartQueryOptions,
 } from "@claude-remote/agent-bridge";
+import {
+  commandCatalog, contextReport, NO_COMPACTION_NEEDED, usageScope,
+  type CommandCatalog, type CompactReceipt, type ContextReport, type McpOverview, type Quota, type SideChatReply, type SteerReceipt, type TurnUsage,
+} from "./p1.js";
 
 /**
  * 驾驶互斥门。03 卡的 ActivityTracker 实现此接口（beginRun → daemon-driving，
@@ -34,9 +40,25 @@ export interface ActivityGate {
 /** 会话非 idle（或已有活跃 run）时 startTurn 抛出；06 卡映射 HTTP 409。 */
 export class NotIdleError extends Error {}
 
+export class RunRequestError extends Error {
+  constructor(
+    readonly code: "run_mismatch" | "not_idle" | "run_stopping" | "queue_full" | "message_id_conflict" |
+      "steer_not_found" | "steer_not_editable" | "steer_not_cancellable" | "steer_not_sendable",
+    readonly state?: SteerReceipt["state"],
+  ) {
+    super(code);
+  }
+}
+
 /** 事件流元素：`run` 为轮次生命周期（对应 WS run 帧），`worker` 为 SDK 消息展平。 */
 export type RunEvent =
   | { type: "run"; runId: string; sessionId: string; state: "started" | "done" | "error"; error?: string; permissionMode?: string }
+  | { type: "stream_reset"; sessionId: string; runId: string }
+  | { type: "steer"; sessionId: string; runId: string; receipt: SteerReceipt }
+  | { type: "compaction"; sessionId: string; runId: string; receipt: CompactReceipt }
+  | { type: "commands"; sessionId: string; runId: string; catalog: CommandCatalog }
+  | { type: "usage"; sessionId: string; runId: string; turn: TurnUsage }
+  | { type: "quota"; sessionId: string; runId: string; quota: Quota }
   | { type: "worker"; runId: string; sessionId: string; event: WorkerEvent };
 
 export type RunOutcome = { state: "done" } | { state: "error"; error: string };
@@ -51,6 +73,7 @@ export interface StartTurnOptions {
   effort?: EffortLevel;
   /** Start a new persisted SDK session with sessionId instead of resuming it. */
   newSession?: boolean;
+  compact?: { clientMessageId: string };
   /** 权限模式覆盖；省略时由 SDK 走 "default"。 */
   permissionMode?: ExternalPermissionMode;
 }
@@ -109,7 +132,37 @@ class EventQueue<T extends object> implements AsyncIterable<T> {
   }
 }
 
+interface PendingSteer {
+  receipt: SteerReceipt;
+}
+
+type LiveReplayEvent = Extract<WorkerEvent, { type: "command_output" | "compact_boundary" }>;
+
+interface RunQuery {
+  sdk: SdkQueryHandle;
+  approvals: AbortController;
+  interruptBoundary: AbortController;
+}
+
 interface ActiveRun {
+  runId: string;
+  cwd: string;
+  query: RunQuery;
+  options: StartTurnOptions;
+  interrupting?: { clientMessageId: string; timer: ReturnType<typeof setTimeout> };
+  mcpRequest?: Promise<McpOverview>;
+  queue: EventQueue<RunEvent>;
+  pending: PendingSteer[];
+  steering?: PendingSteer;
+  initialInputId: string | undefined;
+  currentInputId: string | undefined;
+  contextRequest?: Promise<ContextReport>;
+  commandInit?: Extract<WorkerEvent, { type: "command_init" }>;
+  catalog?: CommandCatalog;
+  compaction?: CompactReceipt;
+  compactFailure?: string;
+  compactSuccess?: boolean;
+  replays: LiveReplayEvent[];
   sessionId: string;
   requestedPermissionMode: ExternalPermissionMode;
   effectivePermissionMode?: string;
@@ -123,6 +176,38 @@ interface ActiveRun {
 
 const DEFAULT_ABORT_GRACE_MS = 5_000;
 const FORCE_STOPPED = Symbol("force-stopped");
+const INTERRUPT_BOUNDARY = Symbol("interrupt-boundary");
+const SIDE_CHAT_TIMEOUT_MS = 60_000;
+const MAX_SIDE_CHATS = 4;
+const REQUEST_TTL_MS = 10 * 60_000;
+const MAX_RECEIPTS = 4096;
+const MAX_PENDING = 16;
+const MAX_PROBES = 4;
+const CONTROL_TIMEOUT_MS = 5_000;
+
+interface RecentReceipt<T> {
+  receipt: T;
+  expiresAt: number;
+}
+
+function control<T>(operation: () => Promise<T>, signal: AbortSignal, timeoutMs = CONTROL_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  let stop: () => void;
+  const deadline = new Promise<never>((_, reject) => {
+    stop = () => reject(new Error("SDK control request stopped"));
+    timer = setTimeout(stop, timeoutMs);
+    signal.addEventListener("abort", stop, { once: true });
+    if (signal.aborted) stop();
+  });
+  const request = Promise.resolve().then(() => {
+    signal.throwIfAborted();
+    return operation();
+  });
+  return Promise.race([request, deadline]).finally(() => {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", stop);
+  });
+}
 
 export class TurnRunner {
   readonly #gate: ActivityGate;
@@ -133,6 +218,13 @@ export class TurnRunner {
   readonly #queryFactory: QueryFactory | undefined;
   readonly #runs = new Map<string, ActiveRun>();
   readonly #sessionRuns = new Map<string, string>();
+  readonly #steers = new Map<string, RecentReceipt<SteerReceipt>>();
+  readonly #compactions = new Map<string, RecentReceipt<CompactReceipt>>();
+  readonly #usage = new Map<string, TurnUsage>();
+  readonly #quotas = new Map<string, Map<string, Quota>>();
+  readonly #probes = new Map<string, AbortController>();
+  readonly #sideChats = new Map<string, AbortController>();
+  #metadataClosing = false;
 
   constructor(options: TurnRunnerOptions) {
     this.#gate = options.gate;
@@ -144,7 +236,7 @@ export class TurnRunner {
   }
 
   startTurn(options: StartTurnOptions): TurnHandle {
-    const { sessionId, cwd, text, model, effort, newSession = false, permissionMode } = options;
+    const { sessionId, cwd, text, newSession = false, permissionMode } = options;
     if (typeof text !== "string" || text.trim() === "") {
       throw new TypeError("text must be a non-empty string");
     }
@@ -158,48 +250,61 @@ export class TurnRunner {
       throw new NotIdleError(`session ${sessionId} is not idle`);
     }
 
+    if (options.compact) {
+      this.#pruneReceipts(this.#compactions);
+      if (this.#compactions.size >= MAX_RECEIPTS) throw new RunRequestError("queue_full");
+    }
+    const runId = randomUUID();
+    const currentInputId = options.compact?.clientMessageId ?? options.clientMessageId;
     this.#gate.beginRun(sessionId);
     const controller = new AbortController();
-    let sdk: SdkQueryHandle;
+    let query: RunQuery;
     try {
-      const canUseTool = createPermissionAdapter(
-        this.#permissions,
-        { sessionKey: sessionId, userId: this.#userId },
-        { signal: controller.signal, ...(this.#permissionTimeoutMs === undefined ? {} : { timeoutMs: this.#permissionTimeoutMs }) },
-      );
-      sdk = startSdkQuery(
-        {
-          cwd,
-          prompt: text,
-          ...(options.clientMessageId === undefined ? {} : { clientMessageId: options.clientMessageId }),
-          canUseTool,
-          signal: controller.signal,
-          ...(newSession ? { sessionId } : { resume: sessionId }),
-          ...(model === undefined ? {} : { model }),
-          ...(effort === undefined ? {} : { effort }),
-          ...(permissionMode === undefined ? {} : { permissionMode }),
-        },
-        this.#queryFactory,
-      );
+      query = this.#openRunQuery(options, controller.signal, options.compact ? undefined : text, currentInputId, newSession);
     } catch (error) {
       this.#safeEndRun(sessionId);
       throw error;
     }
 
-    const runId = randomUUID();
     let forceStop!: () => void;
     const forceStopped = new Promise<typeof FORCE_STOPPED>((resolve) => {
       forceStop = () => resolve(FORCE_STOPPED);
     });
-    const run: ActiveRun = { sessionId, controller, aborted: false, forceStop, forceTimer: undefined,
+    const queue = new EventQueue<RunEvent>();
+    const run: ActiveRun = { sessionId, runId, cwd, query, options, queue, initialInputId: currentInputId, currentInputId, pending: [], replays: [],
+      controller, aborted: false, forceStop, forceTimer: undefined,
       requestedPermissionMode: permissionMode ?? "default", diagnostics: [] };
     this.#runs.set(runId, run);
+    this.#quotas.delete(sessionId);
     this.#sessionRuns.set(sessionId, runId);
 
-    const queue = new EventQueue<RunEvent>();
     queue.push({ type: "run", runId, sessionId, state: "started", ...(permissionMode === undefined ? {} : { permissionMode }) });
-    const completion = this.#consume(runId, run, sdk, queue, forceStopped);
+    if (options.compact) {
+      this.#setCompaction(run, { runId, clientMessageId: options.compact.clientMessageId, state: "compacting" });
+    }
+    const completion = this.#consume(run, forceStopped, options.compact ? text : undefined);
     return { runId, events: queue, completion };
+  }
+
+  #openRunQuery(
+    options: StartTurnOptions, signal: AbortSignal, prompt: string | undefined, clientMessageId: string | undefined, newSession = false,
+  ): RunQuery {
+    const { sessionId, cwd, model, effort, permissionMode } = options;
+    const approvals = new AbortController();
+    const canUseTool = createPermissionAdapter(this.#permissions, { sessionKey: sessionId, userId: this.#userId }, {
+      signal: AbortSignal.any([signal, approvals.signal]),
+      ...(this.#permissionTimeoutMs === undefined ? {} : { timeoutMs: this.#permissionTimeoutMs }),
+    });
+    const launch: StartQueryOptions = {
+      cwd, canUseTool, signal,
+      ...(prompt === undefined ? {} : { prompt }),
+      ...(clientMessageId === undefined ? {} : { clientMessageId }),
+      ...(newSession ? { sessionId } : { resume: sessionId }),
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
+      ...(permissionMode === undefined ? {} : { permissionMode }),
+    };
+    return { sdk: startSdkQuery(launch, this.#queryFactory), approvals, interruptBoundary: new AbortController() };
   }
 
   /** 中断指定 run（经 AbortSignal → SDK interrupt）。未知 runId 返回 false。 */
@@ -208,6 +313,7 @@ export class TurnRunner {
     if (run === undefined) return false;
     if (run.aborted) return true; // 重复点停止：已在收尾中
     run.aborted = true;
+    this.#settleSteers(run, "cancelled", "aborted");
     run.controller.abort(new Error("aborted"));
     run.forceTimer = setTimeout(() => {
       console.warn(`run ${runId} did not settle ${this.#abortGraceMs}ms after abort; force-closing SDK`);
@@ -235,74 +341,481 @@ export class TurnRunner {
     return run === undefined || runId === undefined ? [] : run.diagnostics.map((event) => ({ type: "worker", sessionId, runId, event }));
   }
 
-  async #consume(
-    runId: string,
-    run: ActiveRun,
-    sdk: SdkQueryHandle,
-    queue: EventQueue<RunEvent>,
-    forceStopped: Promise<typeof FORCE_STOPPED>,
-  ): Promise<RunOutcome> {
-    const { sessionId } = run;
-    let outcome: RunOutcome;
-    const iterator = sdk.messages[Symbol.asyncIterator]();
-    try {
-      // 流式输入 + persistSession 下，CLI 在 result 后保持存活等待下一条输入，
-      // iterator 不会自然耗尽（真机实测，06 集成期修复）——一轮以 result 事件为终点。
-      // 每次 next() 与 forceStopped 赛跑：interrupt 不生效时 abort 宽限期满直接跳出。
-      let sawResult = false;
-      let resultError: string | undefined;
-      for (;;) {
-        const next = await Promise.race([iterator.next(), forceStopped]);
-        if (next === FORCE_STOPPED || next.done === true) break;
-        if ("session_id" in next.value && next.value.session_id !== sessionId) continue;
-        for (let event of adaptSdkMessage(next.value)) {
-          if (event.type === "session" && event.sessionId !== sessionId) continue;
-          if (event.type === "permission_mode") {
-            run.effectivePermissionMode = event.effectiveMode;
-            event = { ...event, requestedMode: run.requestedPermissionMode };
-          } else if (event.type === "permission_denied" || event.type === "notice") {
-            const eventId = event.eventId;
-            if (run.diagnostics.some((item) => item.eventId === eventId)) continue;
-            run.diagnostics.push(event);
-            if (run.diagnostics.length > 100) run.diagnostics.shift();
-          }
-          queue.push({ type: "worker", runId, sessionId, event });
-          if (event.type === "result") {
-            sawResult = true;
-            // 模型不可用、鉴权失败等：CLI 照样给 result，但 is_error=true——按出错收尾，手机端才会提示
-            if (event.isError) resultError = resultErrorText(event) ?? "Claude 返回错误";
-          }
-        }
-        if (sawResult) break;
+  #findRun(sessionId: string): ActiveRun | undefined {
+    const runId = this.#sessionRuns.get(sessionId);
+    return runId === undefined ? undefined : this.#runs.get(runId);
+  }
+
+  #pruneReceipts<T extends { runId: string }>(receipts: Map<string, RecentReceipt<T>>): void {
+    const now = Date.now();
+    for (const [key, entry] of receipts) if (entry.expiresAt <= now && !this.#runs.has(entry.receipt.runId)) receipts.delete(key);
+  }
+
+  steer(sessionId: string, runId: string, clientMessageId: string, text: string): { receipt: SteerReceipt; replayed: boolean } {
+    this.#pruneReceipts(this.#steers);
+    const previous = this.#steers.get(`${sessionId}:${clientMessageId}`)?.receipt;
+    if (previous) {
+      if (previous.runId !== runId) throw new RunRequestError("run_mismatch");
+      return { receipt: previous, replayed: true };
+    }
+    const run = this.#findRun(sessionId);
+    if (!run) throw new RunRequestError("not_idle");
+    if (runId !== run.runId) throw new RunRequestError("run_mismatch");
+    if (run.aborted) throw new RunRequestError("run_stopping");
+    if (run.compaction) throw new RunRequestError("not_idle");
+    if (run.initialInputId === clientMessageId) throw new RunRequestError("message_id_conflict");
+    if (run.pending.length >= MAX_PENDING || this.#steers.size >= MAX_RECEIPTS) throw new RunRequestError("queue_full");
+    const receipt: SteerReceipt = { runId, clientMessageId, text, state: "queued", revision: 1 };
+    run.pending.push({ receipt });
+    this.#setSteer(run, receipt);
+    return { receipt, replayed: false };
+  }
+
+  mutateSteer(
+    sessionId: string, runId: string | undefined, clientMessageId: string,
+    mutation: { type: "edit"; text: string } | { type: "cancel" } | { type: "send_now" },
+  ): SteerReceipt {
+    const receipt = this.steerReceipt(sessionId, clientMessageId);
+    if (!receipt) throw new RunRequestError("steer_not_found");
+    const run = this.#findRun(sessionId);
+    if ((runId !== undefined && runId !== receipt.runId) || (run && run.runId !== receipt.runId)) {
+      throw new RunRequestError("run_mismatch");
+    }
+    const index = run?.pending.findIndex((item) => item.receipt.clientMessageId === clientMessageId) ?? -1;
+    const input = run?.pending[index];
+    if (!run || run.aborted || receipt.state !== "queued" || !input) {
+      const code = mutation.type === "edit" ? "steer_not_editable" : mutation.type === "cancel" ? "steer_not_cancellable" : "steer_not_sendable";
+      throw new RunRequestError(code, receipt.state);
+    }
+    if (mutation.type === "edit") {
+      input.receipt = { ...input.receipt, text: mutation.text, revision: input.receipt.revision + 1 };
+      this.#setSteer(run, input.receipt);
+    } else if (mutation.type === "cancel") {
+      run.pending.splice(index, 1);
+      this.#advanceSteer(run, input, "cancelled");
+    } else if (run.interrupting?.clientMessageId !== clientMessageId) {
+      run.pending.splice(index, 1);
+      run.pending.unshift(input);
+      this.#advanceSteer(run, input, "queued");
+      if (run.interrupting) {
+        run.interrupting.clientMessageId = clientMessageId;
+      } else {
+        const query = run.query;
+        const forceBoundary = (): void => query.interruptBoundary.abort();
+        const timer = setTimeout(forceBoundary, this.#abortGraceMs);
+        run.interrupting = { clientMessageId, timer };
+        query.approvals.abort(new Error("turn interrupted"));
+        void query.sdk.interrupt().catch(forceBoundary);
       }
-      outcome = run.aborted
-        ? { state: "error", error: "aborted" }
-        : resultError !== undefined ? { state: "error", error: resultError } : { state: "done" };
+    }
+    return input.receipt;
+  }
+
+  steerReceipt(sessionId: string, clientMessageId: string): SteerReceipt | undefined {
+    this.#pruneReceipts(this.#steers);
+    return this.#steers.get(`${sessionId}:${clientMessageId}`)?.receipt;
+  }
+
+  compactReceipt(sessionId: string, clientMessageId: string): CompactReceipt | undefined {
+    this.#pruneReceipts(this.#compactions);
+    return this.#compactions.get(`${sessionId}:${clientMessageId}`)?.receipt;
+  }
+
+  #setSteer(run: ActiveRun, receipt: SteerReceipt): void {
+    const expiresAt = receipt.state === "queued" || receipt.state === "delivered" ? Infinity : Date.now() + REQUEST_TTL_MS;
+    this.#steers.set(`${run.sessionId}:${receipt.clientMessageId}`, { receipt, expiresAt });
+    run.queue.push({ type: "steer", sessionId: run.sessionId, runId: run.runId, receipt });
+  }
+
+  #advanceSteer(run: ActiveRun, input: PendingSteer, state: SteerReceipt["state"], error?: string): void {
+    input.receipt = { ...input.receipt, state, revision: input.receipt.revision + 1, ...(error === undefined ? {} : { error }) };
+    this.#setSteer(run, input.receipt);
+  }
+
+  #settleSteers(run: ActiveRun, state: "failed" | "cancelled", error: string): void {
+    if (run.steering) {
+      this.#advanceSteer(run, run.steering, state, error);
+      delete run.steering;
+    }
+    for (const input of run.pending.splice(0)) this.#advanceSteer(run, input, state, error);
+  }
+
+  #setCompaction(run: ActiveRun, receipt: CompactReceipt): void {
+    run.compaction = receipt;
+    const expiresAt = receipt.state === "compacting" ? Infinity : Date.now() + REQUEST_TTL_MS;
+    this.#compactions.set(`${run.sessionId}:${receipt.clientMessageId}`, { receipt, expiresAt });
+    run.queue.push({ type: "compaction", sessionId: run.sessionId, runId: run.runId, receipt });
+  }
+
+  p1State(sessionId: string) {
+    this.#pruneReceipts(this.#steers);
+    this.#pruneReceipts(this.#compactions);
+    const run = this.#findRun(sessionId);
+    const prefix = `${sessionId}:`;
+    const pending = run?.pending.map(({ receipt }) => receipt) ?? [];
+    const queuedIds = new Set(pending.map(({ clientMessageId }) => clientMessageId));
+    const steering = [...pending, ...[...this.#steers].filter(([key, { receipt }]) =>
+      key.startsWith(prefix) && !queuedIds.has(receipt.clientMessageId)).map(([, item]) => item.receipt)];
+    const compactions = [...this.#compactions].filter(([key]) => key.startsWith(prefix)).map(([, item]) => item.receipt);
+    const latestTurn = this.#usage.get(sessionId);
+    const quotas = this.#quotas.get(sessionId);
+    return {
+      ...(run?.catalog === undefined ? {} : { commands: run.catalog }),
+      ...(steering.length === 0 ? {} : { steering }),
+      ...(compactions.length === 0 ? {} : { compactions }),
+      ...(latestTurn === undefined ? {} : { latestTurn }),
+      ...(quotas === undefined ? {} : { quotas: [...quotas.values()] }),
+    };
+  }
+
+  activeCommandReplay(sessionId: string): RunEvent[] {
+    const run = this.#findRun(sessionId);
+    return run ? run.replays.map((event) => ({ type: "worker", sessionId, runId: run.runId, event })) : [];
+  }
+
+  activeCwd(sessionId: string): string | undefined {
+    return this.#findRun(sessionId)?.cwd;
+  }
+
+  async commands(cwd: string, sessionId?: string): Promise<CommandCatalog | undefined> {
+    const run = sessionId === undefined ? undefined : this.#findRun(sessionId);
+    if (run) return run.catalog ?? undefined;
+    return this.#probe("commands", cwd, sessionId, async (sdk, signal) => {
+      const descriptors = await control(() => sdk.supportedCommands(), signal);
+      if (!Array.isArray(descriptors)) return undefined;
+      const skills = await control(() => sdk.reloadSkills(), signal).catch(() => undefined);
+      // reloadSkills includes model-only skills. commandCatalog intersects these
+      // with the SDK discovery list, which includes only user-invocable skills.
+      const names = Array.isArray(skills?.skills)
+        ? skills.skills.flatMap((item) => typeof item?.name === "string" ? [item.name] : [])
+        : undefined;
+      return commandCatalog("sdk_discovery", descriptors, undefined, names);
+    });
+  }
+
+  async context(sessionId: string): Promise<ContextReport> {
+    const run = this.#findRun(sessionId);
+    if (!run) return { status: "unavailable", reason: "no_active_sdk" };
+    if (run.contextRequest) return run.contextRequest;
+    const query = run.query;
+    const request = Promise.resolve().then(() => {
+      run.controller.signal.throwIfAborted();
+      return query.sdk.getContextUsage();
+    });
+    run.contextRequest = this.#activeContext(run, query, () => request);
+    // A timed-out control may still be pending in the SDK. Share that attempt
+    // until it settles, so polling cannot heap up transport requests.
+    const pending = run.contextRequest;
+    const clear = (): void => { if (run.contextRequest === pending) delete run.contextRequest; };
+    void request.then(clear, clear);
+    return run.contextRequest;
+  }
+
+  async #activeContext(run: ActiveRun, query: RunQuery, getContext: SdkQueryHandle["getContextUsage"]): Promise<ContextReport> {
+    try {
+      const value = await control(getContext, run.controller.signal);
+      if (this.#findRun(run.sessionId) !== run || run.query !== query || run.aborted) return { status: "unavailable", reason: "session_changed" };
+      return contextReport(value);
+    } catch {
+      return { status: "unavailable", reason: "sdk_unavailable" };
+    }
+  }
+
+  async mcpOverview(sessionId: string): Promise<McpOverview> {
+    const run = this.#findRun(sessionId);
+    if (!run || run.aborted || run.interrupting) return { status: "unavailable" };
+    if (run.mcpRequest) return run.mcpRequest;
+    const query = run.query;
+    const request = Promise.resolve().then(() => query.sdk.mcpServerStatus());
+    const pending = control(() => request, run.controller.signal).then((servers): McpOverview => {
+      if (this.#findRun(sessionId) !== run || run.query !== query || run.aborted || run.interrupting || !Array.isArray(servers)) {
+        return { status: "unavailable" };
+      }
+      return { status: "available", servers: servers.flatMap((server) =>
+        typeof server?.name === "string" && ["connected", "failed", "needs-auth", "pending", "disabled"].includes(server.status)
+          ? [{ name: server.name, status: server.status }] : []) };
+    }).catch((): McpOverview => ({ status: "unavailable" }));
+    run.mcpRequest = pending;
+    const clear = (): void => { if (run.mcpRequest === pending) delete run.mcpRequest; };
+    void request.then(clear, clear);
+    return pending;
+  }
+
+  async sideChat(cwd: string, sessionId: string, question: string, clientMessageId: string | undefined, clientSignal: AbortSignal): Promise<SideChatReply | undefined> {
+    if (this.#metadataClosing || clientSignal.aborted || this.#sideChats.size >= MAX_SIDE_CHATS || this.#sideChats.has(sessionId)) return undefined;
+    const controller = new AbortController();
+    const signal = AbortSignal.any([controller.signal, clientSignal]);
+    this.#sideChats.set(sessionId, controller);
+    let sdk: SdkQueryHandle | undefined;
+    try {
+      const side = startSdkQuery({
+        cwd, resume: sessionId, persistSession: false, signal, readOnlySideChat: true,
+        prompt: `Answer this side question using the resumed conversation. Do not use tools.\n\n${question}`,
+        ...(clientMessageId === undefined ? {} : { clientMessageId }),
+        canUseTool: async () => ({ behavior: "deny", message: "Read-only /btw side chat" }),
+      }, this.#queryFactory);
+      sdk = side;
+      return await control(async () => {
+        let model: string | undefined;
+        let answer: string | undefined;
+        for await (const message of side.messages) {
+          if ("session_id" in message && message.session_id !== sessionId) continue;
+          if (message.type === "system" && message.subtype === "init" && typeof message.model === "string") model = message.model;
+          if (message.type === "assistant" && !message.parent_tool_use_id && !message.error) {
+            if (typeof message.message.model === "string" && message.message.model !== "<synthetic>") model = message.message.model;
+            const assistant = adaptSdkMessage(message).find((event) => event.type === "assistant");
+            if (assistant?.type === "assistant") answer = assistant.text;
+          }
+          if (message.type !== "result") continue;
+          if (message.is_error || message.subtype !== "success") return undefined;
+          answer = (typeof message.result === "string" && message.result.trim() ? message.result : answer);
+          if (!answer?.trim()) return undefined;
+          return { answer, ...(model === undefined ? {} : { model }), ...(message.usage === undefined ? {} : { usage: message.usage }) };
+        }
+        return undefined;
+      }, signal, SIDE_CHAT_TIMEOUT_MS);
+    } catch {
+      return undefined;
+    } finally {
+      try { await sdk?.closeAndWait(); } catch { /* Side chat already ended. */ }
+      this.#sideChats.delete(sessionId);
+    }
+  }
+
+  closeMetadata(): void {
+    this.#metadataClosing = true;
+    for (const controller of [...this.#probes.values(), ...this.#sideChats.values()]) controller.abort();
+  }
+
+  async #probe<T>(kind: string, cwd: string, sessionId: string | undefined, read: (sdk: SdkQueryHandle, signal: AbortSignal) => Promise<T>): Promise<T | undefined> {
+    const key = JSON.stringify([kind, cwd, sessionId]);
+    if (this.#metadataClosing || this.#probes.size >= MAX_PROBES || this.#probes.has(key)) return undefined;
+    if (sessionId !== undefined && !this.#gate.isIdle(sessionId)) return undefined;
+    const controller = new AbortController();
+    this.#probes.set(key, controller);
+    let sdk: SdkQueryHandle | undefined;
+    try {
+      sdk = startSdkQuery({
+        cwd, persistSession: false, signal: controller.signal,
+        canUseTool: async () => ({ behavior: "deny", message: "Read-only SDK control session" }),
+        ...(sessionId === undefined ? {} : { resume: sessionId }),
+      }, this.#queryFactory);
+      return await read(sdk, controller.signal);
+    } catch {
+      return undefined;
+    } finally {
+      this.#probes.delete(key);
+      try { sdk?.close(); } catch { /* Metadata lookup is already over. */ }
+    }
+  }
+
+  async #consume(run: ActiveRun, forceStopped: Promise<typeof FORCE_STOPPED>, compactText?: string): Promise<RunOutcome> {
+    const { sessionId, runId, queue } = run;
+    let outcome: RunOutcome;
+    let turnIndex = 0;
+    const results = new Set<string>();
+    let iterator = run.query.sdk.messages[Symbol.asyncIterator]();
+    try {
+      if (compactText !== undefined) {
+        const sdk = run.query.sdk;
+        const descriptors = await control(() => sdk.supportedCommands(), run.controller.signal);
+        if (!Array.isArray(descriptors) || !descriptors.some((item) => item?.name === "compact")) throw new Error("compact_unavailable");
+        await sdk.steer(compactText, run.currentInputId);
+      }
+      while (!run.aborted) {
+        const boundary = run.query.interruptBoundary.signal;
+        let finishBoundary!: () => void;
+        const interrupted = new Promise<typeof INTERRUPT_BOUNDARY>((resolve) => {
+          finishBoundary = () => resolve(INTERRUPT_BOUNDARY);
+          if (boundary.aborted) finishBoundary();
+          else boundary.addEventListener("abort", finishBoundary, { once: true });
+        });
+        const next = await Promise.race([iterator.next(), forceStopped, interrupted])
+          .catch((error: unknown): typeof INTERRUPT_BOUNDARY => {
+            if (run.interrupting) return INTERRUPT_BOUNDARY;
+            throw error;
+          }).finally(() => boundary.removeEventListener("abort", finishBoundary));
+        if (next === FORCE_STOPPED || run.aborted) break;
+        let result: Extract<WorkerEvent, { type: "result" }> | undefined;
+        if (next !== INTERRUPT_BOUNDARY && !next.done) {
+          if ("session_id" in next.value && next.value.session_id !== sessionId) continue;
+          for (let event of adaptSdkMessage(next.value)) {
+            if (event.type === "session" && event.sessionId !== sessionId) continue;
+            if (event.type === "permission_mode") {
+              run.effectivePermissionMode = event.effectiveMode;
+              event = { ...event, requestedMode: run.requestedPermissionMode };
+            } else if (event.type === "permission_denied" || event.type === "notice") {
+              const eventId = event.eventId;
+              if (run.diagnostics.some((item) => item.eventId === eventId)) continue;
+              run.diagnostics.push(event);
+              if (run.diagnostics.length > 100) run.diagnostics.shift();
+            } else if (event.type === "result") {
+              if (results.has(event.messageId) || (run.currentInputId !== undefined && event.inputIds?.length && !event.inputIds.includes(run.currentInputId))) continue;
+              results.add(event.messageId);
+              result = event;
+              this.#recordUsage(run, event, ++turnIndex);
+            } else {
+              if (!this.#recordP1Event(run, event)) continue;
+            }
+            queue.push({ type: "worker", runId, sessionId, event });
+          }
+          if (!result) continue;
+        }
+        const error = result && (result.isError || result.subtype !== "success") ? resultErrorText(result) ?? "Claude 返回错误" : undefined;
+        if (run.interrupting) {
+          const oldQuery = run.query;
+          clearTimeout(run.interrupting.timer);
+          if (run.steering) {
+            const finished = result !== undefined && error === undefined;
+            this.#advanceSteer(run, run.steering, finished ? "processed" : "cancelled", finished ? undefined : "interrupted");
+            delete run.steering;
+          }
+          queue.push({ type: "stream_reset", runId, sessionId });
+          await control(() => oldQuery.sdk.closeAndWait(), run.controller.signal);
+          if (run.aborted) break;
+          delete run.interrupting;
+          delete run.catalog;
+          delete run.commandInit;
+          delete run.effectivePermissionMode;
+          delete run.contextRequest;
+          delete run.mcpRequest;
+          const nextInput = run.pending.shift();
+          if (!nextInput) break;
+          run.steering = nextInput;
+          run.currentInputId = nextInput.receipt.clientMessageId;
+          run.query = this.#openRunQuery(run.options, run.controller.signal, nextInput.receipt.text, run.currentInputId);
+          iterator = run.query.sdk.messages[Symbol.asyncIterator]();
+          this.#advanceSteer(run, nextInput, "delivered");
+          continue;
+        }
+        if (!result) {
+          if (run.steering || run.pending.length > 0 || run.compaction) throw new Error("sdk_ended_without_result");
+          break;
+        }
+        if (run.steering) {
+          this.#advanceSteer(run, run.steering, error ? "failed" : "processed", error);
+          delete run.steering;
+        }
+        if (run.compaction) {
+          this.#finishCompaction(run, error, result.result);
+          if (run.compaction.state === "failed") throw new Error(run.compaction.error ?? "compact_failed");
+        }
+        if (error !== undefined) throw new Error(error);
+        const nextInput = run.pending.shift();
+        if (!nextInput) break;
+        run.steering = nextInput;
+        run.currentInputId = nextInput.receipt.clientMessageId;
+        const handoff = run.query.sdk.steer(nextInput.receipt.text, run.currentInputId);
+        this.#advanceSteer(run, nextInput, "delivered");
+        await handoff;
+      }
+      outcome = run.aborted ? { state: "error", error: "aborted" } : { state: "done" };
     } catch (error) {
-      outcome = run.aborted
-        ? { state: "error", error: "aborted" }
-        : { state: "error", error: error instanceof Error ? error.message : String(error) };
+      outcome = { state: "error", error: run.aborted ? "aborted" : error instanceof Error ? error.message : String(error) };
     } finally {
       if (run.forceTimer !== undefined) clearTimeout(run.forceTimer);
-      // 等价于 for-await 的 break 语义；不 await（被强制停止时生成器可能仍挂起）
+      if (run.interrupting) clearTimeout(run.interrupting.timer);
       void Promise.resolve().then(() => iterator.return?.()).catch(() => undefined);
-      try {
-        sdk.close();
-      } catch {
-        // 清理失败不得影响 settle
-      }
-      this.#runs.delete(runId);
-      run.controller.abort(new Error("run ended"));
-      if (this.#sessionRuns.get(sessionId) === runId) this.#sessionRuns.delete(sessionId);
-      this.#safeEndRun(sessionId);
+      try { run.query.sdk.close(); } catch { /* Cleanup must not prevent settlement. */ }
     }
-    queue.push(
-      outcome.state === "done"
-        ? { type: "run", runId, sessionId, state: "done" }
-        : { type: "run", runId, sessionId, state: "error", error: outcome.error },
-    );
+    if (outcome.state === "error") {
+      this.#settleSteers(run, run.aborted ? "cancelled" : "failed", outcome.error);
+      if (run.compaction?.state === "compacting") this.#setCompaction(run, {
+        ...run.compaction, state: run.aborted ? "cancelled" : "failed", error: outcome.error,
+      });
+    }
+    const expiry = Date.now() + REQUEST_TTL_MS;
+    for (const item of this.#steers.values()) if (item.receipt.runId === runId) item.expiresAt = expiry;
+    this.#runs.delete(runId);
+    run.controller.abort(new Error("run ended"));
+    if (this.#sessionRuns.get(sessionId) === runId) this.#sessionRuns.delete(sessionId);
+    this.#safeEndRun(sessionId);
+    queue.push(outcome.state === "done" ? { type: "run", runId, sessionId, state: "done" }
+      : { type: "run", runId, sessionId, state: "error", error: outcome.error });
     queue.close();
     return outcome;
+  }
+
+  #recordP1Event(run: ActiveRun, event: WorkerEvent): boolean {
+    const { sessionId, runId, queue } = run;
+    if (event.type === "command_init") {
+      run.commandInit = event;
+      const listed = event.commands.map((name) => ({ name }));
+      run.catalog = commandCatalog("sdk_init", listed, event);
+      queue.push({ type: "commands", sessionId, runId, catalog: run.catalog });
+      const query = run.query;
+      void control(() => query.sdk.supportedCommands(), run.controller.signal).then((descriptors) => {
+        if (!Array.isArray(descriptors) || this.#runs.get(runId) !== run || run.query !== query ||
+          run.aborted || run.interrupting || run.catalog?.source !== "sdk_init") return;
+        const byName = new Map(descriptors.filter((item) => typeof item?.name === "string").map((item) => [item.name, item]));
+        const detailed: CommandDescriptor[] = event.commands.map((name) => byName.get(name) ?? { name });
+        run.catalog = commandCatalog("sdk_init", detailed, event);
+        queue.push({ type: "commands", sessionId, runId, catalog: run.catalog });
+      }).catch(() => undefined);
+    } else if (event.type === "commands_changed") {
+      run.catalog = commandCatalog("sdk_update", event.commands, run.commandInit);
+      queue.push({ type: "commands", sessionId, runId, catalog: run.catalog });
+    } else if (event.type === "command_output" || event.type === "compact_boundary") {
+      if (run.replays.some(({ eventId }) => eventId === event.eventId)) return false;
+      run.replays.push(event);
+      if (run.replays.length > 100) run.replays.shift();
+      if (event.type === "compact_boundary" && run.compaction && event.metadata.trigger === "manual") {
+        run.compaction = { ...run.compaction, boundary: { eventId: event.eventId, metadata: event.metadata } };
+      } else if (event.type === "command_output" && run.compaction && (event.command === undefined || event.command === "compact")) {
+        const output = event.output.find((part) => part.stream === "stderr" || event.failed || NO_COMPACTION_NEEDED.test(part.text.trim()));
+        if (output) run.compactFailure = output.text.slice(0, 300);
+      }
+    } else if (event.type === "compact_status" && run.compaction) {
+      if (event.state === "success") run.compactSuccess = true;
+      if (event.state === "failed") run.compactFailure = event.error?.slice(0, 300) ?? "compact_failed";
+    } else if (event.type === "rate_limit") {
+      if (!run.commandInit || run.commandInit.subscriptionQuotas === false || !event.info.rateLimitType ||
+        !["allowed", "allowed_warning", "rejected"].includes(event.info.status)) return false;
+      const quota = { ...event.info, runId, eventId: event.eventId, observedAt: Date.now() };
+      const quotas = this.#quotas.get(sessionId) ?? new Map<string, Quota>();
+      if (quotas.get(event.info.rateLimitType)?.eventId === event.eventId) return false;
+      quotas.set(event.info.rateLimitType, quota);
+      this.#remember(this.#quotas, sessionId, quotas);
+      queue.push({ type: "quota", sessionId, runId, quota });
+    }
+    return true;
+  }
+
+  #finishCompaction(run: ActiveRun, error: string | undefined, result: string | undefined): void {
+    if (!run.compaction) return;
+    const failure = error ?? run.compactFailure;
+    const noOp = !error && NO_COMPACTION_NEEDED.test((run.compactFailure ?? result ?? "").trim());
+    if (noOp) this.#setCompaction(run, { ...run.compaction, state: "not_needed" });
+    else if (failure) this.#setCompaction(run, { ...run.compaction, state: "failed", error: failure });
+    else if (run.compaction.boundary || run.compactSuccess) this.#setCompaction(run, { ...run.compaction, state: "success" });
+    else this.#setCompaction(run, { ...run.compaction, state: "failed", error: "compact_outcome_unavailable" });
+  }
+
+  #remember<T>(map: Map<string, T>, key: string, value: T): void {
+    map.delete(key);
+    map.set(key, value);
+    const oldest = map.keys().next().value;
+    if (map.size > 256 && oldest !== undefined) map.delete(oldest);
+  }
+
+  #recordUsage(run: ActiveRun, event: Extract<WorkerEvent, { type: "result" }>, turnIndex: number): void {
+    if (event.usage === undefined && event.modelUsage === undefined && event.total_cost_usd === undefined && event.turnModelUsage === undefined) return;
+    const { runId, sessionId } = run;
+    const turn: TurnUsage = {
+      runId, resultId: event.messageId, turnIndex, isError: event.isError,
+      ...(run.currentInputId === undefined ? {} : { clientMessageId: run.currentInputId }),
+      ...(event.usage === undefined ? {} : { usage: event.usage }),
+      ...(event.turnModelUsage === undefined ? {} : { turnModelUsage: event.turnModelUsage }),
+      ...(event.modelUsage === undefined && event.total_cost_usd === undefined ? {} : {
+        sdkTotals: {
+          source: "sdk_estimate", scope: usageScope(run.commandInit?.cliVersion),
+          ...(event.modelUsage === undefined ? {} : { modelUsage: event.modelUsage }),
+          ...(event.total_cost_usd === undefined ? {} : { total_cost_usd: event.total_cost_usd }),
+        },
+      }),
+    };
+    this.#remember(this.#usage, sessionId, turn);
+    run.queue.push({ type: "usage", runId, sessionId, turn });
   }
 
   #safeEndRun(sessionId: string): void {
