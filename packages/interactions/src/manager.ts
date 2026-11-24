@@ -87,6 +87,7 @@ export class InteractionManager {
   close(): void {
     for (const timer of this.#timers.values()) clearTimeout(timer);
     this.#timers.clear();
+    for (const id of this.#waiters.keys()) this.#finish(id, { type: "deny", message: "Interaction manager closed" });
   }
 
   createApproval(input: CreateInteractionInput<Approval>): InteractionRecord<Approval> {
@@ -116,9 +117,14 @@ export class InteractionManager {
       const abort = (): void => {
         signal?.removeEventListener("abort", abort);
         const decision: Decision = { type: "deny", message: "Interaction cancelled" };
-        this.store.resolve({ interactionId, userId: record.userId, status: "denied", decision,
-          resolvedAt: this.#now(), auditAction: "auto_deny_cancelled" });
-        this.#finish(interactionId, decision);
+        try {
+          this.store.resolve({ interactionId, userId: record.userId, status: "denied", decision,
+            resolvedAt: this.#now(), auditAction: "auto_deny_cancelled" });
+        } catch (error) {
+          console.warn("interaction cancellation failed:", error);
+        } finally {
+          this.#finish(interactionId, decision);
+        }
       };
       if (signal?.aborted) {
         abort();
@@ -140,13 +146,13 @@ export class InteractionManager {
       decision,
       resolvedAt,
       auditAction: decision.type,
-    });
-    if (record === undefined) {
+    }, this.#now);
+    if (record?.decision == null) {
       throw new InteractionAlreadyResolvedError("interaction was already resolved");
     }
 
-    this.#finish(interactionId, decision);
-    return { record, decision };
+    this.#finish(interactionId, record.decision);
+    return { record, decision: record.decision };
   }
 
   expireDue(now = this.#now()): InteractionRecord[] {
@@ -182,10 +188,24 @@ export class InteractionManager {
   }
 
   #scheduleExpiry(record: InteractionRecord): void {
-    const delay = Math.max(0, record.expiresAt - this.#now());
+    const delay = Math.min(2_147_483_647, Math.max(0, record.expiresAt - this.#now()));
     const timer = setTimeout(() => {
-      this.#timers.delete(record.interactionId);
-      this.expireDue();
+      const now = this.#now();
+      if (now < record.expiresAt) {
+        this.#scheduleExpiry(record);
+        return;
+      }
+      const decision: Decision = { type: "deny", message: "Interaction timed out" };
+      try {
+        this.store.resolve({
+          interactionId: record.interactionId, userId: record.userId, status: "expired",
+          decision, resolvedAt: now, auditAction: "auto_deny_timeout",
+        });
+      } catch (error) {
+        console.warn("interaction expiry failed:", error);
+      } finally {
+        this.#finish(record.interactionId, decision);
+      }
     }, delay);
     timer.unref();
     this.#timers.set(record.interactionId, timer);

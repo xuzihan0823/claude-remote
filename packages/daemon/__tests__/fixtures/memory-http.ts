@@ -1,4 +1,4 @@
-import { Agent, Server, request } from "node:http";
+import { Agent, Server, request, type IncomingHttpHeaders } from "node:http";
 import type { Socket } from "node:net";
 import { Duplex } from "node:stream";
 import type { TestContext } from "node:test";
@@ -61,30 +61,35 @@ export function memoryHttp(t: TestContext) {
     return client as unknown as Socket;
   };
 
-  const fetchJson = (path: string, options: { token?: string; post?: object; method?: string } = {}): Promise<{ status: number; json: Record<string, unknown> }> =>
-    new Promise((resolve, reject) => {
-      const body = options.post === undefined ? undefined : JSON.stringify(options.post);
+  const fetchRaw = (path: string, options: { token?: string; body?: string; method?: string; range?: string } = {}):
+    Promise<{ status: number; body: Buffer; headers: IncomingHttpHeaders }> => new Promise((resolve, reject) => {
+      const { body } = options;
       const req = request(`http://fixture.test${path}`, {
         agent, method: options.method ?? (body === undefined ? "GET" : "POST"),
         headers: {
           ...(options.token === undefined ? {} : { Authorization: `Bearer ${options.token}` }),
+          ...(options.range === undefined ? {} : { Range: options.range }),
           ...(body === undefined ? {} : { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }),
         },
       }, (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
         res.once("error", reject);
-        res.once("end", () => {
-          try { resolve({ status: res.statusCode ?? 0, json: JSON.parse(Buffer.concat(chunks).toString("utf8")) }); }
-          catch (error) { reject(error); }
-        });
+        res.once("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks), headers: res.headers }));
       });
       req.once("error", reject);
       req.end(body);
     });
 
+  const fetchJson = async (path: string, options: { token?: string; post?: object; method?: string } = {}):
+    Promise<{ status: number; json: Record<string, unknown> }> => {
+      const { post, ...rest } = options;
+      const { status, body } = await fetchRaw(path, { ...rest, ...(post === undefined ? {} : { body: JSON.stringify(post) }) });
+      return { status, json: JSON.parse(body.toString("utf8")) };
+    };
+
   return {
-    agent, fetchJson,
+    agent, fetchJson, fetchRaw,
     restoreListen: () => listen.mock.restore(),
     close: () => {
       agent.destroy();

@@ -36,13 +36,20 @@ import {
 export interface RelayTimings {
   /** 请求体转发完（WS 为发出 open）后等待 head/accept 的上限。 */
   headTimeoutMs: number;
+  /** 旁白响应在完成 SDK 清理后才发送。 */
+  sideChatHeadTimeoutMs: number;
   /** HTTP 流无任何数据的上限；WS 流不受此限。 */
   idleTimeoutMs: number;
   /** agent 与手机 WS 的 ping 周期；连续两个周期无 pong 即断开。 */
   heartbeatMs: number;
 }
 
-export const DEFAULT_TIMINGS: RelayTimings = { headTimeoutMs: 30_000, idleTimeoutMs: 120_000, heartbeatMs: 20_000 };
+export const DEFAULT_TIMINGS: RelayTimings = {
+  headTimeoutMs: 30_000,
+  sideChatHeadTimeoutMs: 70_000, // 60s 旁白执行 + 5s SDK 清理 + 转发余量
+  idleTimeoutMs: 120_000,
+  heartbeatMs: 20_000,
+};
 
 export interface RelayOptions extends RelayConfig {
   version?: string;
@@ -262,8 +269,8 @@ class HttpStream implements Stream {
     };
     if (!validOpen(open)) return false;
     this.agent.streams.set(this.sid, this);
-    this.agent.sendControl(open);
     this.#idleTimer = setTimeout(() => this.#onIdle(), this.ctx.timings.idleTimeoutMs);
+    this.agent.sendControl(open);
 
     this.req.on("data", (chunk: Buffer) => {
       if (this.#done) return;
@@ -281,7 +288,11 @@ class HttpStream implements Stream {
         if (this.#done) return;
         this.agent.sendControl({ t: "end", sid: this.sid });
         // 等 head 从请求体转发完才计时：慢速上传期间 daemon 本来就回不了 head
-        if (this.#status === 0) this.#headTimer = setTimeout(() => this.#onHeadTimeout(), this.ctx.timings.headTimeoutMs);
+        if (this.#status !== 0) return;
+        const { headTimeoutMs, sideChatHeadTimeoutMs } = this.ctx.timings;
+        const sideChat = open.method === "POST" && /^\/api\/sessions\/[^/]+\/btw$/.test(stripQuery(open.path));
+        this.#headTimer = setTimeout(() => this.#onHeadTimeout(),
+          sideChat ? Math.max(headTimeoutMs, sideChatHeadTimeoutMs) : headTimeoutMs);
       });
     });
     this.res.on("close", () => {

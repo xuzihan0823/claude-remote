@@ -83,7 +83,7 @@ export class ApprovalBridge implements PermissionBroker {
         });
         this.#emitCard(record);
         const decision = await this.#manager.awaitDecision(record.interactionId, signal);
-        this.#emitResolved(record.interactionId);
+        this.#emitResolved(record.interactionId, decision.type === "deny" ? "denied" : undefined);
         return decision;
       }
 
@@ -96,7 +96,7 @@ export class ApprovalBridge implements PermissionBroker {
         });
         this.#emitCard(record);
         const decision = await this.#manager.awaitDecision(record.interactionId, signal);
-        this.#emitResolved(record.interactionId);
+        this.#emitResolved(record.interactionId, decision.type === "deny" ? "denied" : undefined);
         if (decision.type !== "answer") return { type: "deny", message: "Question was not answered" };
         Object.assign(answers, decision.answers);
       }
@@ -121,12 +121,15 @@ export class ApprovalBridge implements PermissionBroker {
       return { status: "invalid", message: "answers must be an object" };
     }
     try {
+      if (this.#resolvedEmitted.has(interactionId)) return { status: "already_resolved" };
       const record = this.#manager.get(interactionId);
       if (record === undefined) return { status: "not_found" };
       // 单用户系统：鉴权在 HTTP Bearer 层，这里用记录自身的 userId 决议。
       const resolution = this.#manager.resolve(interactionId, record.userId, decision);
       this.#emitResolved(interactionId);
-      return { status: resolution.record.status as "allowed" | "denied" | "answered" };
+      const { status } = resolution.record;
+      return status === "allowed" || status === "denied" || status === "answered"
+        ? { status } : { status: "already_resolved" };
     } catch (error) {
       if (error instanceof InteractionAlreadyResolvedError) return { status: "already_resolved" };
       if (error instanceof InteractionNotFoundError) return { status: "not_found" };
@@ -171,13 +174,19 @@ export class ApprovalBridge implements PermissionBroker {
   }
 
   /** 按落库终态补发 approval.resolved；decide 与 awaitDecision 续体都会走到，Set 去重。 */
-  #emitResolved(interactionId: string): void {
+  #emitResolved(interactionId: string, fallback?: ResolvedStatus): void {
     if (this.#resolvedEmitted.has(interactionId)) return;
-    const record = this.#manager.get(interactionId);
-    if (record === undefined || record.status === "pending") return;
+    let status = fallback;
+    try {
+      const record = this.#manager.get(interactionId);
+      if (record !== undefined && record.status !== "pending") status = record.status;
+    } catch (error) {
+      if (status === undefined) throw error;
+    }
+    if (status === undefined) return;
     this.#pending.delete(interactionId);
     this.#resolvedEmitted.add(interactionId);
-    this.#emit({ type: "approval.resolved", interactionId, status: record.status });
+    this.#emit({ type: "approval.resolved", interactionId, status });
   }
 
   #emit(event: ApprovalEvent): void {

@@ -66,7 +66,7 @@ export interface LoopbackTarget {
 
 /** relay 被替换旧连接时的关闭码（packages/relay/src/server.ts CLOSE_REPLACED）。 */
 const CLOSE_REPLACED = 4001;
-const PAIR_PATHS = new Set(["/api/pair-info", "/api/pair-qr.svg", "/api/channels/refresh"]);
+const PAIR_PATHS = new Set(["/api/pair-info", "/api/pair-qr.svg", "/api/channels/refresh", "/api/relay/reload"]);
 const MAX_REJECT_BODY = 4096;
 
 /** 回放目标：daemon 监听在通配地址时走 127.0.0.1。 */

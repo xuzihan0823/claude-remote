@@ -434,3 +434,17 @@ test("auto run abort cancels pending approval even when SDK callback signal stay
     assert.equal(app.resolved()[0]?.status, "denied");
   } finally { app.close(); }
 });
+
+test("a late HTTP decision conflicts and broadcasts an expired approval", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const app = harness({ ttlMs: 60_000 });
+  t.after(() => app.close());
+  const waiting = app.bridge.request(approvalRequest(), new AbortController().signal);
+  const card = app.cards()[0]!;
+  now = card.expiresAt;
+  assert.deepEqual(app.bridge.decide(card.interactionId, { type: "allow_once" }), { status: "already_resolved" });
+  assert.equal((await waiting).type, "deny");
+  assert.deepEqual(app.resolved(), [{ type: "approval.resolved", interactionId: card.interactionId, status: "expired" }]);
+  assert.deepEqual(app.bridge.pending(), []);
+});

@@ -110,3 +110,14 @@ test("stop：断开全部并清空状态", async () => {
   assert.deepEqual(manager.statuses(), []);
   assert.deepEqual(fake.connectors.map((connector) => connector.stopped), [1, 1]);
 });
+
+test("stop drains an already queued reload before shutting down its connector", async () => {
+  const fake = fakeFactory();
+  const manager = new RelayManager({ create: fake.create });
+  manager.start({ host: "127.0.0.1", port: 8787 });
+  const reloading = manager.reload([settings("https://relay.example.com")]);
+  const stopping = manager.stop();
+  await Promise.all([reloading, stopping]);
+  assert.equal(manager.size, 0);
+  assert.equal(fake.connectors[0]?.stopped, 1);
+});

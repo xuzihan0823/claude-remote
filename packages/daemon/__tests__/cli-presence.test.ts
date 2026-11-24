@@ -135,3 +135,20 @@ test("readLiveCliSessions 只返回存活进程的 sessionId，坏文件忽略",
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("stopping invalidates an in-flight presence read", async () => {
+  let finish!: (live: Set<string>) => void;
+  const releaser = new CliExitReleaser({
+    tracker: {
+      terminalSessions: () => [],
+      release: () => { throw new Error("late release"); },
+      noteCliAlive: () => { throw new Error("late event"); },
+    },
+    readLive: () => new Promise((resolve) => { finish = resolve; }),
+  });
+  const ticking = releaser.tick();
+  releaser.stop();
+  finish(new Set(["late"]));
+  await ticking;
+  assert.equal(releaser.isCliAlive("late"), false);
+});

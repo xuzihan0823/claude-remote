@@ -33,3 +33,13 @@ test("run cancellation wins over a broker allow returned after cancellation", as
   } }, { sessionKey: "s", userId: "u" }, { signal: controller.signal });
   assert.equal((await callback("Bash", {}, options()))?.behavior, "deny");
 });
+
+test("the absolute deadline denies an allow returned before the timeout callback runs", async (t) => {
+  let now = 100;
+  t.mock.method(Date, "now", () => now);
+  const callback = createPermissionAdapter({ request: async () => {
+    now += 50;
+    return { type: "allow_once" };
+  } }, { sessionKey: "s", userId: "u" }, { timeoutMs: 50 });
+  assert.equal((await callback("Bash", {}, options()))?.behavior, "deny");
+});

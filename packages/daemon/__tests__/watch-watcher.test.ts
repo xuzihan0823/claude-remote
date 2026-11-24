@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -414,4 +414,40 @@ test("unwatch/close 释放全部 timer 与目录监听，进程可退出", async
   watcher.close(); // 幂等
   assert.equal(scheduler.pending, 0);
   await assert.rejects(watcher.watch(sessionId)); // close 后拒绝新订阅
+});
+
+test("concurrent watches share initialization and reject unsafe transcript locations", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "claude-remote-watch-boundary-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const projectsDir = join(root, "projects");
+  const project = join(projectsDir, "project");
+  await mkdir(project, { recursive: true });
+  await writeFile(join(project, "good.jsonl"), "");
+  await mkdir(join(project, "directory.jsonl"));
+  const outside = join(root, "outside.jsonl");
+  await writeFile(outside, "");
+  await symlink(outside, join(project, "outside.jsonl"));
+  const watcher = new SessionWatcher({ projectsDir, dirWatchFactory: null });
+  t.after(() => watcher.close());
+
+  const first = watcher.watch("good");
+  const second = watcher.watch("good");
+  await second;
+  assert.deepEqual(watcher.watched, ["good"]);
+  await first;
+  for (const id of ["../outside", "bad\\id", "bad..id", "bad\n", "directory", "outside"]) {
+    await assert.rejects(watcher.watch(id), { code: "ENOENT" });
+  }
+});
+
+test("closing during a filesystem poll suppresses late transcript events", async () => {
+  const { projectsDir, file, sessionId } = await makeProject(baseLines);
+  const watcher = makeWatcher(projectsDir);
+  await watcher.watch(sessionId);
+  const events = collect(watcher);
+  await appendFile(file, `${userLine("u2", "a1", "late")}\n`);
+  const poll = watcher.pollNow();
+  watcher.close();
+  await poll;
+  assert.deepEqual(events, { message: [], resync: [], write: [], error: [] });
 });

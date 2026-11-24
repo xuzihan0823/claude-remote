@@ -73,14 +73,21 @@ export class RelayManager {
       await Promise.all(dropped.map((entry) => entry.connector.stop()));
       return this.statuses();
     };
-    const result = this.#queue.then(run, run);
-    this.#queue = result.then(() => undefined, () => undefined);
-    return result;
+    return this.#enqueue(run);
   }
 
-  async stop(): Promise<void> {
-    const entries = this.#entries;
-    this.#entries = [];
-    await Promise.all(entries.map((entry) => entry.connector.stop()));
+  stop(): Promise<void> {
+    return this.#enqueue(async () => {
+      this.#address = undefined;
+      const entries = this.#entries;
+      this.#entries = [];
+      await Promise.all(entries.map((entry) => entry.connector.stop()));
+    });
+  }
+
+  #enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#queue.then(operation);
+    this.#queue = result.then(() => undefined, () => undefined);
+    return result;
   }
 }

@@ -9,8 +9,7 @@
 // 匹配，见 05 报告对表第 4 条）。
 
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, realpath, writeFile, type FileHandle } from "node:fs/promises";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { homedir, hostname } from "node:os";
@@ -26,8 +25,8 @@ import { readGitWorkspace } from "./git-workspace.js";
 import type { DaemonConfig } from "./config.js";
 import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
-import { FileAccessError, fileMeta, fileTypeOf, parseRange, resolveRequestedFile, type SessionFile } from "./session-file-access.js";
-import { readSessionCwd, resolveSessionFile } from "./session-files.js";
+import { FileAccessError, IMAGE_FILE_LIMIT_BYTES, SESSION_FILE_LIMIT_BYTES, fileMeta, fileTypeOf, openRequestedFile, parseRange, type SessionFile } from "./session-file-access.js";
+import { isSafeSessionId, readSessionCwd, resolveSessionFile } from "./session-files.js";
 import { StreamBuffer } from "./run/stream-buffer.js";
 import { approvalLink, NotIdleError, sessionLink, RunRequestError, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
 import { listSessions } from "./transcript/indexer.js";
@@ -39,11 +38,13 @@ import type { SessionWatcher } from "./watch/watcher.js";
 
 
 const BODY_LIMIT_BYTES = 1024 * 1024;
-const UPLOAD_LIMIT_BYTES = 25 * 1024 * 1024;
+const UPLOAD_LIMIT_BYTES = IMAGE_FILE_LIMIT_BYTES;
+const NEW_SESSION_WATCH_TIMEOUT_MS = 60_000;
 const IMAGE_TYPES: Record<string, string> = {
   jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
   webp: "image/webp", heic: "image/heic", heif: "image/heif",
 };
+const LEGACY_IMAGE_TYPES = { ...IMAGE_TYPES, bmp: "image/bmp", avif: "image/avif" };
 const MESSAGES_LIMIT_DEFAULT = 100;
 const MESSAGES_LIMIT_MAX = 500;
 const WS_HEARTBEAT_MS = 30_000;
@@ -64,6 +65,8 @@ export interface DaemonServerOptions {
   /** 返回启动时探测的 claude CLI 版本（未就绪/失败时 "unknown"）。 */
   claudeCliVersion: () => string;
   isCliAlive: (sessionId: string) => Promise<boolean>;
+  /** 新建会话尚未落盘时，等待 watcher 可用的上限。 */
+  newSessionWatchTimeoutMs?: number;
   /** 测试/嵌入方可注入；默认每次请求重新读取 Mac 设置，以反映即时切换。 */
   modelCatalog?: () => Promise<ModelCatalog>;
   effortOptions?: (cwd: string, model?: string) => Promise<EffortOptions>;
@@ -92,6 +95,16 @@ function sha256(value: string): Buffer {
   return createHash("sha256").update(value).digest();
 }
 
+function decodePathSegment(value: string | undefined): string {
+  try { return decodeURIComponent(value ?? ""); }
+  catch { return ""; }
+}
+
+function imageType(path: string, types: Record<string, string>): string | undefined {
+  const extension = extname(path).slice(1).toLowerCase();
+  return Object.hasOwn(types, extension) ? types[extension] : undefined;
+}
+
 function isEnoent(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "ENOENT";
 }
@@ -103,9 +116,8 @@ export class DaemonServer {
   readonly #http: Server;
   readonly #wss: WebSocketServer;
   readonly #clients = new Map<WebSocket, ClientState>();
-  readonly #watchRefs = new Map<string, number>();
   readonly #activeRuns = new Map<string, TurnHandle>();
-  readonly #newSessions = new Set<string>();
+  readonly #newSessions = new Map<string, NodeJS.Timeout>();
   readonly #messageRequests = new Map<string, { sessionId: string; runId: string; clientMessageId: string; expiresAt: number }>();
   readonly #watchActivations = new Set<string>();
   readonly #watchRetryTimers = new Map<string, NodeJS.Timeout>();
@@ -188,6 +200,7 @@ export class DaemonServer {
     if (this.#heartbeat !== undefined) clearInterval(this.#heartbeat);
     for (const timer of this.#watchRetryTimers.values()) clearTimeout(timer);
     this.#watchRetryTimers.clear();
+    for (const sessionId of this.#newSessions.keys()) this.#forgetNewSession(sessionId);
     for (const socket of this.#clients.keys()) socket.close(1001, "server shutdown");
     const completions = [...this.#activeRuns.values()].map((handle) => handle.completion);
     for (const runId of this.#activeRuns.keys()) this.#options.runner.abort(runId);
@@ -212,6 +225,7 @@ export class DaemonServer {
   // -- HTTP -------------------------------------------------------------------
 
   async #handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (this.#rejectClosing(res)) return;
     const url = new URL(req.url ?? "/", "http://local");
     const path = url.pathname;
 
@@ -322,8 +336,7 @@ export class DaemonServer {
     const p1Match = /^\/api\/sessions\/([^/]+)\/(state|context|usage|steer|compact|btw|workspace)(?:\/([^/]+)(\/send-now)?)?$/.exec(path);
     if (p1Match) {
       const [, encodedId, operation, messageId, sendNow] = p1Match;
-      let sessionId: string;
-      try { sessionId = decodeURIComponent(encodedId ?? ""); } catch { sessionId = ""; }
+      const sessionId = decodePathSegment(encodedId);
       if (!isUuid(sessionId)) { this.#json(res, 400, { error: "invalid_session_id" }); return; }
       if (operation === "steer" && messageId !== undefined &&
         ((sendNow === undefined && (method === "PATCH" || method === "DELETE")) || (sendNow !== undefined && method === "POST"))) {
@@ -351,13 +364,14 @@ export class DaemonServer {
 
     const abortMatch = /^\/api\/sessions\/([^/]+)\/abort$/.exec(path);
     if (abortMatch !== null && method === "POST") {
-      await this.#handleAbort(req, res, decodeURIComponent(abortMatch[1] ?? ""));
+      await this.#handleAbort(req, res, decodePathSegment(abortMatch[1]));
       return;
     }
 
     const messagesMatch = /^\/api\/sessions\/([^/]+)\/messages$/.exec(path);
     if (messagesMatch !== null) {
-      const sessionId = decodeURIComponent(messagesMatch[1] ?? "");
+      const sessionId = decodePathSegment(messagesMatch[1]);
+      if (!isSafeSessionId(sessionId)) { this.#json(res, 404, { error: "session_not_found" }); return; }
       if (method === "GET") {
         await this.#handleGetMessages(res, url, sessionId);
         return;
@@ -375,25 +389,25 @@ export class DaemonServer {
     }
     const imageMatch = /^\/api\/sessions\/([^/]+)\/file$/.exec(path);
     if (imageMatch !== null && method === "GET") {
-      await this.#serveSessionImage(res, url, decodeURIComponent(imageMatch[1] ?? ""));
+      await this.#serveSessionImage(res, url, decodePathSegment(imageMatch[1]));
       return;
     }
 
     const uploadMatch = /^\/api\/sessions\/([^/]+)\/upload$/.exec(path);
     if (uploadMatch !== null && method === "POST") {
-      await this.#handleUpload(req, res, url, decodeURIComponent(uploadMatch[1] ?? ""));
+      await this.#handleUpload(req, res, url, decodePathSegment(uploadMatch[1]));
       return;
     }
 
     const uploadFileMatch = /^\/api\/uploads\/([^/]+)\/([^/]+)$/.exec(path);
     if (uploadFileMatch !== null && method === "GET") {
-      await this.#serveUpload(res, decodeURIComponent(uploadFileMatch[1] ?? ""), decodeURIComponent(uploadFileMatch[2] ?? ""));
+      await this.#serveUpload(res, decodePathSegment(uploadFileMatch[1]), decodePathSegment(uploadFileMatch[2]));
       return;
     }
 
     const fileMatch = /^\/api\/sessions\/([^/]+)\/files\/(meta|content)$/.exec(path);
     if (fileMatch !== null && method === "GET") {
-      await this.#handleSessionFile(req, res, url, decodeURIComponent(fileMatch[1] ?? ""), fileMatch[2] === "content");
+      await this.#handleSessionFile(req, res, url, decodePathSegment(fileMatch[1]), fileMatch[2] === "content");
       return;
     }
 
@@ -532,11 +546,9 @@ export class DaemonServer {
     let cwd: string;
     if (sessionId !== null) {
       if (!isUuid(sessionId)) { this.#json(res, 400, { error: "invalid_session_id" }); return; }
-      try { cwd = (await readSessionCwd(await resolveSessionFile(this.#options.config.projectsDir, sessionId))) || homedir(); }
-      catch (error) {
-        if (isEnoent(error)) { this.#json(res, 404, { error: "session_not_found" }); return; }
-        throw error;
-      }
+      const sessionCwd = await this.#sessionCwd(res, sessionId);
+      if (sessionCwd === undefined) return;
+      cwd = sessionCwd;
     } else {
       cwd = url.searchParams.get("cwd")?.trim() || homedir();
       if (!(await this.#knownCwds()).has(cwd)) { this.#json(res, 400, { error: "unknown_cwd" }); return; }
@@ -556,6 +568,13 @@ export class DaemonServer {
     }
   }
 
+  async #sessionCwd(res: ServerResponse, sessionId: string): Promise<string | undefined> {
+    const active = this.#options.runner.activeCwd(sessionId);
+    if (active !== undefined) return active;
+    const file = await this.#p1SessionFile(res, sessionId);
+    if (file !== undefined) return (await readSessionCwd(file)) || homedir();
+  }
+
   async #handleCommands(res: ServerResponse, url: URL): Promise<void> {
     const sessionId = url.searchParams.get("sessionId");
     const cwdParam = url.searchParams.get("cwd");
@@ -567,13 +586,9 @@ export class DaemonServer {
       if (!(await this.#knownCwds()).has(cwd)) { this.#json(res, 400, { error: "unknown_cwd" }); return; }
     } else {
       if (!isUuid(sessionId)) { this.#json(res, 400, { error: "invalid_session_id" }); return; }
-      const activeCwd = runner.activeCwd(sessionId);
-      if (activeCwd !== undefined) cwd = activeCwd;
-      else {
-        const file = await this.#p1SessionFile(res, sessionId);
-        if (!file) return;
-        cwd = (await readSessionCwd(file)) || homedir();
-      }
+      const sessionCwd = await this.#sessionCwd(res, sessionId);
+      if (sessionCwd === undefined) return;
+      cwd = sessionCwd;
     }
     if (sessionId !== null && tracker.getStatus(sessionId) === "terminal-driving") {
       this.#json(res, 200, { status: "unavailable", reason: "terminal_driving" });
@@ -694,6 +709,7 @@ export class DaemonServer {
     const file = await this.#p1SessionFile(res, sessionId);
     if (!file) return;
     const cwd = await readSessionCwd(file);
+    if (this.#rejectClosing(res)) return;
     if (!isAbsolute(cwd)) { this.#json(res, 503, { error: "btw_unavailable" }); return; }
     const controller = new AbortController();
     const disconnect = (): void => controller.abort();
@@ -713,6 +729,7 @@ export class DaemonServer {
     const file = await this.#p1SessionFile(res, sessionId);
     if (!file) return;
     const cwd = await readSessionCwd(file);
+    if (this.#rejectClosing(res)) return;
     if (!isAbsolute(cwd) || cwd.includes("\0")) { this.#json(res, 503, { error: "workspace_unavailable" }); return; }
     const controller = new AbortController();
     const disconnect = (): void => controller.abort();
@@ -744,6 +761,7 @@ export class DaemonServer {
       if (!this.#validateSteerText(res, text)) return;
       if (!runner.steerReceipt(sessionId, clientMessageId) && runner.activeRunId(sessionId) === undefined &&
         !await this.#p1SessionFile(res, sessionId)) return;
+      if (this.#rejectClosing(res)) return;
       if (this.#hasMessageRequest(sessionId, clientMessageId) || runner.compactReceipt(sessionId, clientMessageId)) {
         this.#json(res, 409, { error: "message_id_conflict" });
         return;
@@ -776,7 +794,8 @@ export class DaemonServer {
     const cliAlive = await this.#options.isCliAlive(sessionId);
     previous = runner.compactReceipt(sessionId, clientMessageId);
     if (previous) { this.#json(res, 202, { ...previous, sessionId, replayed: true }); return; }
-    if (cliAlive || this.#closed) {
+    if (this.#rejectClosing(res)) return;
+    if (cliAlive) {
       this.#json(res, 409, { error: "not_idle", status: cliAlive ? "terminal-driving" : tracker.getStatus(sessionId) });
       return;
     }
@@ -866,7 +885,7 @@ export class DaemonServer {
 
     const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
     if (effort === false) return;
-    if (this.#repeatMessage(res, "new", clientMessageId)) return;
+    if (this.#rejectClosing(res) || this.#repeatMessage(res, "new", clientMessageId)) return;
 
     const sessionId = randomUUID();
     let handle: TurnHandle;
@@ -892,7 +911,10 @@ export class DaemonServer {
       }
       throw error;
     }
-    this.#newSessions.add(sessionId);
+    const deadline = setTimeout(() => this.#forgetNewSession(sessionId),
+      this.#options.newSessionWatchTimeoutMs ?? NEW_SESSION_WATCH_TIMEOUT_MS);
+    deadline.unref();
+    this.#newSessions.set(sessionId, deadline);
     this.#activeRuns.set(handle.runId, handle);
     this.#rememberMessage("new", sessionId, handle.runId, clientMessageId);
     this.#rememberMessage(sessionId, sessionId, handle.runId, clientMessageId);
@@ -907,7 +929,12 @@ export class DaemonServer {
     }
     const body = await this.#readJsonBody(req, res, true);
     if (body === undefined) return;
-    const requestedRunId = (body as { runId?: unknown }).runId;
+    if (this.#rejectClosing(res)) return;
+    const { runId: requestedRunId, action } = body as { runId?: unknown; action?: unknown };
+    if (action !== undefined && (action !== "release" || requestedRunId !== undefined)) {
+      this.#json(res, 400, { error: "invalid_action" });
+      return;
+    }
     if (requestedRunId !== undefined && (typeof requestedRunId !== "string" || !isUuid(requestedRunId))) {
       this.#json(res, 400, { error: "invalid_run_id" });
       return;
@@ -921,13 +948,15 @@ export class DaemonServer {
       });
       return;
     }
-    if (requestedRunId !== undefined && requestedRunId !== activeRunId) {
+    if (activeRunId !== undefined && (action === "release" ||
+      (requestedRunId !== undefined && requestedRunId !== activeRunId))) {
       this.#json(res, 409, { error: "run_mismatch", activeRunId, status: "daemon-driving" });
       return;
     }
     if (activeRunId === undefined) {
       // 未指定 runId 时保留旧客户端的手动解除占用入口；指定 runId 的幂等停止不得经过这里
       const cliAlive = await this.#options.isCliAlive(sessionId);
+      if (this.#rejectClosing(res)) return;
       const currentRunId = this.#options.runner.activeRunId(sessionId);
       if (currentRunId !== undefined) {
         this.#json(res, 409, { error: "run_mismatch", activeRunId: currentRunId, status: "daemon-driving" });
@@ -1002,7 +1031,12 @@ export class DaemonServer {
     const cwd = (await readSessionCwd(file)) || homedir();
     const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
     if (effort === false) return;
-    if (this.#repeatMessage(res, sessionId, clientMessageId)) return;
+    const cliAlive = await this.#options.isCliAlive(sessionId);
+    if (this.#rejectClosing(res) || this.#repeatMessage(res, sessionId, clientMessageId)) return;
+    if (cliAlive) {
+      this.#json(res, 409, { error: "not_idle", status: "terminal-driving" });
+      return;
+    }
     if (clientMessageId !== undefined && (this.#options.runner.steerReceipt(sessionId, clientMessageId) ||
       this.#options.runner.compactReceipt(sessionId, clientMessageId))) {
       this.#json(res, 409, { error: "message_id_conflict" });
@@ -1126,34 +1160,18 @@ export class DaemonServer {
       target = resolve((await readSessionCwd(sessionFile)) || homedir(), target);
     }
     try {
-      target = await realpath(target);
-      const types: Record<string, string> = { ...IMAGE_TYPES, bmp: "image/bmp", avif: "image/avif" };
-      const type = types[extname(target).slice(1).toLowerCase()];
-      if (type === undefined) {
-        this.#json(res, 415, { error: "unsupported_image" });
-        return;
+      const file = await openRequestedFile("", target, IMAGE_FILE_LIMIT_BYTES);
+      try {
+        const type = imageType(file.path, LEGACY_IMAGE_TYPES);
+        if (type === undefined) { this.#json(res, 415, { error: "unsupported_image" }); return; }
+        await this.#sendOpenFile(res, file, 0, file.stats.size - 1, 200, {
+          "Content-Type": type, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+        });
+      } finally {
+        await file.handle.close();
       }
-      const info = await stat(target);
-      if (!info.isFile()) {
-        this.#json(res, 404, { error: "not_found" });
-        return;
-      }
-      if (info.size > UPLOAD_LIMIT_BYTES) {
-        this.#json(res, 413, { error: "payload_too_large" });
-        return;
-      }
-      const data = await readFile(target);
-      if (data.length > UPLOAD_LIMIT_BYTES) {
-        this.#json(res, 413, { error: "payload_too_large" });
-        return;
-      }
-      res.writeHead(200, { "Content-Type": type, "Content-Length": data.length,
-        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" });
-      res.end(data);
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "ENOTDIR" && code !== "EACCES" && code !== "ELOOP") throw error;
-      this.#json(res, 404, { error: "not_found" });
+      this.#respondFileError(res, error, "not_found");
     }
   }
 
@@ -1190,19 +1208,25 @@ export class DaemonServer {
       this.#json(res, 400, { error: "empty_file" });
       return;
     }
-    const dir = join(this.#options.config.uploadsDir, subdir);
-    await mkdir(dir, { recursive: true });
-    const file = join(dir, `${Date.now()}-${safeName}`);
-    await writeFile(file, Buffer.concat(chunks));
-    this.#json(res, 200, { path: file, name: safeName, sizeBytes: size });
+    if (this.#rejectClosing(res)) return;
+    const root = this.#options.config.uploadsDir;
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    const canonicalRoot = await realpath(root);
+    const dir = join(canonicalRoot, subdir);
+    await mkdir(dir, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EEXIST") throw error;
+    });
+    if (!(await lstat(dir)).isDirectory() || await realpath(dir) !== dir) {
+      this.#json(res, 403, { error: "invalid_upload_directory" });
+      return;
+    }
+    if (this.#rejectClosing(res)) return;
+    const file = join(dir, `${Date.now()}-${randomUUID()}-${safeName}`);
+    await writeFile(file, Buffer.concat(chunks), { flag: "wx", mode: 0o600 });
+    this.#json(res, 200, { path: join(root, subdir, basename(file)), name: safeName, sizeBytes: size });
   }
 
   async #handleSessionFile(req: IncomingMessage, res: ServerResponse, url: URL, sessionId: string, wantContent: boolean): Promise<void> {
-    // 会话 ID 会拼进 JSONL 路径，相对路径按该文件里的工作目录解析：含分隔符的 ID 能指向上传目录里伪造的会话
-    if (/[/\\]/.test(sessionId)) {
-      this.#json(res, 404, { error: "session_not_found" });
-      return;
-    }
     let sessionFile: string;
     try {
       sessionFile = await resolveSessionFile(this.#options.config.projectsDir, sessionId);
@@ -1211,19 +1235,20 @@ export class DaemonServer {
       this.#json(res, 404, { error: "session_not_found" });
       return;
     }
-    let file: SessionFile;
     try {
-      file = await resolveRequestedFile(await readSessionCwd(sessionFile), url.searchParams.get("path"));
+      const file = await openRequestedFile(await readSessionCwd(sessionFile), url.searchParams.get("path"), SESSION_FILE_LIMIT_BYTES);
+      try {
+        if (wantContent) await this.#streamSessionFile(req, res, file);
+        else this.#json(res, 200, fileMeta(file));
+      } finally {
+        await file.handle.close();
+      }
     } catch (error) {
-      if (!(error instanceof FileAccessError)) throw error;
-      this.#json(res, error.status, { error: error.code });
-      return;
+      this.#respondFileError(res, error);
     }
-    if (wantContent) await this.#streamSessionFile(req, res, file);
-    else this.#json(res, 200, fileMeta(file));
   }
 
-  async #streamSessionFile(req: IncomingMessage, res: ServerResponse, file: SessionFile): Promise<void> {
+  async #streamSessionFile(req: IncomingMessage, res: ServerResponse, file: SessionFile & { handle: FileHandle }): Promise<void> {
     const size = file.stats.size;
     const range = parseRange(req.headers.range, size);
     if (range === "unsatisfiable") {
@@ -1231,56 +1256,65 @@ export class DaemonServer {
       this.#json(res, 416, { error: "range_not_satisfiable" });
       return;
     }
-    const length = range === null ? size : range.end - range.start + 1;
-    res.writeHead(range === null ? 200 : 206, {
+    await this.#sendOpenFile(res, file, range?.start ?? 0, range?.end ?? size - 1, range === null ? 200 : 206, {
       "Content-Type": fileTypeOf(file.path).mime,
-      "Content-Length": length,
       "Content-Disposition": "attachment",
       "X-Content-Type-Options": "nosniff",
       "Cache-Control": "private, no-store",
       "Accept-Ranges": "bytes",
       ...(range === null ? {} : { "Content-Range": `bytes ${range.start}-${range.end}/${size}` }),
     });
-    if (length === 0) {
-      res.end();
-      return;
-    }
-    const stream = createReadStream(file.path, { start: range?.start ?? 0, end: range?.end ?? size - 1 });
+  }
+
+  async #sendOpenFile(res: ServerResponse, file: SessionFile & { handle: FileHandle }, start: number,
+    end: number, status: number, headers: Record<string, string>): Promise<void> {
+    const length = end - start + 1;
+    res.writeHead(status, { ...headers, "Content-Length": length });
+    if (length === 0) { res.end(); return; }
+    const stream = file.handle.createReadStream({ start, end, autoClose: false });
     try {
-      await pipeline(stream, res);
+      await pipeline(stream, async function* (source) {
+        yield* source;
+        if (stream.bytesRead !== length) throw new Error("file truncated during download");
+      }, res);
     } catch {
-      // 客户端断开或读取失败：pipeline 已销毁两端，响应头已发出，无法再回错误
-      return;
+      // pipeline 销毁已开始响应的连接，客户端不会收到一份看似完整的文件。
     }
-    // 传输中文件被截断：断开连接，否则客户端会把半个文件当成完整文件
-    if (stream.bytesRead < length) res.destroy();
+  }
+
+  #respondFileError(res: ServerResponse, error: unknown, notFound = "file_not_found"): void {
+    if (isEnoent(error)) { this.#json(res, 404, { error: notFound }); return; }
+    if (!(error instanceof FileAccessError)) throw error;
+    this.#json(res, error.status, { error: error.code === "file_not_found" ? notFound : error.code });
   }
 
   /** 回读已上传的图片，供手机在消息里显示。只认 uploadsDir/<subdir>/<name> 两级，且只给图片。 */
   async #serveUpload(res: ServerResponse, subdir: string, name: string): Promise<void> {
-    const type = IMAGE_TYPES[name.split(".").pop()?.toLowerCase() ?? ""];
-    const unsafe = (s: string) => !s || s === "." || s === ".." || /[\/\\\0]/.test(s);
-    if (unsafe(subdir) || unsafe(name) || type === undefined) {
+    const type = imageType(name, IMAGE_TYPES);
+    if (!isSafeSessionId(subdir) || !name || /[\/\\\p{Cc}]/u.test(name) || type === undefined) {
       this.#json(res, 404, { error: "not_found" });
       return;
     }
-    let data: Buffer;
     try {
-      data = await readFile(join(this.#options.config.uploadsDir, subdir, name));
-    } catch (error) {
-      if (isEnoent(error)) {
-        this.#json(res, 404, { error: "not_found" });
-        return;
+      const root = await realpath(this.#options.config.uploadsDir);
+      const file = await openRequestedFile(root, join(subdir, name), IMAGE_FILE_LIMIT_BYTES, true);
+      try {
+        await this.#sendOpenFile(res, file, 0, file.stats.size - 1, 200, {
+          "Content-Type": type, "Cache-Control": "private, max-age=31536000, immutable",
+          "X-Content-Type-Options": "nosniff",
+        });
+      } finally {
+        await file.handle.close();
       }
-      throw error;
+    } catch (error) {
+      this.#respondFileError(res, error, "not_found");
     }
-    res.writeHead(200, { "Content-Type": type, "Content-Length": data.length, "Cache-Control": "private, max-age=31536000, immutable" });
-    res.end(data);
   }
 
   async #handleDecision(req: IncomingMessage, res: ServerResponse, interactionId: string): Promise<void> {
     const body = await this.#readJsonBody(req, res);
     if (body === undefined) return;
+    if (this.#rejectClosing(res)) return;
     const outcome = this.#options.approvals.decide(interactionId, body as never);
     switch (outcome.status) {
       case "allowed":
@@ -1329,6 +1363,12 @@ export class DaemonServer {
     }
   }
 
+  #rejectClosing(res: ServerResponse): boolean {
+    if (!this.#closed) return false;
+    this.#json(res, 503, { error: "server_closing" });
+    return true;
+  }
+
   #json(res: ServerResponse, code: number, body: unknown): void {
     res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
     res.end(JSON.stringify(body));
@@ -1339,6 +1379,10 @@ export class DaemonServer {
 
   #handleUpgrade(req: IncomingMessage, socket: import("node:stream").Duplex, head: Buffer): void {
     const url = new URL(req.url ?? "/", "http://local");
+    if (this.#closed) {
+      socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+      return;
+    }
     if (url.pathname !== "/ws" || !this.#tokenOk(url.searchParams.get("token") ?? undefined)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{"error":"unauthorized"}');
       socket.destroy();
@@ -1367,6 +1411,7 @@ export class DaemonServer {
   }
 
   async #onClientFrame(ws: WebSocket, state: ClientState, raw: string): Promise<void> {
+    if (this.#closed) return;
     let frame: unknown;
     try {
       frame = JSON.parse(raw);
@@ -1380,21 +1425,19 @@ export class DaemonServer {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "pong" }));
       return;
     }
-    if (typeof sessionId !== "string" || sessionId === "") return;
+    if (typeof sessionId !== "string" || !isSafeSessionId(sessionId)) return;
 
     if (type === "subscribe") {
       if (state.subs.has(sessionId) || state.subscribing.has(sessionId)) return;
       if (sessionId !== "*") {
         const attempt = Symbol(sessionId);
         state.subscribing.set(sessionId, attempt);
-        const isCurrent = (): boolean => state.subscribing.get(sessionId) === attempt && ws.readyState === WebSocket.OPEN;
+        const isCurrent = (): boolean => !this.#closed && state.subscribing.get(sessionId) === attempt && ws.readyState === WebSocket.OPEN;
         try {
-          await this.#acquireWatch(sessionId);
-          if (!isCurrent()) {
-            this.#releaseWatch(sessionId);
-            return;
-          }
-          this.#newSessions.delete(sessionId);
+          await this.#options.watcher.watch(sessionId);
+          this.#confirmNewSessionWatch(sessionId);
+          if (!isCurrent()) { this.#releaseWatch(sessionId); return; }
+          state.subs.add(sessionId);
         } catch (error) {
           if (!isCurrent()) return;
           if (isEnoent(error) && this.#newSessions.has(sessionId)) {
@@ -1408,6 +1451,7 @@ export class DaemonServer {
           return;
         } finally {
           if (state.subscribing.get(sessionId) === attempt) state.subscribing.delete(sessionId);
+          if (!state.subs.has(sessionId)) this.#releaseWatch(sessionId);
         }
       }
       state.subs.add(sessionId);
@@ -1418,7 +1462,7 @@ export class DaemonServer {
     }
     if (type === "unsubscribe") {
       state.subscribing.delete(sessionId);
-      if (!state.subs.delete(sessionId)) return;
+      state.subs.delete(sessionId);
       if (sessionId !== "*") this.#releaseWatch(sessionId);
     }
   }
@@ -1463,41 +1507,37 @@ export class DaemonServer {
     }
   }
 
-  async #acquireWatch(sessionId: string): Promise<void> {
-    if ((this.#watchRefs.get(sessionId) ?? 0) === 0) await this.#options.watcher.watch(sessionId);
-    // watch() 是 async：并发 subscribe 会都走到这里，await 后重读计数防覆盖
-    this.#watchRefs.set(sessionId, (this.#watchRefs.get(sessionId) ?? 0) + 1);
+  #confirmNewSessionWatch(sessionId: string): void {
+    if (!this.#newSessions.has(sessionId)) return;
+    this.#forgetNewSession(sessionId);
+    this.#broadcastToSubscribers(sessionId, { type: "resync", sessionId });
+  }
+
+  #forgetNewSession(sessionId: string): void {
+    const deadline = this.#newSessions.get(sessionId);
+    if (deadline !== undefined) clearTimeout(deadline);
+    this.#newSessions.delete(sessionId);
+    this.#clearWatchRetry(sessionId);
   }
 
   async #activateNewSessionWatch(sessionId: string): Promise<void> {
-    if (this.#watchActivations.has(sessionId)) return;
+    if (this.#closed || !this.#hasWatchInterest(sessionId) || this.#watchActivations.has(sessionId)) return;
     this.#watchActivations.add(sessionId);
     try {
       await this.#options.watcher.watch(sessionId);
-      if (!this.#options.watcher.watched.includes(sessionId)) return;
-      const refs = [...this.#clients.values()].filter((state) => state.subs.has(sessionId)).length;
-      if (refs > 0) this.#watchRefs.set(sessionId, refs);
-      else this.#options.watcher.unwatch(sessionId);
-      this.#newSessions.delete(sessionId);
-      const retry = this.#watchRetryTimers.get(sessionId);
-      if (retry !== undefined) clearTimeout(retry);
-      this.#watchRetryTimers.delete(sessionId);
-      if (refs > 0) this.#broadcastToSubscribers(sessionId, { type: "resync", sessionId });
+      if (!this.#closed) this.#confirmNewSessionWatch(sessionId);
+      this.#releaseWatch(sessionId);
     } catch (error) {
       if (isEnoent(error)) this.#scheduleNewSessionWatchRetry(sessionId);
-      else console.warn(`watch(${sessionId}) failed:`, error);
+      else if (!this.#closed) console.warn(`watch(${sessionId}) failed:`, error);
     } finally {
       this.#watchActivations.delete(sessionId);
     }
   }
 
   #scheduleNewSessionWatchRetry(sessionId: string): void {
-    if (
-      this.#closed
-      || !this.#newSessions.has(sessionId)
-      || this.#watchRetryTimers.has(sessionId)
-      || ![...this.#clients.values()].some((state) => state.subs.has(sessionId))
-    ) return;
+    if (this.#closed || !this.#newSessions.has(sessionId) ||
+      this.#watchRetryTimers.has(sessionId) || !this.#hasWatchInterest(sessionId)) return;
     const timer = setTimeout(() => {
       this.#watchRetryTimers.delete(sessionId);
       void this.#activateNewSessionWatch(sessionId);
@@ -1506,17 +1546,24 @@ export class DaemonServer {
     this.#watchRetryTimers.set(sessionId, timer);
   }
 
-  #releaseWatch(sessionId: string): void {
-    const refs = this.#watchRefs.get(sessionId) ?? 0;
-    if (refs <= 1) {
-      this.#watchRefs.delete(sessionId);
-      this.#options.watcher.unwatch(sessionId);
-      const retry = this.#watchRetryTimers.get(sessionId);
-      if (retry !== undefined) clearTimeout(retry);
-      this.#watchRetryTimers.delete(sessionId);
-      return;
+  #hasWatchInterest(sessionId: string): boolean {
+    if (this.#closed) return false;
+    for (const state of this.#clients.values()) {
+      if (state.subs.has(sessionId) || state.subscribing.has(sessionId)) return true;
     }
-    this.#watchRefs.set(sessionId, refs - 1);
+    return false;
+  }
+
+  #clearWatchRetry(sessionId: string): void {
+    const retry = this.#watchRetryTimers.get(sessionId);
+    if (retry !== undefined) clearTimeout(retry);
+    this.#watchRetryTimers.delete(sessionId);
+  }
+
+  #releaseWatch(sessionId: string): void {
+    if (this.#hasWatchInterest(sessionId)) return;
+    this.#options.watcher.unwatch(sessionId);
+    this.#clearWatchRetry(sessionId);
   }
 
   #pingClients(): void {

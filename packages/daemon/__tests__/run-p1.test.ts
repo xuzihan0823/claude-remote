@@ -265,3 +265,42 @@ test("P1 cancelling a side chat closes its SDK and frees the per-session slot", 
   restarted.result(randomUUID(), { result: "answer" });
   assert.equal((await next)?.answer, "answer");
 });
+
+test("plain SDK EOF and cancelling the sole send-now input both end with errors", async () => {
+  const { runner, queries } = harness();
+  const initial = runner.startTurn({ sessionId, cwd, text: "initial" });
+  queries[0]!.close();
+  assert.deepEqual(await initial.completion, { state: "error", error: "sdk_ended_without_result" });
+
+  const handle = runner.startTurn({ sessionId, cwd, text: "second" });
+  const id = randomUUID();
+  runner.steer(sessionId, handle.runId, id, "priority");
+  runner.mutateSteer(sessionId, handle.runId, id, { type: "send_now" });
+  runner.mutateSteer(sessionId, handle.runId, id, { type: "cancel" });
+  queries[1]!.close();
+  assert.deepEqual(await handle.completion, { state: "error", error: "interrupted" });
+  assert.equal(queries.length, 2);
+  assert.equal(runner.steerReceipt(sessionId, id)?.state, "cancelled");
+});
+
+test("stuck /btw cleanup has its own deadline and frees the slot even after a client abort", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { runner, queries } = harness();
+  const stop = new AbortController();
+  const reply = runner.sideChat(cwd, sessionId, "temporary", undefined, stop.signal);
+  const query = queries[0]!;
+  await query.input();
+  let enterCleanup!: () => void;
+  const entered = new Promise<void>((resolve) => { enterCleanup = resolve; });
+  query.onReturn = () => {
+    enterCleanup();
+    return new Promise(() => {});
+  };
+  stop.abort();
+  await entered;
+  t.mock.timers.tick(5000);
+  assert.equal(await reply, undefined);
+  const next = runner.sideChat(cwd, sessionId, "next", undefined, new AbortController().signal);
+  queries[1]!.result(randomUUID(), { result: "answer" });
+  assert.equal((await next)?.answer, "answer");
+});

@@ -200,3 +200,52 @@ test("interaction IDs are unique high-entropy URL-safe values", () => {
     context.close();
   }
 });
+
+test("a decision at the exact deadline atomically settles as expired before the timer runs", async (t) => {
+  let now = 1_000;
+  const context = setup({ now: () => now });
+  t.after(() => context.close());
+  const approval = context.manager.createApproval({
+    sessionKey: "session", userId: "owner", ttlMs: 50,
+    payload: { toolName: "Bash", input: {}, prompt: "Run?" },
+  });
+  const waiter = context.manager.awaitDecision(approval.interactionId);
+  now = approval.expiresAt;
+  const result = context.manager.resolve(approval.interactionId, "owner", { type: "allow_once" });
+  assert.equal(result.record.status, "expired");
+  assert.equal(result.decision.type, "deny");
+  assert.deepEqual(await waiter, result.decision);
+  assert.equal(context.store.listAudit(approval.interactionId).at(-1)?.action, "auto_deny_timeout");
+});
+
+test("a storage error in cancellation still denies every waiter", async (t) => {
+  const context = setup();
+  t.after(() => context.close());
+  const approval = context.manager.createApproval({
+    sessionKey: "session", userId: "owner",
+    payload: { toolName: "Bash", input: {}, prompt: "Run?" },
+  });
+  const controller = new AbortController();
+  const waiters = [context.manager.awaitDecision(approval.interactionId, controller.signal),
+    context.manager.awaitDecision(approval.interactionId)];
+  t.mock.method(context.store, "resolve", () => { throw new Error("storage unavailable"); });
+  controller.abort();
+  assert.deepEqual((await Promise.all(waiters)).map((decision) => decision.type), ["deny", "deny"]);
+});
+
+test("an expiry callback denies its waiters even if SQLite cannot record the timeout", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(console, "warn", () => {});
+  let now = 500;
+  const context = setup({ autoScheduleExpiry: true, now: () => now });
+  t.after(() => context.close());
+  const approval = context.manager.createApproval({
+    sessionKey: "session", userId: "owner", ttlMs: 5,
+    payload: { toolName: "Bash", input: {}, prompt: "Run?" },
+  });
+  const waiter = context.manager.awaitDecision(approval.interactionId);
+  t.mock.method(context.store, "resolve", () => { throw new Error("storage unavailable"); });
+  now += 5;
+  t.mock.timers.tick(5);
+  assert.equal((await waiter).type, "deny");
+});

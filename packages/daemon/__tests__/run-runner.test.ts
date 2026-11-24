@@ -178,6 +178,7 @@ test("同会话并发=1：活跃 run 期间重复 startTurn 抛 NotIdleError（�
   const stop = deferred();
   const { factory, state } = fakeFactory(async function* () {
     await stop.promise;
+    yield resultMessage("ok", "r1", "s");
   });
   state.onInterrupt = () => stop.resolve();
   const { gate } = stubGate();
@@ -196,8 +197,10 @@ test("同会话并发=1：活跃 run 期间重复 startTurn 抛 NotIdleError（�
 
 test("不同会话可并行，各自 begin/end", async () => {
   const releases: Array<() => void> = [];
-  const { factory } = fakeFactory(async function* () {
+  const { factory } = fakeFactory(async function* (state) {
+    const id = state.params?.options?.resume;
     await new Promise<void>((resolve) => releases.push(resolve));
+    if (id !== undefined) yield resultMessage("ok", "r1", id);
   });
   const { gate, begun, ended } = stubGate();
   const runner = new TurnRunner({ gate, permissions: denyAll, queryFactory: factory });

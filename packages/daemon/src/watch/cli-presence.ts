@@ -71,6 +71,8 @@ export class CliExitReleaser {
   #live = new Set<string>();
   #timer: ReturnType<typeof setInterval> | undefined;
   #ticking = false;
+  #generation = 0;
+  #stopped = false;
 
   constructor(options: CliExitReleaserOptions) {
     this.#options = options;
@@ -81,21 +83,28 @@ export class CliExitReleaser {
   }
 
   start(intervalMs = 2_000): void {
+    this.#stopped = false;
     this.#timer ??= setInterval(() => void this.tick(), intervalMs);
     this.#timer.unref?.();
   }
 
   stop(): void {
+    this.#generation += 1;
+    this.#stopped = true;
+    this.#live = new Set<string>();
+    this.#lastSeenLive.clear();
     if (this.#timer !== undefined) clearInterval(this.#timer);
     this.#timer = undefined;
   }
 
   async tick(): Promise<void> {
-    if (this.#ticking) return;
+    if (this.#stopped || this.#ticking) return;
+    const generation = this.#generation;
     this.#ticking = true;
     try {
       const { tracker, readLive, now = Date.now, recentMs = 10_000, graceMs = 3_000 } = this.#options;
       const live = await readLive();
+      if (generation !== this.#generation) return;
       this.#live = live;
       const at = now();
       for (const id of live) {

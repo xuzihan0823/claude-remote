@@ -577,7 +577,14 @@ export class TurnRunner {
     } catch {
       return undefined;
     } finally {
-      try { await sdk?.closeAndWait(); } catch { /* Side chat already ended. */ }
+      if (sdk) {
+        const side = sdk;
+        try {
+          await control(() => side.closeAndWait(), new AbortController().signal);
+        } catch {
+          try { side.close(); } catch { /* SDK may already be closed. */ }
+        }
+      }
       this.#sideChats.delete(sessionId);
     }
   }
@@ -680,7 +687,7 @@ export class TurnRunner {
           delete run.contextRequest;
           delete run.mcpRequest;
           const nextInput = run.pending.shift();
-          if (!nextInput) break;
+          if (!nextInput) throw new Error("interrupted");
           run.steering = nextInput;
           run.currentInputId = nextInput.receipt.clientMessageId;
           run.query = this.#openRunQuery(run.options, run.controller.signal, nextInput.receipt.text, run.currentInputId);
@@ -688,10 +695,7 @@ export class TurnRunner {
           this.#advanceSteer(run, nextInput, "delivered");
           continue;
         }
-        if (!result) {
-          if (run.steering || run.pending.length > 0 || run.compaction) throw new Error("sdk_ended_without_result");
-          break;
-        }
+        if (!result) throw new Error("sdk_ended_without_result");
         if (run.steering) {
           this.#advanceSteer(run, run.steering, error ? "failed" : "processed", error);
           delete run.steering;

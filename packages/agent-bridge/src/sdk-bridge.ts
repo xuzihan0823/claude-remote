@@ -82,6 +82,8 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
     cwd: options.cwd,
     canUseTool: options.canUseTool,
     permissionMode: options.readOnlySideChat ? "dontAsk" as const : options.permissionMode ?? "default",
+    ...(!options.readOnlySideChat && options.permissionMode === "bypassPermissions"
+      ? { allowDangerouslySkipPermissions: true } : {}),
     includePartialMessages: true,
     persistSession: options.readOnlySideChat ? false : options.persistSession ?? true,
     ...(options.readOnlySideChat ? {

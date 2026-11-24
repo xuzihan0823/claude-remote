@@ -27,6 +27,7 @@ export function createPermissionAdapter(
 ): CanUseTool {
   const timeoutMs = options.timeoutMs ?? 5 * 60_000;
   return async (toolName, input, sdkOptions): Promise<PermissionResult> => {
+    const deadline = Date.now() + timeoutMs;
     const controller = new AbortController();
     const signal = options.signal ? AbortSignal.any([sdkOptions.signal, options.signal]) : sdkOptions.signal;
     const abort = (): void => controller.abort(signal.reason);
@@ -51,6 +52,7 @@ export function createPermissionAdapter(
           else controller.signal.addEventListener("abort", rejectOnAbort, { once: true });
         }),
       ]);
+      if (Date.now() >= deadline) return { behavior: "deny", message: "Permission decision timed out" };
       if (controller.signal.aborted) return { behavior: "deny", message: "Permission denied: request cancelled" };
       if (decision.type === "allow_once") return { behavior: "allow", updatedInput: input };
       if (decision.type === "answer" && toolName === "AskUserQuestion") {

@@ -3,15 +3,18 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocket } from "ws";
 
 import { InteractionManager, InteractionStore } from "@claude-remote/interactions";
-import { DaemonServer } from "../src/server.js";
+import { startRelay } from "@claude-remote/relay";
+import { deriveDeviceId, encodeControl, generateDeviceKey, parseControl } from "@claude-remote/relay/protocol";
+import { DaemonServer, type DaemonServerOptions } from "../src/server.js";
+import { RelayConnector } from "../src/relay/connector.js";
 import { ApprovalBridge } from "../src/run/approval.js";
 import { TurnRunner } from "../src/run/runner.js";
 import { ActivityTracker } from "../src/watch/activity.js";
@@ -26,7 +29,9 @@ const OTHER = "22222222-bbbb-4bbb-8bbb-222222222222";
 const route = (name: string, session = ID) => `/api/sessions/${session}/${name}`;
 const jsonl = (...rows: object[]) => rows.map((row) => JSON.stringify(row) + "\n").join("");
 
-async function harness(t: TestContext) {
+async function harness(t: TestContext, options: Pick<DaemonServerOptions, "effortOptions" | "newSessionWatchTimeoutMs"> & {
+  isCliAlive?: DaemonServerOptions["isCliAlive"];
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), "cr-p1-server-"));
   const projectsDir = join(root, "projects");
   const project = join(projectsDir, "fixture");
@@ -53,6 +58,7 @@ async function harness(t: TestContext) {
       cooldownMs: 120000, interactionsDbPath: ":memory:", permissionTimeoutMs: 5000, relays: [] },
     tracker, watcher, approvals, runner, version: "fixture", notifier: async () => {}, claudeCliVersion: () => "2.1.330",
     isCliAlive: async (id) => terminal.has(id),
+    ...options,
   });
   t.after(async () => {
     wire.close();
@@ -87,7 +93,8 @@ async function harness(t: TestContext) {
     return subscription;
   }
 
-  return { sessionFile, root, tracker, watcher, queries: sdk.queries, subscribe, terminal,
+  return { sessionFile, root, tracker, watcher, server, queries: sdk.queries, subscribe, terminal,
+    raw: (path: string, options?: Parameters<typeof wire.fetchRaw>[1]) => wire.fetchRaw(path, { token: TOKEN, ...options }),
     unauthenticated: wire.fetchJson,
     get: (path: string) => wire.fetchJson(path, { token: TOKEN }),
     post: (path: string, post: object) => wire.fetchJson(path, { token: TOKEN, post }),
@@ -402,4 +409,240 @@ test("P1 workspace reports Git branch, combined diff and bounded output, project
   await git("config", "filter.fixture.clean", "touch filter-executed; cat");
   assert.equal((await h.get(route("workspace"))).status, 200);
   await assert.rejects(stat(join(h.root, "filter-executed")), { code: "ENOENT" });
+});
+
+test("session file entry points reject unsafe IDs, directories and linked transcripts", async (t) => {
+  const h = await harness(t);
+  const project = dirname(h.sessionFile);
+  await mkdir(join(project, "directory.jsonl"));
+  await symlink(h.sessionFile, join(project, "linked.jsonl"));
+  for (const id of ["%2E%2E%2Fnew", "back%5Cslash", "bad..id", "bad%00", "%FF", "directory", "linked"]) {
+    for (const [path, method] of [
+      ["messages", "GET"], ["messages", "POST"], ["file?path=x.png", "GET"],
+      ["files/meta?path=x.png", "GET"], ["files/content?path=x.png", "GET"], ["upload?filename=x.png", "POST"],
+    ] as const) {
+      const response = await h.raw(route(path, id), {
+        method, ...(method === "POST" ? { body: JSON.stringify({ text: "x" }) } : {}),
+      });
+      assert.equal(response.status, 404, `${method} ${id}/${path}`);
+    }
+  }
+});
+
+test("uploads are immutable across same-millisecond writes and reject linked upload directories", async (t) => {
+  const h = await harness(t);
+  t.mock.method(Date, "now", () => 123_456);
+  const uploads = join(h.root, "uploads");
+  const paths = await Promise.all(["first", "second"].map(async (body) => {
+    const response = await h.raw("/api/upload?filename=same.png", { method: "POST", body });
+    assert.equal(response.status, 200);
+    return (JSON.parse(response.body.toString()) as { path: string }).path;
+  }));
+  assert.notEqual(paths[0], paths[1]);
+  assert.deepEqual(await Promise.all(paths.map((path) => readFile(path, "utf8"))), ["first", "second"]);
+  for (const [index, path] of paths.entries()) {
+    const readback = await h.raw(`/api/uploads/new/${basename(path)}`);
+    assert.equal(readback.status, 200);
+    assert.equal(readback.body.toString(), ["first", "second"][index]);
+    assert.match(readback.headers["cache-control"] ?? "", /immutable/);
+  }
+  const outside = join(h.root, "outside");
+  await mkdir(outside);
+  await symlink(outside, join(uploads, ID));
+  const rejected = await h.raw(route("upload?filename=blocked.png"), { method: "POST", body: "blocked" });
+  assert.equal(rejected.status, 403);
+  assert.deepEqual(await readdir(outside), []);
+});
+
+test("file readers share sensitive path checks and bound ranges by the full file size", async (t) => {
+  const h = await harness(t);
+  const dir = join(h.root, "uploads", "new");
+  await mkdir(dir, { recursive: true });
+  const sensitive = join(h.root, ".env.png");
+  const alias = join(dir, "alias.png");
+  const outside = join(h.root, "ordinary.png");
+  await writeFile(sensitive, "fixture");
+  await symlink(sensitive, alias);
+  await writeFile(outside, "ordinary png");
+  await symlink(outside, join(dir, "outside.png"));
+  for (const endpoint of ["file", "files/meta", "files/content"]) {
+    const response = await h.raw(route(`${endpoint}?path=${encodeURIComponent(alias)}`));
+    assert.equal(response.status, 403);
+  }
+  assert.equal((await h.raw("/api/uploads/new/alias.png")).status, 403);
+  assert.equal((await h.raw("/api/uploads/new/outside.png")).status, 404);
+  const partial = await h.raw(route("files/content?path=ordinary.png"), { range: "bytes=1-3" });
+  assert.equal(partial.status, 206);
+  assert.equal(partial.body.toString(), "rdi");
+  assert.equal(partial.headers["content-range"], "bytes 1-3/12");
+  const large = join(dir, "large.png");
+  await writeFile(large, "");
+  await truncate(large, 64 * 1024 * 1024 + 1);
+  assert.equal((await h.raw("/api/uploads/new/large.png")).status, 413);
+  for (const endpoint of ["file", "files/meta", "files/content"]) {
+    const response = await h.raw(route(`${endpoint}?path=${encodeURIComponent(large)}`), { range: "bytes=0-1" });
+    assert.equal(response.status, 413);
+  }
+});
+
+test("message admission checks live CLI ownership and rechecks closing after awaiting it", async (t) => {
+  let finishProbe!: (live: boolean) => void;
+  let enterProbe!: () => void;
+  const entered = new Promise<void>((resolve) => { enterProbe = resolve; });
+  let calls = 0;
+  const h = await harness(t, {
+    isCliAlive: async () => {
+      if (calls++ === 0) return true;
+      enterProbe();
+      return new Promise((resolve) => { finishProbe = resolve; });
+    },
+  });
+  const send = () => h.post(route("messages"), { text: "resume" });
+  assert.equal(h.tracker.getStatus(ID), "idle");
+  assert.deepEqual(await send(), { status: 409, json: { error: "not_idle", status: "terminal-driving" } });
+  const pending = send();
+  await entered;
+  const closing = h.server.close();
+  finishProbe(false);
+  assert.deepEqual(await pending, { status: 503, json: { error: "server_closing" } });
+  assert.equal(h.queries.length, 0);
+  await closing;
+});
+
+test("explicit release protects a run started before or during the live CLI probe", async (t) => {
+  let finishProbe!: (live: boolean) => void;
+  let enterProbe!: () => void;
+  const entered = new Promise<void>((resolve) => { enterProbe = resolve; });
+  let calls = 0;
+  const h = await harness(t, {
+    isCliAlive: async () => {
+      if (calls++ > 0) return false;
+      enterProbe();
+      return new Promise((resolve) => { finishProbe = resolve; });
+    },
+  });
+  const release = () => h.post(route("abort"), { action: "release" });
+  const pending = release();
+  await entered;
+  const started = await h.post(route("messages"), { text: "new turn" });
+  assert.equal(started.status, 202);
+  finishProbe(false);
+  for (const response of [await pending, await release()]) {
+    assert.deepEqual(response, {
+      status: 409, json: { error: "run_mismatch", activeRunId: started.json.runId, status: "daemon-driving" },
+    });
+  }
+  assert.equal(h.queries[0]?.interrupts, 0);
+});
+
+test("concurrent subscribers recover when a new transcript lands and effort uses its active cwd", async (t) => {
+  const cwdSeen: string[] = [];
+  const h = await harness(t, {
+    effortOptions: async (cwd) => { cwdSeen.push(cwd); return { levels: ["high"], verified: true }; },
+  });
+  const started = await h.post("/api/sessions", { cwd: h.root, text: "new turn" });
+  assert.equal(started.status, 202);
+  const sessionId = String(started.json.sessionId);
+  const [first, second, effort] = await Promise.all([
+    h.subscribe(sessionId), h.subscribe(sessionId), h.get(`/api/effort-levels?sessionId=${sessionId}`),
+  ]);
+  assert.deepEqual(effort, { status: 200, json: { levels: ["high"], verified: true } });
+  assert.deepEqual(cwdSeen, [h.root]);
+  await writeFile(join(dirname(h.sessionFile), `${sessionId}.jsonl`),
+    jsonl({ type: "user", uuid: "u1", cwd: h.root, sessionId }));
+  await Promise.all([first.frame("resync"), second.frame("resync")]);
+  assert.equal(h.watcher.watched.filter((id) => id === sessionId).length, 1);
+});
+
+test("unwritten new sessions stop retrying and release watcher resources", async (t) => {
+  const h = await harness(t, { newSessionWatchTimeoutMs: 500 });
+  const watch = t.mock.method(h.watcher, "watch");
+  const started = await h.post("/api/sessions", { cwd: h.root, text: "new turn" });
+  assert.equal(started.status, 202);
+  await h.subscribe(String(started.json.sessionId));
+  await delay(600);
+  const attempts = watch.mock.callCount();
+  assert.ok(attempts >= 2);
+  await delay(250);
+  assert.equal(watch.mock.callCount(), attempts);
+  assert.deepEqual(h.watcher.watched, []);
+});
+
+test("relay lets /btw wait for headers beyond the standard HTTP timeout", async (t) => {
+  const wire = memoryHttp(t);
+  const secret = generateDeviceKey();
+  const relay = await startRelay({
+    secret, host: "127.0.0.1", port: 0, maxStreams: 8, maxBodyBytes: 1024,
+    timings: { headTimeoutMs: 20, sideChatHeadTimeoutMs: 1000 },
+    log: () => {},
+  });
+  wire.restoreListen();
+  t.after(async () => {
+    wire.close();
+    await relay.close();
+  });
+  const key = generateDeviceKey();
+  const id = deriveDeviceId(key);
+  const agent = new WebSocket("ws://fixture.test/agent", {
+    agent: wire.agent, headers: { Authorization: `Bearer ${secret}`, "X-Device-Id": id, "X-Device-Key": key },
+  });
+  let sideChatSid: number | undefined;
+  agent.on("message", (data, binary) => {
+    if (binary) return;
+    const parsed = parseControl(data.toString());
+    if (!parsed.ok) return;
+    const frame = parsed.frame;
+    if (frame.t === "open" && frame.path.includes("/btw?")) sideChatSid = frame.sid;
+    if (frame.t === "end" && frame.sid === sideChatSid) {
+      const { sid } = frame;
+      void delay(80).then(() => {
+        agent.send(encodeControl({ t: "head", sid, status: 200, headers: {} }));
+        agent.send(encodeControl({ t: "end", sid }));
+      });
+    }
+  });
+  await once(agent, "open");
+  const ordinary = await wire.fetchRaw(`/d/${id}/api/health`);
+  assert.equal(ordinary.status, 504);
+  const side = await wire.fetchRaw(`/d/${id}${route("btw?fixture=1")}`, { method: "POST", body: "{}" });
+  assert.equal(side.status, 200);
+});
+
+test("relay connector rejects reload before forwarding to the daemon", async (t) => {
+  const wire = memoryHttp(t);
+  const secret = generateDeviceKey();
+  const relay = await startRelay({
+    secret, host: "127.0.0.1", port: 0, maxStreams: 8, maxBodyBytes: 1024, log: () => {},
+  });
+  wire.restoreListen();
+  const deviceKey = generateDeviceKey();
+  const deviceId = deriveDeviceId(deviceKey);
+  let connected!: Promise<unknown>;
+  let link: WebSocket | undefined;
+  const MemoryWebSocket = new Proxy(WebSocket, {
+    construct(_target, [address, options]: [string | URL, WebSocket.ClientOptions]) {
+      const socket = new WebSocket(address, { ...options, agent: wire.agent });
+      connected = once(socket, "open");
+      link = socket;
+      return socket;
+    },
+  });
+  const connector = new RelayConnector({
+    settings: { secret, deviceKey, deviceId, url: `http://127.0.0.1:${relay.port}` },
+    WebSocket: MemoryWebSocket, log: () => {},
+  });
+  t.after(async () => {
+    if (link && link.readyState !== WebSocket.CLOSED) {
+      const closed = once(link, "close");
+      link.terminate();
+      await closed;
+    }
+    await connector.stop();
+    wire.close();
+    await relay.close();
+  });
+  connector.start({ host: "127.0.0.1", port: 1 });
+  await connected;
+  const result = await wire.fetchJson(`/d/${deviceId}/api/relay/reload?fixture=1`, { token: TOKEN, post: {} });
+  assert.deepEqual(result, { status: 403, json: { error: "loopback_only" } });
 });

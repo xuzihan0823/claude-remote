@@ -162,18 +162,17 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.log(`${signal} received, shutting down…`);
     void (async () => {
+      cliExitReleaser.stop();
+      const closingServer = server.close().catch((error: unknown) => {
+        console.error("server close failed:", error);
+      });
       try {
         await relays.stop();
       } catch (error) {
         console.error("relay connector stop failed:", error);
       }
-      try {
-        await server.close(); // 停新连接、关 WS、abort 活跃 run 并等 settle
-      } catch (error) {
-        console.error("server close failed:", error);
-      }
+      await closingServer;
       watcher.close();
-      cliExitReleaser.stop();
       tracker.dispose();
       manager.close();
       try {

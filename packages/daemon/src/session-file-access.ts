@@ -3,17 +3,21 @@
 // 手机本来就能让 Agent 读写这台电脑上的任意文件，所以这个接口不限目录，只拦敏感文件。
 // 相对路径按会话工作目录解析，工作目录取不到时不回退到后台进程目录。
 
-import type { Stats } from "node:fs";
-import { realpath, stat } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { open, realpath, stat, type FileHandle } from "node:fs/promises";
 import { basename, extname, isAbsolute, resolve, sep } from "node:path";
 
+export const IMAGE_FILE_LIMIT_BYTES = 25 * 1024 * 1024;
+export const SESSION_FILE_LIMIT_BYTES = 64 * 1024 * 1024;
+
 export type PreviewKind = "html" | "image" | "text" | "markdown" | "pdf" | "none";
-export type FileAccessErrorCode = "invalid_path" | "sensitive_file" | "file_not_found";
+export type FileAccessErrorCode = "invalid_path" | "sensitive_file" | "file_not_found" | "payload_too_large";
 
 const ERROR_STATUS: Record<FileAccessErrorCode, number> = {
   invalid_path: 400,
   sensitive_file: 403,
   file_not_found: 404,
+  payload_too_large: 413,
 };
 
 export class FileAccessError extends Error {
@@ -64,6 +68,29 @@ export async function resolveRequestedFile(cwd: string, requested: string | null
   return { path: real, stats };
 }
 
+export async function openRequestedFile(
+  cwd: string, requested: string | null, limit: number, confined = false,
+): Promise<SessionFile & { handle: FileHandle }> {
+  const file = await resolveRequestedFile(cwd, requested);
+  // 上传回读只允许规范目录下的原始路径，不跟随链接。
+  if (confined && file.path !== resolve(cwd, requested ?? "")) throw new FileAccessError("file_not_found");
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(file.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const stats = await handle.stat();
+    if (!stats.isFile() || stats.dev !== file.stats.dev || stats.ino !== file.stats.ino ||
+      await realpath(file.path) !== file.path) {
+      throw new FileAccessError("file_not_found");
+    }
+    if (stats.size > limit) throw new FileAccessError("payload_too_large");
+    return { path: file.path, stats, handle };
+  } catch (error) {
+    await handle?.close();
+    if (error instanceof FileAccessError) throw error;
+    throw new FileAccessError("file_not_found");
+  }
+}
+
 const TEXT_MIME = "text/plain; charset=utf-8";
 const TEXT_EXTENSIONS = [
   "txt", "log", "json", "jsonc", "yaml", "yml", "toml", "xml", "csv", "tsv", "ini", "conf", "cfg",
@@ -89,7 +116,9 @@ const FILE_TYPES: Record<string, { mime: string; previewKind: PreviewKind }> = {
 };
 
 export function fileTypeOf(path: string): { mime: string; previewKind: PreviewKind } {
-  return FILE_TYPES[extname(path).slice(1).toLowerCase()] ?? { mime: "application/octet-stream", previewKind: "none" };
+  const extension = extname(path).slice(1).toLowerCase();
+  if (Object.hasOwn(FILE_TYPES, extension)) return FILE_TYPES[extension]!;
+  return { mime: "application/octet-stream", previewKind: "none" };
 }
 
 export function fileMeta({ path, stats }: SessionFile) {

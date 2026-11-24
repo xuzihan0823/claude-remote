@@ -89,6 +89,8 @@ function fakeSdk(): FakeSdk {
         message: { content: [{ type: "text", text: "done text" }] },
       } as never;
       await gatePromise;
+      yield { type: "result", subtype: "success", is_error: false, result: "done text",
+        uuid: "sdk-result", session_id: sessionId } as never;
     })();
     const augmented = generator as unknown as Record<string, unknown>;
     augmented.interrupt = async (): Promise<void> => {
@@ -749,7 +751,8 @@ test("存活 CLI 超过冷却期仍拒绝发送和解除；退出后轮询释放
 });
 
 test("带 runId 停止活跃运行不检查 CLI 存活", async (t) => {
-  const h = await startHarness(async () => { throw new Error("must not check CLI presence"); });
+  let checks = 0;
+  const h = await startHarness(async () => { checks += 1; return false; });
   t.after(() => h.dispose());
   const accepted = await fetch(`${h.base}/api/sessions/${SESSION_ID}/messages`, authed({
     method: "POST", body: JSON.stringify({ text: "run" }),
@@ -761,13 +764,16 @@ test("带 runId 停止活跃运行不检查 CLI 存活", async (t) => {
   }));
   assert.equal(stopped.status, 200);
   assert.deepEqual(await stopped.json(), { runId, status: "aborted" });
+  assert.equal(checks, 1, "only admission should check CLI presence");
 });
 
 test("解除检查期间开始的新运行不能被解除或停止", async (t) => {
   let resolvePresence!: (alive: boolean) => void;
   let checking!: () => void;
   const checked = new Promise<void>((resolve) => { checking = resolve; });
-  const h = await startHarness(() => {
+  let checks = 0;
+  const h = await startHarness(async () => {
+    if (checks++ > 0) return false;
     checking();
     return new Promise<boolean>((resolve) => { resolvePresence = resolve; });
   });

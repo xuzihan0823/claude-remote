@@ -9,10 +9,11 @@
 // 链尾校验（增量行 parentUuid 不指向已知链尾 → resync）与 truncation 检测。
 
 import { EventEmitter } from "node:events";
-import { watch as fsWatch } from "node:fs";
-import { open, readdir, stat } from "node:fs/promises";
+import { constants, watch as fsWatch } from "node:fs";
+import { open, lstat, realpath } from "node:fs/promises";
 import { join } from "node:path";
 
+import { resolveSessionFile } from "../session-files.js";
 import { parseTranscriptLine } from "../transcript/reader.js";
 import type { RenderMessage } from "../transcript/types.js";
 
@@ -138,7 +139,7 @@ export class SessionWatcher extends EventEmitter {
 
   readonly #sessions = new Map<string, SessionState>();
   readonly #dirWatchers = new Map<string, DirWatchEntry>();
-  readonly #pendingWatch = new Set<string>();
+  readonly #pendingWatch = new Map<string, Promise<void>>();
   #tickHandle: unknown;
   #closed = false;
 
@@ -174,7 +175,7 @@ export class SessionWatcher extends EventEmitter {
   }
 
   #emitEvent<K extends keyof WatcherEvents>(event: K, payload: WatcherEvents[K]): void {
-    super.emit(event, payload);
+    if (!this.#closed && this.#sessions.has(payload.sessionId)) super.emit(event, payload);
   }
 
   /** 当前被订阅的 sessionId 列表（调试/测试用）。 */
@@ -188,30 +189,26 @@ export class SessionWatcher extends EventEmitter {
    */
   async watch(sessionId: string): Promise<void> {
     if (this.#closed) throw new Error("watcher closed");
-    if (this.#sessions.has(sessionId) || this.#pendingWatch.has(sessionId)) return;
-    this.#pendingWatch.add(sessionId);
+    if (this.#sessions.has(sessionId)) return;
+    const pending = this.#pendingWatch.get(sessionId);
+    if (pending) return pending;
+    const init = this.#initWatch(sessionId);
+    this.#pendingWatch.set(sessionId, init);
     try {
-      const file = await this.#resolveFile(sessionId);
-      const dir = join(file, "..");
-      const init = await scanExisting(file);
-      if (this.#closed || this.#sessions.has(sessionId)) return;
-      const state: SessionState = {
-        sessionId,
-        file,
-        dir,
-        offset: init.offset,
-        lineCount: init.lineCount,
-        remainder: init.remainder,
-        lastUuid: init.lastUuid,
-        polling: false,
-        dirty: false,
-      };
-      this.#sessions.set(sessionId, state);
-      this.#acquireDirWatcher(dir);
-      if (this.#tickHandle === undefined) this.#armTick();
+      await init;
     } finally {
-      this.#pendingWatch.delete(sessionId);
+      if (this.#pendingWatch.get(sessionId) === init) this.#pendingWatch.delete(sessionId);
     }
+  }
+
+  async #initWatch(sessionId: string): Promise<void> {
+    const file = await resolveSessionFile(this.#projectsDir, sessionId);
+    const dir = join(file, "..");
+    const init = await scanExisting(file);
+    if (this.#closed) throw new Error("watcher closed");
+    this.#sessions.set(sessionId, { sessionId, file, dir, ...init, polling: false, dirty: false });
+    this.#acquireDirWatcher(dir);
+    if (this.#tickHandle === undefined) this.#armTick();
   }
 
   unwatch(sessionId: string): void {
@@ -241,25 +238,6 @@ export class SessionWatcher extends EventEmitter {
   }
 
   // -- 定位与目录监听 -------------------------------------------------------
-
-  async #resolveFile(sessionId: string): Promise<string> {
-    const name = `${sessionId}.jsonl`;
-    // projectsDir 本身不存在：原生 ENOENT 上抛
-    const dirents = await readdir(this.#projectsDir, { withFileTypes: true });
-    for (const dirent of dirents) {
-      if (!dirent.isDirectory()) continue;
-      const candidate = join(this.#projectsDir, dirent.name, name);
-      try {
-        await stat(candidate);
-        return candidate;
-      } catch {
-        // 该项目目录下没有，继续
-      }
-    }
-    const error = new Error(`session file not found: ${sessionId}`);
-    (error as NodeJS.ErrnoException).code = "ENOENT";
-    throw error;
-  }
 
   #acquireDirWatcher(dir: string): void {
     if (this.#dirWatchFactory === null) return;
@@ -332,17 +310,20 @@ export class SessionWatcher extends EventEmitter {
   async #pollOnce(state: SessionState): Promise<void> {
     let size: number;
     try {
-      size = (await stat(state.file)).size;
+      const stats = await lstat(state.file);
+      if (!stats.isFile() || await realpath(state.file) !== state.file) return;
+      size = stats.size;
     } catch {
       return; // 文件暂时不可见（替换中/被删）：等下一轮；替换完成表现为 size 变化
     }
-    if (size === state.offset) return;
+    if (this.#sessions.get(state.sessionId) !== state || size === state.offset) return;
     const at = this.#now();
 
     if (size < state.offset) {
       this.#emitEvent("write", { sessionId: state.sessionId, at });
       // 截断/替换：重扫全文件重建 seq 与链尾，消费方全量重拉
       const init = await scanExisting(state.file);
+      if (this.#sessions.get(state.sessionId) !== state) return;
       state.offset = init.offset;
       state.lineCount = init.lineCount;
       state.remainder = init.remainder;
@@ -352,8 +333,9 @@ export class SessionWatcher extends EventEmitter {
     }
 
     const chunk = await readRange(state.file, state.offset, size);
+    if (this.#sessions.get(state.sessionId) !== state) return;
     state.offset += chunk.length;
-    if (this.#consume(state, chunk)) this.#emitEvent("write", { sessionId: state.sessionId, at });
+    if (this.#consume(state, chunk) && this.#sessions.get(state.sessionId) === state) this.#emitEvent("write", { sessionId: state.sessionId, at });
   }
 
   // -- 字节 → 行 → 消息 -----------------------------------------------------
@@ -363,6 +345,7 @@ export class SessionWatcher extends EventEmitter {
     let conversation = false;
     let data = state.remainder.length > 0 ? Buffer.concat([state.remainder, chunk]) : chunk;
     for (;;) {
+      if (this.#sessions.get(state.sessionId) !== state) return false;
       const nl = data.indexOf(0x0a);
       if (nl === -1) break;
       const line = data.subarray(0, nl).toString("utf8");
@@ -390,6 +373,7 @@ export class SessionWatcher extends EventEmitter {
       state.lastUuid = info.uuid;
     }
     for (const message of parseTranscriptLine(line, seq)) {
+      if (this.#sessions.get(state.sessionId) !== state) break;
       this.#emitEvent("message", { sessionId: state.sessionId, message });
     }
     return info.uuid !== null;
@@ -432,8 +416,19 @@ function lineChainInfo(line: string): ChainInfo | null {
   };
 }
 
+async function openTranscript(file: string) {
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    if (!(await handle.stat()).isFile() || await realpath(file) !== file) throw new Error("invalid transcript path");
+    return handle;
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
 async function readRange(file: string, start: number, end: number): Promise<Buffer> {
-  const handle = await open(file, "r");
+  const handle = await openTranscript(file);
   try {
     const length = end - start;
     const buffer = Buffer.alloc(length);
@@ -454,7 +449,7 @@ async function readRange(file: string, start: number, end: number): Promise<Buff
  * 只提取链定位字段，行内容即读即弃（同 02 reader 的轻扫思路）。
  */
 async function scanExisting(file: string): Promise<ScanState> {
-  const handle = await open(file, "r");
+  const handle = await openTranscript(file);
   const result: ScanState = { offset: 0, lineCount: 0, remainder: Buffer.alloc(0), lastUuid: null };
   try {
     const chunkSize = 256 * 1024;

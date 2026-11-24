@@ -112,12 +112,13 @@ App 发送前生成 UUID（Hermes 缺少 crypto.randomUUID 时有兜底），保
 | runId 等于当前运行 | `200 { "runId": "<uuid>", "status": "aborted" }` | 停止已受理，等待 SDK 收尾；重复停止安全 |
 | runId 与当前运行不同 | `409 { "error": "run_mismatch", "activeRunId": "<当前uuid>", "status": "daemon-driving" }` | 不停止当前运行；客户端同步当前身份 |
 | 指定 runId，但当前无运行 | `200 { "runId": null, "status": "idle", "sessionStatus": "idle" }` | 幂等；sessionStatus 也可能为 terminal-driving，此时不解除终端占用 |
+| `{"action":"release"}`，当前有运行 | `409 { "error": "run_mismatch", "activeRunId": "<当前uuid>", "status": "daemon-driving" }` | 保留当前轮次 |
 | 不指定 runId，当前有运行 | `200 { "runId": "<uuid>", "status": "aborted" }` | 兼容旧客户端，停止会话当前轮次；无指定轮次保护 |
 | 不指定 runId，无活跃运行，但 CLI 仍登记为存活 | `409 { "error": "terminal_alive", "status": "terminal-driving" }` | 拒绝解除，状态不变；先在终端执行 `/exit` |
 | 不指定 runId，终端占用且无存活 CLI 登记 | `200 { "runId": null, "status": "released" }` | 解除残留占用；后续终端写入仍可重新占用 |
 | 不指定 runId，当前空闲 | `200 { "runId": null, "status": "idle" }` | 无操作 |
 
-兼容无请求体及 `{}`。`aborted` 是受理结果，不是运行终态；客户端显示“正在停止”并保持发送受限，等待对应 run 终态或权威状态快照。Runner 默认最多等待约 5 秒中止宽限后强制关闭。A 的迟到停止响应不能清除 B；通用 404/409 不等于运行已结束。
+显式解除占用使用 `{"action":"release"}`，不带 `runId`。兼容无请求体及 `{}`。`aborted` 是受理结果，不是运行终态；客户端显示“正在停止”并保持发送受限，等待对应 run 终态或权威状态快照。Runner 默认最多等待约 5 秒中止宽限后强制关闭。A 的迟到停止响应不能清除 B；通用 404/409 不等于运行已结束。
 
 无活跃运行时，解除请求会重新读取 CLI 登记目录，使用与 `CliExitReleaser` 相同的进程存活判断，不区分登记中的 busy/idle。目录不存在或单个文件解析失败时兼容旧行为；进程探测返回 `EPERM` 时按存活处理。异步检查期间若已开始新运行，返回 `409 run_mismatch` 和当前 runId，不解除也不停止新运行。App 收到 `terminal_alive` 后保留占用、回退进度环并触发错误触感，提示先在终端退出；轮询已见过的进程退出后会自动释放。手动解除仅清理 daemon 状态，不结束终端进程，也不使终端重新载入手机写入的历史。
 
@@ -127,7 +128,7 @@ CLI 注入的 `<task-notification>` 与 `<system-reminder>` 等包裹内容在�
 
 `GET /api/models` 返回 `{ "models": [{ "id": "provider/model", "alias": "sonnet", "displayName": "Sonnet" }], "defaultModel": "sonnet" }`，defaultModel 可缺省。目录读取用户 settings，不解析指定 cwd 的 project/local 设置，不包含凭据或 picker description；不能据此宣称项目一定使用某模型。
 
-`GET /api/effort-levels?cwd=<cwd>&model=<override>` 返回 `{levels, verified}`。续聊以 `sessionId` 替代 cwd，服务端从 JSONL 解析真实工作目录；新建 cwd 仅接受已知会话目录或主目录。model 省略时按 `ANTHROPIC_MODEL` > settings `model` 取默认模型，别名经 `ANTHROPIC_DEFAULT_*_MODEL` 展开。若 `ANTHROPIC_BASE_URL` 是本机 HTTP 地址，服务端读取该网关（Magpie）的 `/v1/models`，按模型 id 匹配 `reasoning_levels`，有档位时 `verified: true`；网关不可达、非本机、找不到模型或档位为空（Magpie 对自定义渠道的模型不掌握思考能力，会报 `reasoning: false`）时返回全部五档、`verified: false`。不启动 SDK、不缓存。手机端每个会话只保存一个档位字符串；仅当 `verified` 且所选档位不在列表中时标红并阻止发送，不静默降档。
+`GET /api/effort-levels?cwd=<cwd>&model=<override>` 返回 `{levels, verified}`。续聊以 `sessionId` 替代 cwd，服务端优先使用活跃轮次的工作目录，其次从 JSONL 解析；新建 cwd 仅接受已知会话目录或主目录。model 省略时按 `ANTHROPIC_MODEL` > settings `model` 取默认模型，别名经 `ANTHROPIC_DEFAULT_*_MODEL` 展开。若 `ANTHROPIC_BASE_URL` 是本机 HTTP 地址，服务端读取该网关（Magpie）的 `/v1/models`，按模型 id 匹配 `reasoning_levels`，有档位时 `verified: true`；网关不可达、非本机、找不到模型或档位为空（Magpie 对自定义渠道的模型不掌握思考能力，会报 `reasoning: false`）时返回全部五档、`verified: false`。不启动 SDK、不缓存。手机端每个会话只保存一个档位字符串；仅当 `verified` 且所选档位不在列表中时标红并阻止发送，不静默降档。
 
 `GET /api/sessions/:id/messages?limit=100&beforeSeq=42` 返回 `{ "messages": [], "firstSeq": null, "hasMore": false }`。limit 默认 100、范围 1–500；beforeSeq 为大于等于 1 的安全整数且不包含该行，非法值返回 400 `invalid_before_seq`。消息按 seq、blockIndex 升序；以 `(seq, blockIndex)` 去重，seq 是 JSONL 物理行号而非数组下标。字段包括 uuid、parentUuid、role、kind，以及按 kind 出现的 text、toolName、toolInput、toolUseId、isError、timestamp、rawType；assistant 消息可含 `apiMessageId`，用于将草稿对账限定到同一 API 消息，不能假设转录 blockIndex 等于 SDK 流下标。
 
@@ -150,13 +151,15 @@ GET /api/sessions/:id/files/content?path=<绝对或相对路径>
 | 400 | `invalid_path` | 路径为空、含空字符，或会话没有工作目录时传了相对路径 |
 | 403 | `sensitive_file` | 命中敏感文件规则 |
 | 404 | `session_not_found` / `file_not_found` | 会话或文件不存在；目录和其他非普通文件也按 `file_not_found` 返回 |
+| 413 | `payload_too_large` | 普通文件超过 64 MiB，图片接口超过 25 MiB；Range 也按完整文件大小校验 |
 | 416 | `range_not_satisfiable` | Range 超出文件范围，响应带 `Content-Range: bytes */<size>` |
 
 这组接口不经过模型，也不留下会话记录。手机本来就能让 Agent 读写这台电脑上的任意文件，所以不限目录，只拦敏感文件，校验集中在 `packages/daemon/src/session-file-access.ts`：
 
 - 相对路径按 `readSessionCwd` 取到的工作目录解析，取不到时只接受绝对路径，不回退到 home 或后台进程目录。
 - 敏感规则为 `.env*`、`.git`、`.ssh`、`*.pem`、`*.key`、`id_rsa*`、`.npmrc`、`.netrc`，不区分大小写，对请求路径和 `realpath` 后的真实路径的每一段都检查，符号链接绕不过去。
-- 会话 ID 含路径分隔符时直接 404。ID 会拼进 JSONL 路径，不拦截的话可以指向上传目录里伪造的会话文件，篡改相对路径的解析基准。新增信任 JSONL 内容的接口时要保留这条检查。
+- 会话文件定位拒绝含路径分隔符、`..` 或控制字符的 ID。JSONL 必须是 projects 根目录内的普通文件，定位时拒绝符号链接。
+- legacy `/file` 和 `/api/uploads` 使用相同的敏感路径校验。上传回读仅接受上传目录中的原始文件路径。
 
 App 把 HTML 当作不可信内容：不注入令牌，不提供 `onMessage`，关闭跨文件访问，用 `incognito`。导航规则为：文件自身和页内地址留在预览里，外部链接交给系统浏览器，其他本机文件和自定义协议一律拦截。iOS 只放行真实点击，Android 拿不到导航类型。令牌只放请求头，不放 URL。
 

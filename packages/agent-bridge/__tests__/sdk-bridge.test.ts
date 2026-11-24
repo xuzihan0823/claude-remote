@@ -168,3 +168,19 @@ test("auto and explicit classifier env reach SDK without policy rewrites", () =>
     keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; });
   }
 });
+
+test("only an explicit bypassPermissions turn enables the SDK bypass option", () => {
+  for (const mode of [undefined, "default", "auto", "acceptEdits", "plan", "bypassPermissions"] as const) {
+    const fake = fakeQuery();
+    const handle = options(fake.factory, mode === undefined ? {} : { permissionMode: mode });
+    assert.equal(fake.params()?.options?.allowDangerouslySkipPermissions, mode === "bypassPermissions" ? true : undefined);
+    handle.close();
+  }
+  const side = fakeQuery();
+  startSdkQuery({
+    cwd: "/tmp", signal: new AbortController().signal, canUseTool: async () => ({ behavior: "deny", message: "test" }),
+    readOnlySideChat: true, permissionMode: "bypassPermissions",
+  }, side.factory).close();
+  assert.equal(side.params()?.options?.permissionMode, "dontAsk");
+  assert.equal(side.params()?.options?.allowDangerouslySkipPermissions, undefined);
+});

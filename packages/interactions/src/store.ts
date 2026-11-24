@@ -141,7 +141,7 @@ export class InteractionStore {
     return rows.map(mapInteraction);
   }
 
-  resolve(input: ResolveStoreInput): InteractionRecord | undefined {
+  resolve(input: ResolveStoreInput, now?: () => number): InteractionRecord | undefined {
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       const current = this.get(input.interactionId);
@@ -150,14 +150,17 @@ export class InteractionStore {
         return undefined;
       }
 
+      const resolvedAt = now?.() ?? input.resolvedAt;
+      const timedOut = current.expiresAt <= resolvedAt;
+      const decision: Decision = timedOut ? { type: "deny", message: "Interaction timed out" } : input.decision;
       const result = this.#database.prepare(`
         UPDATE interactions
         SET status = ?, resolved_at = ?, decision = ?
         WHERE interaction_id = ? AND status = 'pending' AND user_id = ?
       `).run(
-        input.status,
-        input.resolvedAt,
-        JSON.stringify(input.decision),
+        timedOut ? "expired" : input.status,
+        resolvedAt,
+        JSON.stringify(decision),
         input.interactionId,
         input.userId,
       );
@@ -165,11 +168,12 @@ export class InteractionStore {
         this.#database.exec("ROLLBACK");
         return undefined;
       }
-      this.appendAudit(input.interactionId, input.auditAction, input.userId, {
-        decision: input.decision.type,
-      });
+      this.appendAudit(input.interactionId, timedOut ? "auto_deny_timeout" : input.auditAction, input.userId, {
+        decision: decision.type,
+      }, resolvedAt);
+      const record = this.get(input.interactionId);
       this.#database.exec("COMMIT");
-      return this.get(input.interactionId);
+      return record;
     } catch (error) {
       this.#database.exec("ROLLBACK");
       throw error;

@@ -2,12 +2,12 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 
-import { fileTypeOf, parseRange, resolveRequestedFile } from "../src/session-file-access.js";
+import { fileTypeOf, openRequestedFile, parseRange, resolveRequestedFile } from "../src/session-file-access.js";
 
 let root: string;
 let workspace: string;
@@ -135,4 +135,32 @@ test("parseRange：截断、后缀、超范围和无法识别的写法", () => {
   assert.equal(parseRange("bytes=5-2", 100), null);
   assert.equal(parseRange("bytes=0-1,3-4", 100), null);
   assert.equal(parseRange("items=0-1", 100), null);
+});
+
+test("download reads the validated descriptor after the path is replaced", async () => {
+  const name = "replaceable.txt";
+  const path = join(workspace, name);
+  await writeFile(path, "safe");
+  const file = await openRequestedFile(workspace, name, 4);
+  try {
+    await rename(path, join(workspace, "old.txt"));
+    await symlink(join(workspace, ".env.local"), path);
+    assert.equal(file.stats.size, 4);
+    const chunks = [];
+    for await (const chunk of file.handle.createReadStream({ autoClose: false, start: 1, end: 2 })) {
+      chunks.push(chunk as Buffer);
+    }
+    assert.equal(Buffer.concat(chunks).toString(), "af");
+    await assert.rejects(openRequestedFile(workspace, name, 100), { code: "sensitive_file" });
+  } finally {
+    await file.handle.close();
+  }
+});
+
+test("bounded reads check the full file size and confine uploaded images to their original path", async () => {
+  const large = join(workspace, "large.bin");
+  await writeFile(large, "");
+  await truncate(large, 1024);
+  await assert.rejects(openRequestedFile(workspace, "large.bin", 1000), { code: "payload_too_large" });
+  await assert.rejects(openRequestedFile(workspace, "out-link.txt", 1000, true), { code: "file_not_found" });
 });
