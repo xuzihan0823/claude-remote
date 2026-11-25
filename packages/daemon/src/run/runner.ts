@@ -13,6 +13,7 @@ import {
   adaptSdkMessage,
   createPermissionAdapter,
   startSdkQuery,
+  SdkTaskStopError,
   type PermissionBroker,
   type QueryFactory,
   type SdkQueryHandle,
@@ -26,6 +27,7 @@ import {
   commandCatalog, contextReport, NO_COMPACTION_NEEDED, usageScope,
   type CommandCatalog, type CompactReceipt, type ContextReport, type McpOverview, type Quota, type SideChatReply, type SteerReceipt, type TurnUsage,
 } from "./p1.js";
+import { RunTasks, type TaskSnapshot } from "./tasks.js";
 
 /**
  * 驾驶互斥门。03 卡的 ActivityTracker 实现此接口（beginRun → daemon-driving，
@@ -43,7 +45,8 @@ export class NotIdleError extends Error {}
 export class RunRequestError extends Error {
   constructor(
     readonly code: "run_mismatch" | "not_idle" | "run_stopping" | "queue_full" | "message_id_conflict" |
-      "steer_not_found" | "steer_not_editable" | "steer_not_cancellable" | "steer_not_sendable",
+      "steer_not_found" | "steer_not_editable" | "steer_not_cancellable" | "steer_not_sendable" |
+      "no_active_run" | "task_not_found" | "task_stop_unavailable",
     readonly state?: SteerReceipt["state"],
   ) {
     super(code);
@@ -56,6 +59,7 @@ export type RunEvent =
   | { type: "stream_reset"; sessionId: string; runId: string }
   | { type: "steer"; sessionId: string; runId: string; receipt: SteerReceipt }
   | { type: "compaction"; sessionId: string; runId: string; receipt: CompactReceipt }
+  | { type: "task"; sessionId: string; runId: string; task: TaskSnapshot }
   | { type: "commands"; sessionId: string; runId: string; catalog: CommandCatalog }
   | { type: "usage"; sessionId: string; runId: string; turn: TurnUsage }
   | { type: "quota"; sessionId: string; runId: string; quota: Quota }
@@ -148,6 +152,8 @@ interface ActiveRun {
   runId: string;
   cwd: string;
   query: RunQuery;
+  tasks: RunTasks;
+  taskStops: Map<string, Promise<TaskSnapshot>>;
   options: StartTurnOptions;
   interrupting?: { clientMessageId: string; timer: ReturnType<typeof setTimeout> };
   mcpRequest?: Promise<McpOverview>;
@@ -181,6 +187,7 @@ const SIDE_CHAT_TIMEOUT_MS = 60_000;
 const MAX_SIDE_CHATS = 4;
 const REQUEST_TTL_MS = 10 * 60_000;
 const MAX_RECEIPTS = 4096;
+const MAX_RECENT_TASKS = 1024;
 const MAX_PENDING = 16;
 const MAX_PROBES = 4;
 const CONTROL_TIMEOUT_MS = 5_000;
@@ -220,6 +227,7 @@ export class TurnRunner {
   readonly #sessionRuns = new Map<string, string>();
   readonly #steers = new Map<string, RecentReceipt<SteerReceipt>>();
   readonly #compactions = new Map<string, RecentReceipt<CompactReceipt>>();
+  readonly #recentTasks = new Map<string, RecentReceipt<TaskSnapshot>>();
   readonly #usage = new Map<string, TurnUsage>();
   readonly #quotas = new Map<string, Map<string, Quota>>();
   readonly #probes = new Map<string, AbortController>();
@@ -273,7 +281,8 @@ export class TurnRunner {
     const queue = new EventQueue<RunEvent>();
     const run: ActiveRun = { sessionId, runId, cwd, query, options, queue, initialInputId: currentInputId, currentInputId, pending: [], replays: [],
       controller, aborted: false, forceStop, forceTimer: undefined,
-      requestedPermissionMode: permissionMode ?? "default", diagnostics: [] };
+      requestedPermissionMode: permissionMode ?? "default", diagnostics: [], taskStops: new Map(),
+      tasks: new RunTasks(runId, (task) => queue.push({ type: "task", sessionId, runId, task })) };
     this.#runs.set(runId, run);
     this.#quotas.delete(sessionId);
     this.#sessionRuns.set(sessionId, runId);
@@ -320,6 +329,49 @@ export class TurnRunner {
       run.forceStop();
     }, this.#abortGraceMs);
     return true;
+  }
+
+  tasks(sessionId: string): TaskSnapshot[] {
+    this.#pruneReceipts(this.#recentTasks);
+    const prefix = `${sessionId}:`;
+    const recent = [...this.#recentTasks].filter(([key]) => key.startsWith(prefix)).map(([, { receipt }]) => receipt);
+    return [...this.#findRun(sessionId)?.tasks.values() ?? [], ...recent.reverse()];
+  }
+
+  async stopTask(sessionId: string, taskId: string, runId?: string): Promise<TaskSnapshot> {
+    const run = this.#findRun(sessionId);
+    if (!run) {
+      const recent = this.tasks(sessionId).find((task) => task.taskId === taskId && (runId === undefined || task.runId === runId));
+      if (recent) return recent;
+      throw new RunRequestError("no_active_run");
+    }
+    if (runId !== undefined && runId !== run.runId) throw new RunRequestError("run_mismatch");
+    const task = run.tasks.get(taskId);
+    if (!task) throw new RunRequestError("task_not_found");
+    if (task.status !== "running" || task.stopRequested) return task;
+    const pending = run.taskStops.get(taskId);
+    if (pending) return pending;
+    if (run.aborted || run.interrupting) throw new RunRequestError("run_stopping");
+    const request = this.#requestTaskStop(run, task).finally(() => run.taskStops.delete(taskId));
+    run.taskStops.set(taskId, request);
+    return request;
+  }
+
+  async #requestTaskStop(run: ActiveRun, original: TaskSnapshot): Promise<TaskSnapshot> {
+    const { taskId } = original;
+    const query = run.query;
+    const signal = AbortSignal.any([run.controller.signal, query.approvals.signal]);
+    const failure = await control(async () => {
+      if (run.tasks.get(taskId)?.status === "running") await query.sdk.stopTask(taskId);
+    }, signal).then(() => undefined, (error: unknown) => error);
+    const active = this.#findRun(run.sessionId);
+    if (active && active !== run) throw new RunRequestError("run_mismatch");
+    const task = run.tasks.get(taskId) ?? original;
+    if (task.status !== "running") return task;
+    if (run.aborted || run.interrupting || run.query !== query) throw new RunRequestError("run_stopping");
+    if (failure instanceof SdkTaskStopError && failure.code === "task_inactive") return run.tasks.inactive(task);
+    if (failure !== undefined) throw new RunRequestError("task_stop_unavailable");
+    return run.tasks.acceptStop(task);
   }
 
   /** Return the active daemon run for a session, if any. */
@@ -661,6 +713,10 @@ export class TurnRunner {
               results.add(event.messageId);
               result = event;
               this.#recordUsage(run, event, ++turnIndex);
+            } else if (event.type === "task_started" || event.type === "task_progress" || event.type === "task_notification" ||
+              event.type === "background_tasks_changed" || event.type === "task_output") {
+              run.tasks.record(event);
+              continue;
             } else {
               if (!this.#recordP1Event(run, event)) continue;
             }
@@ -680,6 +736,7 @@ export class TurnRunner {
           queue.push({ type: "stream_reset", runId, sessionId });
           await control(() => oldQuery.sdk.closeAndWait(), run.controller.signal);
           if (run.aborted) break;
+          run.tasks.settle("query_interrupted");
           delete run.interrupting;
           delete run.catalog;
           delete run.commandInit;
@@ -730,6 +787,13 @@ export class TurnRunner {
     }
     const expiry = Date.now() + REQUEST_TTL_MS;
     for (const item of this.#steers.values()) if (item.receipt.runId === runId) item.expiresAt = expiry;
+    run.tasks.settle(run.aborted ? "run_aborted" : outcome.state === "error" ? "run_failed" : "run_ended");
+    this.#pruneReceipts(this.#recentTasks);
+    for (const receipt of run.tasks.values()) {
+      this.#recentTasks.set(`${sessionId}:${runId}:${receipt.taskId}`, { receipt, expiresAt: expiry });
+      const oldest = this.#recentTasks.keys().next().value;
+      if (this.#recentTasks.size > MAX_RECENT_TASKS && oldest !== undefined) this.#recentTasks.delete(oldest);
+    }
     this.#runs.delete(runId);
     run.controller.abort(new Error("run ended"));
     if (this.#sessionRuns.get(sessionId) === runId) this.#sessionRuns.delete(sessionId);

@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
-import { EFFORT_LEVELS, type EffortLevel, type ExternalPermissionMode, type WorkerEvent } from "@claude-remote/agent-bridge";
+import { EFFORT_LEVELS, isTaskId, type EffortLevel, type ExternalPermissionMode, type WorkerEvent } from "@claude-remote/agent-bridge";
 import { readEffortOptions, type EffortOptions } from "./effort-levels.js";
 import { readGitWorkspace } from "./git-workspace.js";
 import type { DaemonConfig } from "./config.js";
@@ -259,6 +259,15 @@ export class DaemonServer {
   async #handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     const { method } = req;
     const path = url.pathname;
+
+    if (method === "POST") {
+      // Validate the raw segments before WHATWG URL normalization can collapse path traversal.
+      const taskStop = /^\/api\/sessions\/(.*?)\/tasks\/(.*)\/stop$/.exec(req.url?.split("?", 1)[0] ?? "");
+      if (taskStop) {
+        await this.#handleTaskStop(req, res, decodePathSegment(taskStop[1]), decodePathSegment(taskStop[2]));
+        return;
+      }
+    }
 
     if (method === "GET" && path === "/api/health") {
       this.#json(res, 200, {
@@ -607,6 +616,12 @@ export class DaemonServer {
 
   async #handleP1Read(res: ServerResponse, sessionId: string, operation: "state" | "context" | "usage"): Promise<void> {
     const { runner, tracker } = this.#options;
+    if (operation === "state") {
+      if (runner.activeRunId(sessionId) === undefined && !this.#newSessions.has(sessionId) && runner.tasks(sessionId).length === 0 &&
+        await this.#p1SessionFile(res, sessionId) === undefined) return;
+      this.#json(res, 200, this.#sessionState(sessionId));
+      return;
+    }
     const activeCwd = runner.activeCwd(sessionId);
     const file = activeCwd === undefined
       ? await this.#p1SessionFile(res, sessionId)
@@ -615,10 +630,6 @@ export class DaemonServer {
         return undefined;
       }) : undefined;
     if (file === undefined && activeCwd === undefined) return;
-    if (operation === "state") {
-      this.#json(res, 200, this.#sessionState(sessionId));
-      return;
-    }
     if (operation === "context") {
       if (tracker.getStatus(sessionId) === "terminal-driving") {
         this.#json(res, 200, { status: "unavailable", reason: "terminal_driving" });
@@ -922,6 +933,37 @@ export class DaemonServer {
     this.#json(res, 202, { sessionId, runId: handle.runId, ...(clientMessageId === undefined ? {} : { clientMessageId }) });
   }
 
+  async #handleTaskStop(req: IncomingMessage, res: ServerResponse, sessionId: string, taskId: string): Promise<void> {
+    if (!isUuid(sessionId)) { this.#json(res, 400, { error: "invalid_session_id" }); return; }
+    if (!isTaskId(taskId)) { this.#json(res, 400, { error: "invalid_task_id" }); return; }
+    const body = await this.#readJsonBody(req, res, true);
+    if (body === undefined) return;
+    if (Array.isArray(body)) { this.#json(res, 400, { error: "invalid_json" }); return; }
+    const { runId } = body as Record<string, unknown>;
+    if (runId !== undefined && (typeof runId !== "string" || !isUuid(runId))) {
+      this.#json(res, 400, { error: "invalid_run_id" });
+      return;
+    }
+    const { runner, tracker } = this.#options;
+    const activeRunId = runner.activeRunId(sessionId);
+    if (activeRunId === undefined && !this.#newSessions.has(sessionId) && runner.tasks(sessionId).length === 0 &&
+      await this.#p1SessionFile(res, sessionId) === undefined) return;
+    try {
+      if (activeRunId === undefined && runner.activeRunId(sessionId) !== undefined && runId === undefined) {
+        throw new RunRequestError("run_mismatch");
+      }
+      const task = await runner.stopTask(sessionId, taskId, typeof runId === "string" ? runId.toLowerCase() : undefined);
+      this.#json(res, task.status === "running" ? 202 : 200, { sessionId, ...task });
+    } catch (error) {
+      if (!(error instanceof RunRequestError)) throw error;
+      if (error.code === "run_mismatch" || error.code === "no_active_run" || error.code === "run_stopping") {
+        this.#json(res, 409, { error: error.code, activeRunId: runner.activeRunId(sessionId) ?? null, status: tracker.getStatus(sessionId) });
+      } else if (error.code === "task_not_found" || error.code === "task_stop_unavailable") {
+        this.#json(res, error.code === "task_not_found" ? 404 : 503, { error: error.code });
+      } else throw error;
+    }
+  }
+
   async #handleAbort(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
     if (!isUuid(sessionId)) {
       this.#json(res, 400, { error: "invalid_session_id" });
@@ -1082,6 +1124,10 @@ export class DaemonServer {
         if (event.type === "usage" || event.type === "quota" || event.type === "commands") {
           const type = event.type === "usage" ? "run-usage" : event.type === "quota" ? "subscription-quota" : "commands";
           this.#broadcastToSubscribers(sessionId, { ...event, type });
+          continue;
+        }
+        if (event.type === "task") {
+          this.#broadcastToSubscribers(sessionId, { type: "task", sessionId, ...event.task });
           continue;
         }
         if (currentRunId !== undefined && currentRunId !== event.runId) continue;
@@ -1440,10 +1486,11 @@ export class DaemonServer {
           state.subs.add(sessionId);
         } catch (error) {
           if (!isCurrent()) return;
-          if (isEnoent(error) && this.#newSessions.has(sessionId)) {
+          if (isEnoent(error) && (this.#newSessions.has(sessionId) || this.#options.runner.activeRunId(sessionId) !== undefined ||
+            this.#options.runner.tasks(sessionId).length > 0)) {
             state.subs.add(sessionId);
             this.#sendSessionState(ws, sessionId);
-            void this.#activateNewSessionWatch(sessionId);
+            if (this.#newSessions.has(sessionId)) void this.#activateNewSessionWatch(sessionId);
             return;
           }
           if (isEnoent(error)) return; // 未知会话：静默忽略（HTTP 侧已 404）
@@ -1493,6 +1540,7 @@ export class DaemonServer {
       activeRunId: runner.activeRunId(sessionId) ?? null,
       ...runner.activeState(sessionId),
       ...runner.p1State(sessionId),
+      tasks: runner.tasks(sessionId),
     };
   }
 

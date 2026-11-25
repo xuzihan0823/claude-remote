@@ -46,3 +46,64 @@ test("auto denial retains tool and agent identity; user notices exclude internal
   assert.deepEqual(adaptSdkMessage(sdk({ type: "system", subtype: "informational", uuid: "notice-1", content: "Review may incur usage", level: "warning" })), [{ type: "notice", eventId: "notice-1", message: "Review may incur usage", level: "warning" }]);
   assert.deepEqual(adaptSdkMessage(sdk({ type: "system", subtype: "thinking_tokens", content: "internal", uuid: "internal" })), []);
 });
+
+test("task edges preserve SDK identity, task metadata and usage without exposing output_file", () => {
+  const base = { type: "system", task_id: "agent-1", tool_use_id: "tool-1" };
+  const usage = { total_tokens: 200, tool_uses: 3, duration_ms: 1200 };
+  const started = adaptSdkMessage(sdk({
+    ...base, subtype: "task_started", uuid: "start", task_type: "local_agent", subagent_type: "review",
+    description: "Review files", workflow_name: "workflow", skip_transcript: true, prompt: "private prompt",
+  }))[0];
+  assert.ok(started?.type === "task_started");
+  assert.ok(Number.isSafeInteger(started.observedAt));
+  assert.deepEqual(started, {
+    type: "task_started", eventId: "start", observedAt: started.observedAt,
+    taskId: "agent-1", toolUseId: "tool-1", status: "running", taskType: "local_agent", subagentType: "review",
+    description: "Review files", workflowName: "workflow", skipTranscript: true,
+  });
+
+  const progress = adaptSdkMessage(sdk({
+    ...base, subtype: "task_progress", uuid: "progress", description: "Review files", usage,
+    last_tool_name: "Read", summary: "Reviewing", timestamp: "2026-11-25T10:00:00.000Z",
+  }))[0];
+  assert.ok(progress?.type === "task_progress");
+  assert.deepEqual(progress.usage, { totalTokens: 200, toolUses: 3, durationMs: 1200 });
+  assert.equal(progress.lastToolName, "Read");
+  assert.equal(progress.summary, "Reviewing");
+  assert.equal(progress.timestamp, "2026-11-25T10:00:00.000Z");
+
+  for (const status of ["completed", "failed", "stopped"]) {
+    const notification = adaptSdkMessage(sdk({
+      ...base, subtype: "task_notification", uuid: status, status, usage, summary: "s".repeat(5000), output_file: "/tmp/result.txt",
+    }))[0];
+    assert.ok(notification?.type === "task_notification");
+    assert.equal(notification.status, status);
+    assert.equal(notification.summary?.length, 4096);
+    assert.equal("output_file" in notification, false);
+    assert.equal("output" in notification, false);
+  }
+});
+
+test("background level preserves an empty set and rejects malformed replacements", () => {
+  const base = { type: "system", subtype: "background_tasks_changed", uuid: "level" };
+  const active = adaptSdkMessage(sdk({ ...base, tasks: [{ task_id: "b01", task_type: "local_bash", description: "Build" }] }))[0];
+  assert.ok(active?.type === "background_tasks_changed");
+  assert.deepEqual(active.tasks, [{ taskId: "b01", taskType: "local_bash", description: "Build" }]);
+  const empty = adaptSdkMessage(sdk({ ...base, tasks: [] }))[0];
+  assert.ok(empty?.type === "background_tasks_changed");
+  assert.deepEqual(empty.tasks, []);
+  assert.deepEqual(adaptSdkMessage(sdk({ ...base, tasks: [{ task_id: "bad/path" }] })), []);
+  assert.deepEqual(adaptSdkMessage(sdk({ ...base, tasks: null })), []);
+});
+
+test("child assistant messages expose a bounded preview keyed to the parent tool", () => {
+  const output = adaptSdkMessage(sdk({
+    type: "assistant", uuid: "child-message", parent_tool_use_id: "agent-tool", timestamp: "2026-11-25T10:00:00.000Z",
+    message: { content: [{ type: "thinking", thinking: "hidden" }, { type: "text", text: "x".repeat(5000) }] },
+  })).find((event) => event.type === "task_output");
+  assert.ok(output);
+  assert.equal(output.toolUseId, "agent-tool");
+  assert.equal(output.eventId, "child-message");
+  assert.equal(output.output, "x".repeat(4096));
+  assert.equal(output.outputTruncated, true);
+});

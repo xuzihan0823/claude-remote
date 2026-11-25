@@ -1,6 +1,58 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { localCommandOutput } from "./command-output.js";
-import type { WorkerEvent } from "./types.js";
+import { isTaskId, TASK_OUTPUT_LIMIT, type TaskDetails, type TaskEvent, type WorkerEvent } from "./types.js";
+
+function taskEventIdentity(source: Record<string, unknown>) {
+  if (typeof source.uuid !== "string" || !source.uuid) return;
+  return {
+    eventId: source.uuid,
+    observedAt: Date.now(),
+    ...(typeof source.timestamp === "string" && Number.isFinite(Date.parse(source.timestamp)) ? { timestamp: source.timestamp } : {}),
+  };
+}
+
+function taskDetails(source: Record<string, unknown>): TaskDetails | undefined {
+  if (typeof source.task_id !== "string" || !isTaskId(source.task_id)) return;
+  const raw = record(source.usage);
+  const { total_tokens: totalTokens, tool_uses: toolUses, duration_ms: durationMs } = raw ?? {};
+  const usage = typeof totalTokens === "number" && typeof toolUses === "number" && typeof durationMs === "number" &&
+    [totalTokens, toolUses, durationMs].every((n) => Number.isSafeInteger(n) && n >= 0) ? { totalTokens, toolUses, durationMs } : undefined;
+  return {
+    taskId: source.task_id,
+    ...(typeof source.task_type === "string" ? { taskType: source.task_type.slice(0, 128) } : {}),
+    ...(typeof source.subagent_type === "string" ? { subagentType: source.subagent_type.slice(0, 128) } : {}),
+    ...(typeof source.workflow_name === "string" ? { workflowName: source.workflow_name.slice(0, 256) } : {}),
+    ...(typeof source.description === "string" ? { description: source.description.slice(0, 1024) } : {}),
+    ...(typeof source.tool_use_id === "string" ? { toolUseId: source.tool_use_id } : {}),
+    ...(typeof source.last_tool_name === "string" ? { lastToolName: source.last_tool_name.slice(0, 256) } : {}),
+    ...(typeof source.summary === "string" ? { summary: source.summary.slice(0, TASK_OUTPUT_LIMIT) } : {}),
+    ...(typeof source.skip_transcript === "boolean" ? { skipTranscript: source.skip_transcript } : {}),
+    ...(usage ? { usage } : {}),
+  };
+}
+
+function adaptTaskSystemEvent(message: Extract<SDKMessage, { type: "system" }>, source: Record<string, unknown>): TaskEvent | undefined {
+  const { subtype } = message;
+  if (subtype !== "task_started" && subtype !== "task_progress" && subtype !== "task_notification" && subtype !== "background_tasks_changed") return;
+  const identity = taskEventIdentity(source);
+  if (!identity) return;
+  if (subtype === "background_tasks_changed") {
+    if (source.agent_id || source.parent_tool_use_id || !Array.isArray(message.tasks)) return;
+    const tasks: TaskDetails[] = [];
+    for (const entry of message.tasks) {
+      const item = record(entry);
+      const task = item && taskDetails(item);
+      if (!task) return;
+      tasks.push(task);
+    }
+    return { type: subtype, ...identity, tasks };
+  }
+  const details = taskDetails(source);
+  if (!details) return;
+  if (subtype !== "task_notification") return { type: subtype, ...identity, ...details, status: "running" };
+  const { status } = message;
+  if (status === "completed" || status === "failed" || status === "stopped") return { type: subtype, ...identity, ...details, status };
+}
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -36,6 +88,8 @@ export function adaptSdkMessage(message: SDKMessage): WorkerEvent[] {
   }
 
   if (message.type === "system") {
+    const task = adaptTaskSystemEvent(message, source);
+    if (task) events.push(task);
     const fromMain = !source.agent_id && !source.parent_tool_use_id;
     if (fromMain && message.subtype === "init") {
       const commands = strings(message.slash_commands);
@@ -126,6 +180,13 @@ export function adaptSdkMessage(message: SDKMessage): WorkerEvent[] {
     }
     const content = (message.message as unknown as { content?: unknown }).content;
     const text = contentText(content);
+    if (message.parent_tool_use_id) {
+      const identity = taskEventIdentity(source);
+      if (text && identity) events.push({
+        type: "task_output", ...identity, toolUseId: message.parent_tool_use_id,
+        output: text.slice(0, TASK_OUTPUT_LIMIT), outputTruncated: text.length > TASK_OUTPUT_LIMIT,
+      });
+    }
     if (text) events.push({ type: "assistant", text, messageId: message.uuid });
     if (Array.isArray(content)) {
       for (const part of content) {

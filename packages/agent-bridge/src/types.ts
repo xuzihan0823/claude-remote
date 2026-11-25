@@ -10,7 +10,48 @@ export type CompactMetadata = SDKCompactBoundaryMessage["compact_metadata"];
 export type ResultUsage = Partial<Pick<SDKResultMessage, "usage" | "modelUsage" | "total_cost_usd">>;
 export type RateLimitInfo = SDKRateLimitInfo;
 
+export type TaskStatus = "running" | "completed" | "failed" | "stopped";
+
+export interface TaskUsage {
+  totalTokens: number;
+  toolUses: number;
+  durationMs: number;
+}
+
+export interface TaskDetails {
+  taskId: string;
+  taskType?: string;
+  subagentType?: string;
+  workflowName?: string;
+  description?: string;
+  toolUseId?: string;
+  usage?: TaskUsage;
+  lastToolName?: string;
+  summary?: string;
+  skipTranscript?: boolean;
+}
+
+interface TaskEventIdentity {
+  eventId: string;
+  observedAt: number;
+  timestamp?: string;
+}
+
+export type TaskEvent = TaskEventIdentity & (
+  | ({ type: "task_started" | "task_progress"; status: "running" } & TaskDetails)
+  | ({ type: "task_notification"; status: Exclude<TaskStatus, "running"> } & TaskDetails)
+  | { type: "background_tasks_changed"; tasks: TaskDetails[] }
+  | { type: "task_output"; toolUseId: string; output: string; outputTruncated: boolean }
+);
+
+export const TASK_OUTPUT_LIMIT = 4096;
+
+export function isTaskId(value: string): boolean {
+  return /^[A-Za-z0-9_-]{1,128}$/.test(value);
+}
+
 export type WorkerEvent =
+  | TaskEvent
   | { type: "session"; sessionId: string }
   | { type: "permission_mode"; effectiveMode: string; requestedMode?: string }
   | { type: "permission_denied"; eventId: string; toolUseId: string; toolName: string; agentId?: string; decisionReasonType?: string; decisionReason?: string; message: string }

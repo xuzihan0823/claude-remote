@@ -170,7 +170,7 @@ WebView 只在首次请求带请求头，所以目前只保证单文件 HTML，�
 客户端发送 `{ "type": "subscribe", "sessionId": "<uuid>" }`，取消用 `unsubscribe`。指定会话订阅成功后，服务器先发送当前权威快照，再补发活跃 run 的拒绝/提示和尚存的流草稿；新会话尚未落盘时也提供状态快照。未知会话订阅静默忽略；同连接重复订阅不重发快照，需要重连或取消后重新订阅。
 
 ```json
-{ "type": "session-state", "sessionId": "<uuid>", "status": "daemon-driving", "activeRunId": "<uuid>", "requestedPermissionMode": "auto", "effectivePermissionMode": "auto" }
+{ "type": "session-state", "sessionId": "<uuid>", "status": "daemon-driving", "activeRunId": "<uuid>", "requestedPermissionMode": "auto", "effectivePermissionMode": "auto", "tasks": [] }
 ```
 
 无活跃 daemon run 时 activeRunId 为 null，status 可以是 idle 或 terminal-driving。快照不伪造 `run.started`；客户端统一更新 status、运行标记和身份，无活跃运行时清理旧草稿及计时器。状态恢复不依赖前 200 条会话列表，也不依赖本地已有消息；HTTP 列表仅刷新元信息，不得覆盖后来收到的运行状态。重连补拉须使旧连接、旧会话的异步结果失效。
@@ -205,7 +205,7 @@ run.state 为 started/done/error；`error` 和 `permissionMode` 可选，permiss
 客户端 `{ "type": "ping" }` 收到 `{ "type": "pong" }`，与订阅无关。会话快照及上述 HTTP/WS 行为由 `server.test.ts` 集成测试覆盖。
 
 
-### P1 命令、补充指令、上下文与用量
+### 命令、补充指令、上下文、用量与任务
 
 本节 HTTP 接口沿用 Bearer token，WS 帧沿用指定会话订阅。以下写入接口接受 JSON 请求体，运行依旧经过 CLI/Agent SDK。daemon 只读取 JSONL。客户端使用 `GET /api/sessions/:id/state` 或重新订阅取得相同格式的 `session-state`，并按 `sessionId` 和 `runId` 对账。
 
@@ -303,9 +303,34 @@ Runner 在生成或工具执行期间接收请求，常规发送在 SDK Query �
 
 `turnIndex` 在每个 run 从 1 开始，实时结果以 `(sessionId,runId,resultId)` 去重，`clientMessageId` 仅已知时返回。同一会话的 SDK 累计值由新值替换，不累加每条 result 或 HTTP 分页。活跃期间可读 `latestTurn.sdkTotals`，结合 scope 解释；已经落盘的会话总额可读 `sdkSession`。在部分旧转录中，仅有 assistant 消息的逐 API `usage`，此时输出 Token、子代理开销与账单可能缺省。正式消息可含原始 `usage`，前端按 `apiMessageId` 去重且不要将每步 `output_tokens` 当成最终累计。晚于最后一个 result 的外部终端开销以其原生落盘为准。第三方网关账单另以 `gatewayBilling` 表示，当前无账单数据源。订阅额度仅消费原生事件，未调用实验性 usage 控制。参考 [Agent SDK 用量和费用口径](https://code.claude.com/docs/en/agent-sdk/cost-tracking)。
 
-#### P1 状态快照与错误
+#### 子代理与后台任务（V2-05）
 
-`session-state` 新增可选字段 `commands`（当前活跃目录）、`steering`、`compactions`（含最近终态）、`latestTurn` 和 `quotas`。`GET /api/sessions/:id/state` 返回完整快照；WS 订阅先发快照，再补发活跃 run 的输出、边界、诊断和流草稿。`sessionId: "*"` 仍只接收状态广播。事件中的运行身份、消息身份和 revision 用于处理重试、切会话或迟到帧。
+`GET /api/sessions/:id/state` 和指定会话的 WS `session-state` 都包含 `tasks` 数组，无记录时为 `[]`。数组包含活跃 run 中已观察到的任务和最近结束的 run 的任务，每项保留 `runId`。结束后在 daemon 内存最多保留约 10 分钟，进程内最多缓存 1024 条已结束轮次的任务。重连以该快照恢复，`sessionId: "*"` 不接收任务帧。
+
+```json
+{ "type": "task", "sessionId": "<uuid>", "runId": "<uuid>", "taskId": "<id>", "eventId": "<id>", "revision": 3, "status": "running", "background": true, "taskType": "local_agent", "subagentType": "review", "toolUseId": "<tool-id>", "description": "检查测试", "usage": { "totalTokens": 250, "toolUses": 2, "durationMs": 3000 }, "summary": "已检查两个文件", "firstObservedAt": 1795590000000, "observedAt": 1795590003000 }
+```
+
+每次变化发送完整任务对象。快照内的对象省略 `type` 和 `sessionId`。以 `(sessionId, runId, taskId)` 区分任务，仅应用较高的 `revision`。同一 SDK 集合消息可能更新多个任务，这些帧共享 `eventId`。daemon 自身产生的变化使用本地事件 ID。`observedAt`、`firstObservedAt` 及可选 `startedAt`、`endedAt` 为 daemon 观察时间（epoch 毫秒），源消息提供时另带 `timestamp`。`toolUseId` 关联工具卡，`taskId` 用于任务控制。类型、描述、`workflowName`、`skipTranscript`、用量、`lastToolName` 和 `summary` 按 SDK 提供情况出现。`output` 是可按父工具调用关联的子代理 assistant 文本预览，累计最多 4096 个 UTF-16 码元，超限带 `outputTruncated: true`。摘要同样最多 4096 个码元。预览由已推送文本组成，daemon 不读取或返回 SDK 的 `output_file`，也不传完整 prompt。
+
+任务 `status` 为 `running | completed | failed | stopped`。`task_notification` 提供原生终态，可以先于开始事件或独立到达，迟到的开始或进度只补元数据。`background_tasks_changed` 每次完整替换当前 CLI 进程的活跃后台成员集合。它可以单独发现任务；已确认的后台任务离开集合且尚无原生终态时，记为 `stopped` 并带 `endReason: "background_inactive"`。`background: true` 表示曾出现在活跃后台集合中，未见其在集合中时不会仅因缺席推断前台任务已结束。迟到的原生通知覆盖对应的推断终态，集合再次确认活跃也可更新暂时推断的状态。原生终态优先于集合、开始和进度。旧 Query 被立即发送替换时，仍在运行的任务记为 `stopped`（`query_interrupted`），新进程的活跃集合从空集开始。run 成功、失败或中止时，仍未结算的任务分别记为 `stopped`（`run_ended`）、`failed`（`run_failed`）或 `stopped`（`run_aborted`）。这些 `endReason` 表示控制范围结束时的推断，原生任务结果可独立于整个 run 的结果。
+
+`POST /api/sessions/:id/tasks/:taskId/stop` 接受空正文或 JSON 对象，推荐传 `{ "runId": "<uuid>" }`。sessionId 和 runId 必须为 UUID，taskId 为 1–128 个 ASCII 字母、数字、下划线或连字符，区分大小写。接口只控制 daemon 当前 Query 中已观察到的任务。成功返回 `{ sessionId, ...任务对象 }`。
+
+| HTTP | 响应及条件 |
+| --- | --- |
+| 202 | SDK 已受理，`status: "running"` 且 `stopRequested: true`。结果随后由任务帧或快照确认。同一任务的并发和重复请求共用控制结果 |
+| 200 | 任务已达终态，返回当前或尚在保留期内的终态。旧 SDK 明确报告任务已不活跃时返回 `stopped`，带 `endReason: "task_inactive"` |
+| 400 | `invalid_session_id`、`invalid_task_id`、`invalid_run_id` 或 `invalid_json` |
+| 404 | `session_not_found` 表示会话未知，`task_not_found` 表示当前 run 没有该任务 |
+| 409 | `run_mismatch` 表示指定 run 不匹配当前 run，`no_active_run` 表示当前无活跃 run 且没有匹配的近期任务，`run_stopping` 表示 run 正中止或 Query 正被替换。响应含 `activeRunId`（可为 null）和会话 `status` |
+| 503 | `task_stop_unavailable` 表示 SDK 控制不可用、失败或超时 |
+
+跨 run 的常驻后台工作、循环任务、daemon 重启恢复以及外部终端任务的控制属于 V2-11 或之后的会话宿主工作。V2-05 的控制限于 daemon 已持有的 Query，推断终态无法确认已脱离该进程的工作是否结束。
+
+#### 状态快照与错误
+
+`session-state` 提供 `tasks` 以及可选字段 `commands`（当前活跃目录）、`steering`、`compactions`（含最近终态）、`latestTurn` 和 `quotas`。`GET /api/sessions/:id/state` 返回完整快照；WS 订阅先发快照，再补发活跃 run 的输出、边界、诊断和流草稿。`sessionId: "*"` 仍只接收状态广播。事件中的运行身份、消息身份和 revision 用于处理重试、切会话或迟到帧。
 
 | HTTP | 错误码 | 条件 |
 | --- | --- | --- |

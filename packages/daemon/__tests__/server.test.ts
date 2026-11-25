@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, mkdir, appendFile, readFile, writeFile, rm, symlink, truncate, utimes } from "node:fs/promises";
+import { request } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test, after } from "node:test";
@@ -64,6 +65,8 @@ interface FakeSdk {
   interrupts: number;
   delayAbort: boolean;
   systemMessages?: Array<Record<string, unknown>>;
+  finalSystemMessages?: Array<Record<string, unknown>>;
+  stopTask?: (taskId: string) => Promise<void>;
 }
 
 function fakeSdk(): FakeSdk {
@@ -89,6 +92,7 @@ function fakeSdk(): FakeSdk {
         message: { content: [{ type: "text", text: "done text" }] },
       } as never;
       await gatePromise;
+      for (const message of holder.finalSystemMessages ?? []) yield { type: "system", session_id: sessionId, ...message } as never;
       yield { type: "result", subtype: "success", is_error: false, result: "done text",
         uuid: "sdk-result", session_id: sessionId } as never;
     })();
@@ -98,6 +102,7 @@ function fakeSdk(): FakeSdk {
       if (!holder.delayAbort) release();
     };
     augmented.close = (): void => {};
+    if (holder.stopTask) augmented.stopTask = holder.stopTask;
     return generator as unknown as SdkQuery;
   }) as unknown as QueryFactory;
   return holder;
@@ -1215,7 +1220,7 @@ test("WS 重连：运行中先发身份再发草稿，断线期间完成/中止�
     await active.open();
     active.send({ type: "subscribe", sessionId: SESSION_ID });
     await active.waitFor((f) => f.type === "stream");
-    assert.deepEqual(active.frames[0], { type: "session-state", sessionId: SESSION_ID, status: "daemon-driving", activeRunId: runId, requestedPermissionMode: "plan" });
+    assert.deepEqual(active.frames[0], { type: "session-state", sessionId: SESSION_ID, status: "daemon-driving", activeRunId: runId, requestedPermissionMode: "plan", tasks: [] });
     assert.equal(active.frames.some((f) => f.type === "run" && f.state === "started"), false);
     active.close();
     if (abort) await fetch(`${local.base}/api/sessions/${SESSION_ID}/abort`, authed({ method: "POST", body: JSON.stringify({ runId }) }));
@@ -1226,7 +1231,7 @@ test("WS 重连：运行中先发身份再发草稿，断线期间完成/中止�
     await reconnected.open();
     reconnected.send({ type: "subscribe", sessionId: SESSION_ID });
     assert.deepEqual(await reconnected.waitFor((f) => f.type === "session-state"), {
-      type: "session-state", sessionId: SESSION_ID, status: "idle", activeRunId: null,
+      type: "session-state", sessionId: SESSION_ID, status: "idle", activeRunId: null, tasks: [],
     });
     assert.equal(reconnected.frames.some((f) => f.type === "stream"), false);
     reconnected.close();
@@ -1398,7 +1403,7 @@ test("auto downgrade and structured denial recover after snapshot without creati
   await recovered.open();
   recovered.send({ type: "subscribe", sessionId: SESSION_ID });
   const denial = await recovered.waitFor((f) => f.type === "permission-denied");
-  assert.deepEqual(recovered.frames[0], { type: "session-state", sessionId: SESSION_ID, status: "daemon-driving", activeRunId: runId, requestedPermissionMode: "auto", effectivePermissionMode: "default" });
+  assert.deepEqual(recovered.frames[0], { type: "session-state", sessionId: SESSION_ID, status: "daemon-driving", activeRunId: runId, requestedPermissionMode: "auto", effectivePermissionMode: "default", tasks: [] });
   assert.equal(denial.agentId, "child");
   assert.equal(denial.decisionReason, "Needs authorization");
   assert.equal(denial.runId, runId);
@@ -1409,7 +1414,7 @@ test("auto downgrade and structured denial recover after snapshot without creati
   t.after(() => idle.close());
   await idle.open();
   idle.send({ type: "subscribe", sessionId: SESSION_ID });
-  assert.deepEqual(await idle.waitFor((f) => f.type === "session-state"), { type: "session-state", sessionId: SESSION_ID, status: "idle", activeRunId: null });
+  assert.deepEqual(await idle.waitFor((f) => f.type === "session-state"), { type: "session-state", sessionId: SESSION_ID, status: "idle", activeRunId: null, tasks: [] });
   assert.equal(idle.frames.some((f) => f.type === "permission-denied" || f.type === "agent-notice"), false);
 });
 
@@ -1459,4 +1464,126 @@ test("relay 热加载：配置非法返回 400 并带上原因", async (t) => {
   const res = await fetch(`${h.base}/api/relay/reload`, authed({ method: "POST" }));
   assert.equal(res.status, 400);
   assert.deepEqual(await res.json(), { error: "invalid_relay_config", message: "RELAY_SECRET must be at least 32 printable ASCII characters" });
+});
+
+test("task stop HTTP validates identity and WS snapshots recover current and recent tasks", { timeout: 10000 }, async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  const calls: string[] = [];
+  h.sdk.stopTask = async (id) => { calls.push(id); };
+  h.sdk.systemMessages = [
+    { subtype: "background_tasks_changed", uuid: "level", tasks: [{ task_id: "agent-1", task_type: "local_agent", description: "Review" }] },
+    { subtype: "task_started", uuid: "start", task_id: "agent-1", tool_use_id: "tool-1", description: "Review" },
+    { subtype: "task_progress", uuid: "progress", task_id: "agent-1", description: "Review", usage: { total_tokens: 12, tool_uses: 2, duration_ms: 300 } },
+  ];
+  const post = (path: string, body?: unknown) => fetch(`${h.base}${path}`, authed({
+    method: "POST", headers: { "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  }));
+  const response = await post("/api/sessions", { cwd: homedir(), text: "Review" });
+  assert.equal(response.status, 202);
+  const { sessionId, runId } = await response.json() as { sessionId: string; runId: string };
+  const base = `/api/sessions/${sessionId}`;
+  const stop = `${base}/tasks/agent-1/stop`;
+  const state = () => fetch(`${h.base}${base}/state`, authed());
+  const unknownUuid = "b72bde81-d42e-4898-a0d2-61825097b708";
+  const subscribe = async () => {
+    const sink = new FrameSink(h.wsUrl());
+    t.after(() => sink.close());
+    await sink.open();
+    sink.send({ type: "subscribe", sessionId });
+    return sink;
+  };
+
+  const current = await subscribe();
+  const before = await current.waitFor((frame) => frame.type === "session-state");
+  assert.equal(before.activeRunId, runId);
+  assert.equal(current.frames[0], before);
+  assert.ok(Array.isArray(before.tasks) && before.tasks.some((task: unknown) =>
+    typeof task === "object" && task !== null && "taskId" in task && task.taskId === "agent-1"));
+  assert.equal((await fetch(`${h.base}${stop}`, { method: "POST" })).status, 401);
+
+  for (const [path, body, code, error] of [
+    [`/api/sessions/${unknownUuid}/tasks/agent-1/stop`, undefined, 404, "session_not_found"],
+    [`/api/sessions/${sessionId}%2fescape/tasks/agent-1/stop`, undefined, 400, "invalid_session_id"],
+    [`${base}/tasks/%2fescape/stop`, undefined, 400, "invalid_task_id"],
+    [`${base}/tasks/agent-1%5c/stop`, undefined, 400, "invalid_task_id"],
+    [`${base}/tasks/agent-1%0a/stop`, undefined, 400, "invalid_task_id"],
+    [`${base}/tasks/%zz/stop`, undefined, 400, "invalid_task_id"],
+    [`${base}/tasks//stop`, undefined, 400, "invalid_task_id"],
+    [stop, { runId: null }, 400, "invalid_run_id"],
+    [stop, { runId: `${runId}\n` }, 400, "invalid_run_id"],
+    [stop, [], 400, "invalid_json"],
+    [stop, { runId: unknownUuid }, 409, "run_mismatch"],
+    [`${base}/tasks/unknown/stop`, { runId }, 404, "task_not_found"],
+  ] as const) {
+    const invalid = await post(path, body);
+    assert.equal(invalid.status, code, path);
+    assert.equal((await invalid.json() as { error: string }).error, error, path);
+  }
+  const rawTraversal = await new Promise<number | undefined>((resolve, reject) => {
+    const target = new URL(h.base);
+    const req = request({ hostname: target.hostname, port: target.port, method: "POST",
+      path: `${base}/tasks/extra/%2e%2e/agent-1/stop`, headers: { Authorization: `Bearer ${TOKEN}` },
+    }, (res) => { res.resume(); resolve(res.statusCode); });
+    req.once("error", reject);
+    req.end();
+  });
+  assert.equal(rawTraversal, 400);
+  assert.deepEqual(calls, []);
+
+  const accepted = await post(stop, { runId });
+  assert.equal(accepted.status, 202);
+  const receipt = await accepted.json() as { eventId: string; status: string; stopRequested: boolean };
+  assert.equal(receipt.stopRequested, true);
+  assert.equal(receipt.status, "running");
+  const frame = await current.waitFor((event) => event.type === "task" && event.eventId === receipt.eventId);
+  assert.deepEqual(frame, { type: "task", ...receipt });
+  const duplicate = await post(stop);
+  assert.equal(duplicate.status, 202);
+  assert.deepEqual(await duplicate.json(), receipt);
+  assert.deepEqual(calls, ["agent-1"]);
+  assert.equal(h.sdk.interrupts, 0);
+
+  current.close();
+  const reconnected = await subscribe();
+  const snapshot = await reconnected.waitFor((event) => event.type === "session-state");
+  assert.deepEqual(snapshot, await (await state()).json());
+  assert.ok(Array.isArray(snapshot.tasks));
+  assert.equal(snapshot.tasks.length, 1);
+  assert.equal((snapshot.tasks[0] as { eventId: string }).eventId, receipt.eventId);
+
+  h.sdk.finalSystemMessages = [{ subtype: "task_notification", uuid: "stopped", task_id: "agent-1", status: "stopped", summary: "Stopped" }];
+  h.sdk.finish();
+  const terminalTask = await reconnected.waitFor((event) => event.type === "task" && event.eventId === "stopped");
+  assert.equal(terminalTask.status, "stopped");
+  assert.equal(terminalTask.runId, runId);
+  await reconnected.waitFor((event) => event.type === "run" && event.state === "done");
+  const replay = await post(stop, { runId });
+  assert.equal(replay.status, 200);
+  assert.deepEqual({ type: "task", ...await replay.json() }, terminalTask);
+  const inactive = await post(`${base}/tasks/unknown/stop`, { runId });
+  assert.equal(inactive.status, 409);
+  assert.equal((await inactive.json() as { error: string }).error, "no_active_run");
+  const idle = await subscribe();
+  const idleSnapshot = await idle.waitFor((event) => event.type === "session-state");
+  assert.equal(idleSnapshot.activeRunId, null);
+  assert.deepEqual(idleSnapshot, await (await state()).json());
+  assert.ok(Array.isArray(idleSnapshot.tasks) && idleSnapshot.tasks.length === 1);
+
+  const sessionFile = join(h.projectsDir, "-tmp-claude-remote-it", `${sessionId}.jsonl`);
+  await writeFile(sessionFile, jsonlLine({ type: "user", uuid: "u1", sessionId, cwd: SESSION_CWD, message: { content: "Review", role: "user" } }));
+  delete h.sdk.stopTask;
+  const restarted = await post(`${base}/messages`, { text: "Review again" });
+  assert.equal(restarted.status, 202);
+  const next = await restarted.json() as { runId: string };
+  await idle.waitFor((event) => event.type === "task" && event.runId === next.runId && event.taskId === "agent-1");
+  const stale = await post(stop, { runId });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), { error: "run_mismatch", activeRunId: next.runId, status: "daemon-driving" });
+  const unsupported = await post(stop, { runId: next.runId });
+  assert.equal(unsupported.status, 503);
+  assert.deepEqual(await unsupported.json(), { error: "task_stop_unavailable" });
+  assert.deepEqual(calls, ["agent-1"]);
+  h.sdk.finish();
+  await idle.waitFor((event) => event.type === "run" && event.runId === next.runId && event.state === "done");
 });

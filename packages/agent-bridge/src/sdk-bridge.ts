@@ -60,6 +60,10 @@ class InputStream implements AsyncIterable<SDKUserMessage> {
   }
 }
 
+export class SdkTaskStopError extends Error {
+  constructor(readonly code: "task_inactive" | "task_stop_unavailable") { super(code); }
+}
+
 export interface SdkQueryHandle {
   readonly messages: AsyncIterable<SDKMessage>;
   steer(prompt: string, clientMessageId?: string): Promise<void>;
@@ -67,6 +71,7 @@ export interface SdkQueryHandle {
   reloadSkills(): ReturnType<Query["reloadSkills"]>;
   getContextUsage(): Promise<ContextUsage>;
   mcpServerStatus(): ReturnType<Query["mcpServerStatus"]>;
+  stopTask(taskId: string): Promise<void>;
   closeAndWait(): Promise<void>;
   interrupt(): Promise<void>;
   close(): void;
@@ -104,6 +109,7 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
     ...(options.effort === undefined ? {} : { effort: options.effort }),
   };
   const sdkQuery: Query = queryFactory({ prompt: input, options: sdkOptions });
+  let closed = false;
   const abort = (): void => {
     input.close(true);
     void sdkQuery.interrupt().catch(() => undefined);
@@ -111,6 +117,7 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
   if (options.signal.aborted) abort();
   else options.signal.addEventListener("abort", abort, { once: true });
   const closeInput = (): void => {
+    closed = true;
     input.close();
     options.signal.removeEventListener("abort", abort);
   };
@@ -127,6 +134,23 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
       return usage;
     },
     mcpServerStatus: () => sdkQuery.mcpServerStatus(),
+    async stopTask(taskId: string): Promise<void> {
+      if (closed || options.signal.aborted || typeof sdkQuery.stopTask !== "function") {
+        throw new SdkTaskStopError("task_stop_unavailable");
+      }
+      try {
+        await sdkQuery.stopTask(taskId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        const missing = `No task found with ID: ${taskId}`;
+        const notRunning = `Task ${taskId} is not running`;
+        if (message === missing || message.startsWith(`${missing}. `) || message === `Task not found: ${taskId}` ||
+          message === notRunning || message.startsWith(`${notRunning} (status: `)) {
+          throw new SdkTaskStopError("task_inactive");
+        }
+        throw new SdkTaskStopError("task_stop_unavailable");
+      }
+    },
     async interrupt(): Promise<void> { await sdkQuery.interrupt(); },
     close(): void {
       closeInput();

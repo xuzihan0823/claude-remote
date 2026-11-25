@@ -7,7 +7,7 @@ import { configuredClaudeExecutable, startSdkQuery, type EffortLevel, type Exter
 type QueryParams = Parameters<QueryFactory>[0];
 type SdkQuery = ReturnType<QueryFactory>;
 
-function fakeQuery(): { factory: QueryFactory; params: () => QueryParams | undefined } {
+function fakeQuery(stopTask?: (taskId: string) => Promise<void>): { factory: QueryFactory; params: () => QueryParams | undefined } {
   let captured: QueryParams | undefined;
   const factory = ((params: QueryParams): SdkQuery => {
     captured = params;
@@ -15,6 +15,7 @@ function fakeQuery(): { factory: QueryFactory; params: () => QueryParams | undef
     const query = generator as unknown as Record<string, unknown>;
     query.interrupt = async (): Promise<void> => undefined;
     query.close = (): void => undefined;
+    if (stopTask) query.stopTask = stopTask;
     return generator as unknown as SdkQuery;
   }) as unknown as QueryFactory;
   return { factory, params: () => captured };
@@ -183,4 +184,25 @@ test("only an explicit bypassPermissions turn enables the SDK bypass option", ()
   }, side.factory).close();
   assert.equal(side.params()?.options?.permissionMode, "dontAsk");
   assert.equal(side.params()?.options?.allowDangerouslySkipPermissions, undefined);
+});
+
+test("stopTask forwards task ID to the original live Query and rejects closed or unsupported control", async () => {
+  const calls: string[] = [];
+  const handle = options(fakeQuery(async (id) => { calls.push(id); }).factory);
+  await handle.stopTask("agent-1");
+  handle.close();
+  await assert.rejects(handle.stopTask("agent-1"), { code: "task_stop_unavailable" });
+  assert.deepEqual(calls, ["agent-1"]);
+
+  const legacy = options(fakeQuery().factory);
+  await assert.rejects(legacy.stopTask("agent-1"), { code: "task_stop_unavailable" });
+  legacy.close();
+
+  const missing = options(fakeQuery(async (id) => { throw new Error(`No task found with ID: ${id}`); }).factory);
+  await assert.rejects(missing.stopTask("agent-1"), { code: "task_inactive" });
+  missing.close();
+
+  const unsupported = options(fakeQuery(async () => { throw new Error("Unsupported control request subtype: stop_task"); }).factory);
+  await assert.rejects(unsupported.stopTask("agent-1"), { code: "task_stop_unavailable" });
+  unsupported.close();
 });

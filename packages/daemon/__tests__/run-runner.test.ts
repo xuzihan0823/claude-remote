@@ -21,6 +21,7 @@ interface FakeState {
 /** 最小 fake：async generator 充当 Query，只补 sdk-bridge 用到的 interrupt/close。 */
 function fakeFactory(
   produce: (state: FakeState) => AsyncGenerator<AnySdkMessage, void>,
+  stopTask?: (taskId: string) => Promise<void>,
 ): { factory: QueryFactory; state: FakeState } {
   const state: FakeState = { params: undefined, interrupts: 0, closes: 0, onInterrupt: undefined };
   const factory = ((params: QueryParams): SdkQuery => {
@@ -34,6 +35,7 @@ function fakeFactory(
     augmented.close = (): void => {
       state.closes += 1;
     };
+    if (stopTask) augmented.stopTask = stopTask;
     return generator as unknown as SdkQuery;
   }) as unknown as QueryFactory;
   return { factory, state };
@@ -343,4 +345,170 @@ test("active auto state remains unconfirmed until SDK reports it; diagnostics ar
   assert.deepEqual(await handle.completion, { state: "done" });
   assert.equal(runner.activeState("auto-session"), undefined);
   assert.deepEqual(runner.activeDiagnostics("auto-session"), []);
+});
+
+function taskMessage(sessionId: string, subtype: string, uuid: string, fields: Record<string, unknown>): AnySdkMessage {
+  return sdkMessage({ type: "system", session_id: sessionId, subtype, uuid, ...fields });
+}
+
+test("tasks reconcile full background sets and retain terminal states across out-of-order edges", { timeout: 4000 }, async (t) => {
+  const session = "task-session";
+  const ready = deferred();
+  const finish = deferred();
+  const level = (uuid: string, ...ids: string[]) => taskMessage(session, "background_tasks_changed", uuid, {
+    tasks: ids.map((task_id) => ({ task_id, task_type: "local_bash", description: `Build ${task_id}` })),
+  });
+  const edge = (subtype: string, uuid: string, task_id: string, fields: Record<string, unknown> = {}) =>
+    taskMessage(session, subtype, uuid, { task_id, ...fields });
+  const progress = edge("task_progress", "p1", "foreground", { description: "Working", summary: "Newest", usage: { total_tokens: 42, tool_uses: 2, duration_ms: 500 } });
+  const { factory } = fakeFactory(async function* () {
+    yield edge("task_notification", "n1", "early", { status: "completed", summary: "Finished" });
+    yield sdkMessage({ ...assistantMessage("bounded child output", "child-1", session), parent_tool_use_id: "tool-a" });
+    yield sdkMessage({ ...assistantMessage("bounded child output", "child-1", session), parent_tool_use_id: "tool-a" });
+    yield edge("task_started", "s1", "early", { task_type: "local_agent", tool_use_id: "tool-a", description: "Review" });
+    yield edge("task_notification", "n2", "terminal-only", { status: "failed" });
+    yield progress;
+    yield progress;
+    yield edge("task_progress", "p2", "foreground", { description: "Older", summary: "Stale", usage: { total_tokens: 1, tool_uses: 0, duration_ms: 100 } });
+    yield level("level-1", "early", "removed", "missed", "stays");
+    yield level("level-2", "stays");
+    yield level("level-1", "early", "removed", "missed", "stays");
+    yield edge("task_started", "s2", "removed", { task_type: "local_bash", tool_use_id: "tool-shell" });
+    yield edge("task_notification", "n3", "removed", { status: "completed", summary: "Built" });
+    ready.resolve();
+    await finish.promise;
+    yield resultMessage("done", "result", session);
+  });
+  const runner = new TurnRunner({ gate: stubGate().gate, permissions: denyAll, queryFactory: factory });
+  const run = runner.startTurn({ sessionId: session, cwd: "/tmp", text: "run tasks" });
+  await ready.promise;
+  const byId = (id: string) => runner.tasks(session).find((task) => task.taskId === id);
+  assert.equal(byId("early")?.status, "completed");
+  assert.equal(byId("early")?.output, "bounded child output");
+  assert.equal(byId("early")?.toolUseId, "tool-a");
+  assert.equal(byId("terminal-only")?.status, "failed");
+  assert.equal(byId("foreground")?.status, "running");
+  assert.equal(byId("foreground")?.summary, "Newest");
+  assert.equal(byId("removed")?.status, "completed");
+  assert.equal(byId("removed")?.endReason, undefined);
+  assert.equal(byId("missed")?.endReason, "background_inactive");
+  assert.equal(byId("stays")?.status, "running");
+
+  finish.resolve();
+  const events = (await collect(run.events)).filter((event) => event.type === "task");
+  assert.deepEqual(await run.completion, { state: "done" });
+  assert.equal(events.filter(({ task }) => task.eventId === "p1").length, 1);
+  assert.deepEqual(events.filter(({ task }) => task.taskId === "removed").map(({ task }) => task.status), ["running", "stopped", "stopped", "completed"]);
+  assert.deepEqual(events.filter(({ task }) => task.taskId === "stays").map(({ task }) => task.revision), [1, 2]);
+  assert.equal(byId("foreground")?.endReason, "run_ended");
+  assert.equal(byId("foreground")?.status, "stopped");
+  assert.equal((await runner.stopTask(session, "removed", run.runId)).status, "completed");
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  t.mock.timers.tick(600_001);
+  assert.deepEqual(runner.tasks(session), []);
+  await assert.rejects(runner.stopTask(session, "removed", run.runId), { code: "no_active_run" });
+});
+
+test("task stop coalesces pending control and preserves a terminal notification that arrives first", { timeout: 4000 }, async () => {
+  const session = "task-stop-race";
+  const ready = deferred();
+  const stopped = deferred();
+  const ack = deferred();
+  const finish = deferred();
+  const calls: string[] = [];
+  const { factory } = fakeFactory(async function* () {
+    yield taskMessage(session, "task_started", "s1", { task_id: "agent-1", description: "Review" });
+    ready.resolve();
+    await stopped.promise;
+    yield taskMessage(session, "task_notification", "n1", { task_id: "agent-1", status: "completed" });
+    ack.resolve();
+    await finish.promise;
+    throw new Error("SDK failed");
+  }, async (id) => { calls.push(id); stopped.resolve(); await ack.promise; });
+  const runner = new TurnRunner({ gate: stubGate().gate, permissions: denyAll, queryFactory: factory });
+  const run = runner.startTurn({ sessionId: session, cwd: "/tmp", text: "start" });
+  await ready.promise;
+  const first = runner.stopTask(session, "agent-1", run.runId);
+  const second = runner.stopTask(session, "agent-1", run.runId);
+  for (const receipt of await Promise.all([first, second])) {
+    assert.equal(receipt.status, "completed");
+    assert.equal(receipt.eventId, "n1");
+    assert.equal(receipt.stopRequested, undefined);
+  }
+  assert.deepEqual(calls, ["agent-1"]);
+  finish.resolve();
+  assert.deepEqual(await run.completion, { state: "error", error: "SDK failed" });
+  assert.equal(runner.tasks(session)[0]?.status, "completed");
+});
+
+test("unsettled tasks become failed or stopped when a run fails or is aborted", async () => {
+  for (const aborted of [false, true]) {
+    const session = "unsettled-tasks";
+    const ready = deferred();
+    const finish = deferred();
+    const { factory, state } = fakeFactory(async function* () {
+      yield taskMessage(session, "task_started", "s1", { task_id: "agent-1", description: "Still working" });
+      ready.resolve();
+      await finish.promise;
+      throw new Error("SDK failed");
+    });
+    const runner = new TurnRunner({ gate: stubGate().gate, permissions: denyAll, queryFactory: factory });
+    const run = runner.startTurn({ sessionId: session, cwd: "/tmp", text: "start" });
+    state.onInterrupt = finish.resolve;
+    await ready.promise;
+    if (aborted) assert.equal(runner.abort(run.runId), true);
+    else finish.resolve();
+    assert.equal((await run.completion).state, "error");
+    assert.equal(runner.tasks(session)[0]?.status, aborted ? "stopped" : "failed");
+    assert.equal(runner.tasks(session)[0]?.endReason, aborted ? "run_aborted" : "run_failed");
+  }
+});
+
+test("replacing a Query settles its tasks and fences a delayed stop acknowledgement", { timeout: 4000 }, async () => {
+  const session = "task-query-switch";
+  const firstReady = deferred();
+  const firstDone = deferred();
+  const secondReady = deferred();
+  const secondDone = deferred();
+  const controlStarted = deferred();
+  const controlAck = deferred();
+  let opened = 0;
+  const calls: string[] = [];
+  const background = (uuid: string, task_id: string) => taskMessage(session, "background_tasks_changed", uuid, {
+    tasks: [{ task_id, task_type: "local_agent", description: "Review" }],
+  });
+  const { factory, state } = fakeFactory(async function* () {
+    if (++opened === 1) {
+      yield background("old-level", "old-agent");
+      firstReady.resolve();
+      await firstDone.promise;
+      return;
+    }
+    yield background("new-level", "new-agent");
+    secondReady.resolve();
+    await secondDone.promise;
+    yield resultMessage("done", "result", session);
+  }, async (id) => { calls.push(id); controlStarted.resolve(); await controlAck.promise; });
+  const runner = new TurnRunner({ gate: stubGate().gate, permissions: denyAll, queryFactory: factory });
+  const run = runner.startTurn({ sessionId: session, cwd: "/tmp", text: "start" });
+  state.onInterrupt = firstDone.resolve;
+  await firstReady.promise;
+  const stop = runner.stopTask(session, "old-agent", run.runId).then(
+    (task) => { assert.equal(task.status, "stopped"); },
+    (error: unknown) => { assert.ok(error instanceof Error); assert.equal(error.message, "run_stopping"); },
+  );
+  await controlStarted.promise;
+  const clientId = "aaaabbbb-2222-4444-9999-aaaabbbbcccc";
+  runner.steer(session, run.runId, clientId, "Next input");
+  runner.mutateSteer(session, run.runId, clientId, { type: "send_now" });
+  await secondReady.promise;
+  controlAck.resolve();
+  await stop;
+  const oldTask = await runner.stopTask(session, "old-agent", run.runId);
+  assert.equal(oldTask.endReason, "query_interrupted");
+  assert.equal(oldTask.stopRequested, undefined);
+  assert.equal(runner.tasks(session).find((task) => task.taskId === "new-agent")?.status, "running");
+  assert.deepEqual(calls, ["old-agent"]);
+  secondDone.resolve();
+  assert.deepEqual(await run.completion, { state: "done" });
 });
