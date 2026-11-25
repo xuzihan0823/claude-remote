@@ -147,6 +147,28 @@ CLI 注入的 `<task-notification>` 与 `<system-reminder>` 等包裹内容在�
 
 `GET /api/sessions/:id/messages?limit=100&beforeSeq=42` 返回 `{ "messages": [], "firstSeq": null, "hasMore": false }`。limit 默认 100、范围 1–500；beforeSeq 为大于等于 1 的安全整数且不包含该行，非法值返回 400 `invalid_before_seq`。消息按 seq、blockIndex 升序；以 `(seq, blockIndex)` 去重，seq 是 JSONL 物理行号而非数组下标。字段包括 uuid、parentUuid、role、kind，以及按 kind 出现的 text、toolName、toolInput、toolUseId、isError、timestamp、rawType；assistant 消息可含 `apiMessageId`，用于将草稿对账限定到同一 API 消息，不能假设转录 blockIndex 等于 SDK 流下标。
 
+### 文件检查点与回退（V2-07）
+
+`GET /api/sessions/:id/checkpoints` 返回 `200 { checkpoints: [{ userMessageId, timestamp?, preview, trackedFiles }] }`。列表按主链用户消息的转录顺序从新到旧排列。`userMessageId` 是该用户消息的 UUID。`timestamp` 优先使用消息时间，其次使用快照时间。`preview` 折叠空白、过滤 CLI 注入的包装内容，并截取前 120 个 Unicode 字符，超长附省略号。只有附件时预览可为空。
+
+daemon 只读解析原生 `file-history-snapshot` 与 `file-history-delta`，跳过离开主链的消息、子代理分支及工具结果。`trackedFiles` 是该快照及后续增量可识别的跟踪路径，可能为空。路径保留 CLI 记录的相对或绝对形式，响应不包含备份文件名或内容。它是快照摘要，实际受影响的文件以 `dryRun` 响应为准。没有检查点的已知会话返回空数组，读取时无需会话空闲。非法 UUID 返回 400 `invalid_session_id`，未知会话返回 404 `session_not_found`。
+
+`POST /api/sessions/:id/rewind` 接收 `{ "userMessageId": "<uuid>", "dryRun": true }`。省略 `dryRun` 或传 `true` 只预览，只有显式 `false` 才执行。两种请求都要求目标会话空闲，每次都从磁盘读取最新状态。执行前会重新预览并复查 CLI 占用。
+
+| HTTP | 响应 |
+| --- | --- |
+| 200 | `{ canRewind: true, filesChanged?, insertions?, deletions?, skippedLinks? }`。预览时 SDK 可提供受影响文件路径和预计增删行数。执行可能只返回 `canRewind`，新 CLI 可报告 `skippedLinks` 表示因链接或备份安全检查跳过的文件数 |
+| 400 | `{ error }`。`invalid_session_id`、`invalid_user_message_id`、`invalid_dry_run` 或通用的 `invalid_json` |
+| 404 | `{ error: "session_not_found" }` 表示会话未知，`{ canRewind: false, error: "checkpoint_not_found" }` 表示主链没有该快照 |
+| 409 | `{ error: "not_idle", status }` 表示 `daemon-driving` 或 `terminal-driving`，`{ canRewind: false, error: "rewind_refused" }` 表示 SDK 明确拒绝 |
+| 503 | `{ canRewind: false, error }`。`invalid_session_cwd` 表示找不到有效的会话工作目录，`sdk_unavailable` 表示控制启动、预览或执行前检查失败，`unsafe_cli_version` 表示未确认执行所需的 CLI 版本，`rewind_failed` 表示 SDK 报告执行失败，`rewind_outcome_unknown` 表示已派发执行但未收到可靠结果。后两种情况下文件可能已部分变更。缺失备份有时直到执行才会被 SDK 报告 |
+
+操作占用该会话的驾驶锁并对订阅者广播 `daemon-driving`。快照此时可见 `activeRunId: null`，因为控制进程没有对话轮次。回退与同一 daemon 内该会话的改名、分支、续聊、压缩及其他回退互斥。独立终端由现有 CLI 登记和活动检测识别，外部进程仍可在检查后启动或修改同一工作区。执行前断开连接会取消请求，派发后断开仍会等待 SDK 收尾。执行成功、执行失败或结果不明时，指定会话的 WS 订阅者收到 `{ "type": "workspace-invalidated", "sessionId": "<uuid>" }`，可重新读取工作区、文件和检查点。
+
+常规持久化 Query 通过 `enableFileCheckpointing: true` 启用原生备份，沿用 `replay-user-messages`。SDK 0.3.212 自行设置 `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`。空闲操作用已校验的 JSONL 路径恢复临时 Query，关闭持久化、配置来源、hooks、工具和 MCP 自动加载，工具回调一律拒绝。Query 保持输入流打开且不发送用户消息。CLI 2.1.212 和 2.1.330 已在隔离目录验证可预览与恢复，控制阶段无模型请求且转录逐字节一致。执行要求 `CLAUDE_BIN` 已探测到 CLI 2.1.216 或更新版本，以使用原生的链接和备份安全检查。SDK 0.3.212 自带 CLI 2.1.212 可预览，执行返回 `unsafe_cli_version`。参考 [Agent SDK 文件检查点](https://code.claude.com/docs/en/agent-sdk/file-checkpointing)。
+
+**仅回退 SDK 跟踪的文件改动，不回退对话历史，也不保证恢复 Bash 工具或子代理造成的文件变更。**
+
 ### 读取会话文件
 
 Agent 不主动发送文件。它在回复里写出路径，App 识别路径后显示文件卡片，用户点开时才下载到手机临时目录预览，关闭时删除。保存走系统分享面板。

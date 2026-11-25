@@ -11,7 +11,8 @@
 import { open } from "node:fs/promises";
 
 import { commandOutputParts, localCommandOutput, type CommandOutputPart } from "@claude-remote/agent-bridge";
-import type { ReadPage, RenderMessage, RenderRole } from "./types.js";
+import { isUuid } from "../session-files.js";
+import type { FileCheckpoint, ReadPage, RenderMessage, RenderRole } from "./types.js";
 
 /** 已知的元数据行 type：不渲染、不报 meta 卡。新版本 CLI 的未知 type 走 kind:meta 兜底。 */
 const KNOWN_META_TYPES = new Set([
@@ -262,7 +263,9 @@ interface LineEntry {
   bad: boolean;
 }
 
-function indexLine(text: string, seq: number, offset: number, length: number): LineEntry {
+function indexLine(
+  text: string, seq: number, offset: number, length: number, inspect?: (entry: Record<string, unknown>, seq: number) => void,
+): LineEntry {
   const entry: LineEntry = {
     seq,
     offset,
@@ -289,6 +292,7 @@ function indexLine(text: string, seq: number, offset: number, length: number): L
     return entry;
   }
   if (isCustomTitleType(o.type)) return entry;
+  inspect?.(o, seq);
   if (typeof o.uuid === "string") entry.uuid = o.uuid;
   if (typeof o.parentUuid === "string") entry.parentUuid = o.parentUuid;
   if (typeof o.type === "string") entry.type = o.type;
@@ -305,9 +309,9 @@ interface ScanResult {
 }
 
 /** 顺序分块流过全文件，产出每行的定位索引。行内容解析后立即丢弃。 */
-async function scanLines(file: string): Promise<ScanResult> {
+async function scanLines(file: string, inspect?: Parameters<typeof indexLine>[4]): Promise<ScanResult> {
   const entries: LineEntry[] = [];
-  await visitLines(file, (line, seq, offset, length) => entries.push(indexLine(line, seq, offset, length)));
+  await visitLines(file, (line, seq, offset, length) => entries.push(indexLine(line, seq, offset, length, inspect)));
   return { entries, badLines: entries.filter((entry) => entry.bad).length };
 }
 
@@ -434,6 +438,56 @@ export function readTail(file: string, limit: number): Promise<ReadPage> {
 /** 取 seq < beforeSeq 的最后 limit 个主链行的消息（向上翻页）。 */
 export function readBefore(file: string, beforeSeq: number, limit: number): Promise<ReadPage> {
   return readPage(file, beforeSeq, limit);
+}
+
+function isTrackedBackup(value: unknown): boolean {
+  return isRecord(value) && (value.backupFileName === null ||
+    (typeof value.backupFileName === "string" && value.backupFileName !== ""));
+}
+
+function isTrackingPath(value: unknown): value is string {
+  return typeof value === "string" && value !== "" && !value.includes("\0");
+}
+
+/** Project native snapshots and per-tool deltas onto the current transcript main chain. */
+export async function readTranscriptCheckpoints(file: string, sessionId: string): Promise<FileCheckpoint[]> {
+  const snapshots = new Map<string, { timestamp?: string; paths: Set<string> }>();
+  const users = new Map<number, Omit<FileCheckpoint, "trackedFiles">>();
+  const { entries } = await scanLines(file, (entry, seq) => {
+    if (entry.isSidechain === true || entry.isMeta === true || entry.parent_tool_use_id ||
+      (entry.sessionId !== undefined && entry.sessionId !== sessionId)) return;
+
+    if (entry.type === "file-history-snapshot" && typeof entry.messageId === "string" && isRecord(entry.snapshot)) {
+      const { messageId, trackedFileBackups, timestamp } = entry.snapshot;
+      if (messageId !== entry.messageId || !isUuid(entry.messageId) || !isRecord(trackedFileBackups)) return;
+      const paths = new Set(Object.entries(trackedFileBackups).flatMap(([path, backup]) =>
+        isTrackingPath(path) && isTrackedBackup(backup) ? [path] : []));
+      snapshots.set(messageId, { ...(typeof timestamp === "string" ? { timestamp } : {}), paths });
+    } else if (entry.type === "file-history-delta" && typeof entry.snapshotMessageId === "string" &&
+      isTrackingPath(entry.trackingPath) && isTrackedBackup(entry.backup)) {
+      snapshots.get(entry.snapshotMessageId)?.paths.add(entry.trackingPath);
+    } else if (entry.type === "user" && typeof entry.uuid === "string" && isUuid(entry.uuid) &&
+      entry.isCompactSummary !== true && isRecord(entry.message)) {
+      const content = entry.message.content;
+      if (typeof content !== "string" && (!Array.isArray(content) ||
+        content.some((block) => isRecord(block) && block.type === "tool_result"))) return;
+      const text = stripWrapperTags(contentText(content)).replace(/\s+/g, " ").trim();
+      const chars = Array.from(text);
+      users.set(seq, {
+        userMessageId: entry.uuid, preview: chars.length > 120 ? `${chars.slice(0, 120).join("")}…` : text,
+        ...(typeof entry.timestamp === "string" ? { timestamp: entry.timestamp } : {}),
+      });
+    }
+  });
+  const chain = computeMainChain(entries);
+  return [...users].reverse().flatMap(([seq, user]) => {
+    const snapshot = snapshots.get(user.userMessageId);
+    if (!chain.has(seq) || !snapshot) return [];
+    return [{ ...user,
+      ...(user.timestamp === undefined && snapshot.timestamp !== undefined ? { timestamp: snapshot.timestamp } : {}),
+      trackedFiles: [...snapshot.paths].sort(),
+    }];
+  });
 }
 
 const INPUT_FIELDS = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"] as const;

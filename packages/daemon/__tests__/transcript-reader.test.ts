@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
-import { parseTranscriptLine, readBefore, readTail, readTranscriptUsage, stripWrapperTags } from "../src/transcript/reader.js";
+import { parseTranscriptLine, readBefore, readTail, readTranscriptCheckpoints, readTranscriptUsage, stripWrapperTags } from "../src/transcript/reader.js";
 
 const fixturesDir = fileURLToPath(new URL("./fixtures/projects", import.meta.url));
 const basicFile = join(fixturesDir, "-home-alice-projA", "11111111-aaaa-4aaa-8aaa-111111111111.jsonl");
@@ -220,4 +220,46 @@ test("P1 native and legacy command results survive history pagination without le
       usage: { input_tokens: 12, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 } },
     sdkSession: { source: "sdk_estimate", scope: "session", total_cost_usd: 0.3, modelUsage: { sonnet: { inputTokens: 24 } } },
   });
+});
+
+test("checkpoint snapshots and their deltas only join to main-chain user prompts", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "transcript-checkpoints-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, "session.jsonl");
+  const sessionId = "11111111-aaaa-4aaa-8aaa-111111111111";
+  const [first, tool, discarded, sidechain, current, mismatched, meta] = Array.from({ length: 7 }, (_, i) =>
+    `22222222-bbbb-4bbb-8bbb-22222222222${i}`) as [string, string, string, string, string, string, string];
+  const prompt = (uuid: string, parentUuid: string | null, content: unknown, extra = {}) =>
+    ({ type: "user", uuid, parentUuid, sessionId, message: { role: "user", content }, ...extra });
+  const snapshotTime = "2026-11-25T00:00:00.000Z";
+  const snapshot = (messageId: string, paths = {}, extra = {}) => ({
+    type: "file-history-snapshot", messageId, ...extra,
+    snapshot: { messageId, trackedFileBackups: paths, timestamp: snapshotTime },
+  });
+  const backup = { backupFileName: "opaque@v1", version: 1, backupTime: snapshotTime };
+  const newFile = { ...backup, backupFileName: null };
+  const delta = (snapshotMessageId: string, trackingPath: string, value = backup) => ({
+    type: "file-history-delta", messageId: tool, snapshotMessageId, trackingPath, backup: value,
+  });
+  const messageTime = "2026-11-25T00:00:01.000Z";
+  const rows = [
+    snapshot(first, { "original.txt": backup }),
+    prompt(first, null, "<system-reminder>ignore</system-reminder>  Change\nfiles ", { timestamp: messageTime }),
+    snapshot(first, { "updated.txt": backup, "bad.txt": { backupFileName: 0 } }, { isSnapshotUpdate: true }),
+    delta(first, "created.txt"),
+    { ...delta(first, "created.txt"), backup: newFile },
+    delta(first, "\0bad.txt"),
+    snapshot(tool), prompt(tool, first, [{ type: "tool_result", tool_use_id: "toolu_1" }]),
+    snapshot(discarded), prompt(discarded, tool, "old branch"),
+    snapshot(sidechain), prompt(sidechain, tool, "child", { isSidechain: true }),
+    snapshot(meta), prompt(meta, tool, "synthetic", { isMeta: true }),
+    { ...snapshot(mismatched), messageId: first },
+    snapshot(current), prompt(current, meta, [{ type: "text", text: "🙂".repeat(121) }]),
+  ];
+  await writeFile(file, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n{bad\n`);
+  assert.deepEqual(await readTranscriptCheckpoints(file, sessionId), [
+    { userMessageId: current, timestamp: snapshotTime, preview: `${"🙂".repeat(120)}…`, trackedFiles: [] },
+    { userMessageId: first, timestamp: messageTime, preview: "Change files", trackedFiles: ["created.txt", "updated.txt"] },
+  ]);
+  assert.deepEqual(await readTranscriptCheckpoints(file, "different-session"), []);
 });

@@ -1,4 +1,4 @@
-import { query, type CanUseTool, type PermissionMode, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type CanUseTool, type PermissionMode, type Query, type RewindFilesResult, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { ContextUsage } from "./types.js";
 
@@ -17,6 +17,7 @@ export interface StartQueryOptions {
   /** Metadata probes keep stdin open and send no user message. */
   persistSession?: boolean;
   readOnlySideChat?: boolean;
+  rewindControl?: boolean;
   clientMessageId?: string;
   canUseTool: CanUseTool;
   resume?: string;
@@ -72,6 +73,7 @@ export interface SdkQueryHandle {
   getContextUsage(): Promise<ContextUsage>;
   mcpServerStatus(): ReturnType<Query["mcpServerStatus"]>;
   stopTask(taskId: string): Promise<void>;
+  rewindFiles(userMessageId: string, options?: { dryRun?: boolean }): Promise<RewindFilesResult>;
   closeAndWait(): Promise<void>;
   interrupt(): Promise<void>;
   close(): void;
@@ -81,17 +83,23 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
   if (options.resume !== undefined && options.sessionId !== undefined) {
     throw new TypeError("resume and sessionId are mutually exclusive");
   }
+  if (options.rewindControl && (options.prompt !== undefined || options.resume === undefined)) {
+    throw new TypeError("rewind control requires resume and does not accept a prompt");
+  }
   const input = new InputStream();
   if (options.prompt !== undefined) input.push(userMessage(options.prompt, options.clientMessageId));
+  const restricted = options.readOnlySideChat || options.rewindControl;
+  const persistSession = restricted ? false : options.persistSession ?? true;
   const sdkOptions = {
     cwd: options.cwd,
     canUseTool: options.canUseTool,
-    permissionMode: options.readOnlySideChat ? "dontAsk" as const : options.permissionMode ?? "default",
-    ...(!options.readOnlySideChat && options.permissionMode === "bypassPermissions"
+    permissionMode: restricted ? "dontAsk" as const : options.permissionMode ?? "default",
+    ...(!restricted && options.permissionMode === "bypassPermissions"
       ? { allowDangerouslySkipPermissions: true } : {}),
     includePartialMessages: true,
-    persistSession: options.readOnlySideChat ? false : options.persistSession ?? true,
-    ...(options.readOnlySideChat ? {
+    persistSession,
+    enableFileCheckpointing: persistSession || options.rewindControl === true,
+    ...(restricted ? {
       settingSources: [], tools: [], skills: [], mcpServers: {}, strictMcpConfig: true,
       settings: { disableAllHooks: true }, maxTurns: 1,
     } : {}),
@@ -124,6 +132,7 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
   return {
     messages: sdkQuery,
     async steer(prompt: string, clientMessageId?: string): Promise<void> {
+      if (options.rewindControl) throw new Error("rewind control does not accept user messages");
       if (options.signal.aborted) throw new Error("query input is aborted");
       input.push(userMessage(prompt, clientMessageId));
     },
@@ -151,6 +160,7 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
         throw new SdkTaskStopError("task_stop_unavailable");
       }
     },
+    rewindFiles: (userMessageId, rewindOptions) => sdkQuery.rewindFiles(userMessageId, rewindOptions),
     async interrupt(): Promise<void> { await sdkQuery.interrupt(); },
     close(): void {
       closeInput();

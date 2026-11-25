@@ -16,6 +16,7 @@ import {
   SdkTaskStopError,
   type PermissionBroker,
   type QueryFactory,
+  type RewindFilesResult,
   type SdkQueryHandle,
   type EffortLevel,
   type ExternalPermissionMode,
@@ -89,6 +90,20 @@ export interface TurnHandle {
   /** 永不 reject；不 await 也安全。 */
   completion: Promise<RunOutcome>;
 }
+
+interface RewindOptions {
+  sessionId: string;
+  file: string;
+  cwd: string;
+  userMessageId: string;
+  dryRun: boolean;
+  isCliAlive: () => Promise<boolean>;
+  signal: AbortSignal;
+}
+
+type RewindOutcome =
+  | { result: RewindFilesResult; error?: never }
+  | { result?: never; error: "terminal_driving" | "sdk_unavailable" | "rewind_failed" | "rewind_outcome_unknown" };
 
 export interface TurnRunnerOptions {
   gate: ActivityGate;
@@ -191,6 +206,7 @@ const MAX_RECENT_TASKS = 1024;
 const MAX_PENDING = 16;
 const MAX_PROBES = 4;
 const CONTROL_TIMEOUT_MS = 5_000;
+const REWIND_TIMEOUT_MS = 30_000;
 
 interface RecentReceipt<T> {
   receipt: T;
@@ -232,6 +248,7 @@ export class TurnRunner {
   readonly #quotas = new Map<string, Map<string, Quota>>();
   readonly #probes = new Map<string, AbortController>();
   readonly #sideChats = new Map<string, AbortController>();
+  readonly #rewinds = new Map<string, AbortController>();
   #metadataClosing = false;
 
   constructor(options: TurnRunnerOptions) {
@@ -251,7 +268,8 @@ export class TurnRunner {
     if (newSession && !isUuid(sessionId)) {
       throw new TypeError("new sessionId must be a UUID");
     }
-    if (this.#sessionRuns.has(sessionId)) {
+    const key = sessionRunKey(sessionId);
+    if (this.#sessionRuns.has(key) || this.#rewinds.has(key)) {
       throw new NotIdleError(`session ${sessionId} already has an active daemon run`);
     }
     if (!this.#gate.isIdle(sessionId)) {
@@ -285,7 +303,7 @@ export class TurnRunner {
       tasks: new RunTasks(runId, (task) => queue.push({ type: "task", sessionId, runId, task })) };
     this.#runs.set(runId, run);
     this.#quotas.delete(sessionId);
-    this.#sessionRuns.set(sessionId, runId);
+    this.#sessionRuns.set(key, runId);
 
     queue.push({ type: "run", runId, sessionId, state: "started", ...(permissionMode === undefined ? {} : { permissionMode }) });
     if (options.compact) {
@@ -376,11 +394,11 @@ export class TurnRunner {
 
   /** Return the active daemon run for a session, if any. */
   activeRunId(sessionId: string): string | undefined {
-    return this.#sessionRuns.get(sessionId);
+    return this.#sessionRuns.get(sessionRunKey(sessionId));
   }
 
   activeState(sessionId: string): { activeRunId: string; requestedPermissionMode: string; effectivePermissionMode?: string } | undefined {
-    const activeRunId = this.#sessionRuns.get(sessionId);
+    const activeRunId = this.activeRunId(sessionId);
     const run = activeRunId === undefined ? undefined : this.#runs.get(activeRunId);
     if (activeRunId === undefined || run === undefined) return undefined;
     return { activeRunId, requestedPermissionMode: run.requestedPermissionMode,
@@ -388,13 +406,13 @@ export class TurnRunner {
   }
 
   activeDiagnostics(sessionId: string): RunEvent[] {
-    const runId = this.#sessionRuns.get(sessionId);
+    const runId = this.activeRunId(sessionId);
     const run = runId === undefined ? undefined : this.#runs.get(runId);
     return run === undefined || runId === undefined ? [] : run.diagnostics.map((event) => ({ type: "worker", sessionId, runId, event }));
   }
 
   #findRun(sessionId: string): ActiveRun | undefined {
-    const runId = this.#sessionRuns.get(sessionId);
+    const runId = this.activeRunId(sessionId);
     return runId === undefined ? undefined : this.#runs.get(runId);
   }
 
@@ -641,9 +659,54 @@ export class TurnRunner {
     }
   }
 
+  async rewindFiles(options: RewindOptions): Promise<RewindOutcome> {
+    const { sessionId, file, cwd, userMessageId, dryRun } = options;
+    const key = sessionRunKey(sessionId);
+    if (this.#sessionRuns.has(key) || this.#rewinds.has(key) || !this.#gate.isIdle(sessionId)) {
+      throw new NotIdleError(`session ${sessionId} is not idle`);
+    }
+    if (this.#metadataClosing || options.signal.aborted) return { error: "sdk_unavailable" };
+    const controller = new AbortController();
+    const signal = AbortSignal.any([controller.signal, options.signal]);
+    this.#rewinds.set(key, controller);
+    this.#gate.beginRun(sessionId);
+    let sdk: SdkQueryHandle | undefined;
+    let dispatched = false;
+    try {
+      const rewind = startSdkQuery({
+        cwd, resume: file, signal: controller.signal, rewindControl: true,
+        canUseTool: async () => ({ behavior: "deny", message: "File rewind control does not use tools" }),
+      }, this.#queryFactory);
+      sdk = rewind;
+      const preview = await control(() => rewind.rewindFiles(userMessageId, { dryRun: true }), signal);
+      if (typeof preview.canRewind !== "boolean") return { error: "sdk_unavailable" };
+      if (dryRun || !preview.canRewind) return { result: preview };
+      if (await control(options.isCliAlive, signal)) return { error: "terminal_driving" };
+      const result = await control(() => {
+        signal.throwIfAborted();
+        dispatched = true;
+        return rewind.rewindFiles(userMessageId, { dryRun: false });
+      }, controller.signal, REWIND_TIMEOUT_MS);
+      return typeof result.canRewind === "boolean" ? { result } : { error: "rewind_outcome_unknown" };
+    } catch (error) {
+      if (!dispatched) return { error: "sdk_unavailable" };
+      return { error: error instanceof Error && error.message.startsWith("Failed to rewind:")
+        ? "rewind_failed" : "rewind_outcome_unknown" };
+    } finally {
+      try {
+        await sdk?.closeAndWait();
+      } catch {
+        try { sdk?.close(); } catch { /* The SDK transport is already closing. */ }
+      } finally {
+        this.#rewinds.delete(key);
+        this.#safeEndRun(sessionId);
+      }
+    }
+  }
+
   closeMetadata(): void {
     this.#metadataClosing = true;
-    for (const controller of [...this.#probes.values(), ...this.#sideChats.values()]) controller.abort();
+    for (const controller of [...this.#probes.values(), ...this.#sideChats.values(), ...this.#rewinds.values()]) controller.abort();
   }
 
   async #probe<T>(kind: string, cwd: string, sessionId: string | undefined, read: (sdk: SdkQueryHandle, signal: AbortSignal) => Promise<T>): Promise<T | undefined> {
@@ -796,7 +859,8 @@ export class TurnRunner {
     }
     this.#runs.delete(runId);
     run.controller.abort(new Error("run ended"));
-    if (this.#sessionRuns.get(sessionId) === runId) this.#sessionRuns.delete(sessionId);
+    const key = sessionRunKey(sessionId);
+    if (this.#sessionRuns.get(key) === runId) this.#sessionRuns.delete(key);
     this.#safeEndRun(sessionId);
     queue.push(outcome.state === "done" ? { type: "run", runId, sessionId, state: "done" }
       : { type: "run", runId, sessionId, state: "error", error: outcome.error });
@@ -904,6 +968,10 @@ function resultErrorText(event: WorkerEvent): string | undefined {
     if (text !== "") return text.slice(0, 300);
   }
   return undefined;
+}
+
+function sessionRunKey(sessionId: string): string {
+  return isUuid(sessionId) ? sessionId.toLowerCase() : sessionId;
 }
 
 function isUuid(value: string): boolean {

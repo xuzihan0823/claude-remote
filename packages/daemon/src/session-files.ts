@@ -9,6 +9,10 @@ export function isSafeSessionId(value: string): boolean {
   return value.length > 0 && value !== "." && !value.includes("..") && !/[\/\\\p{Cc}]/u.test(value);
 }
 
+export function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
 /** 定位会话文件；拒绝符号链接和非普通文件。 */
 export async function resolveSessionFile(projectsDir: string, sessionId: string): Promise<string> {
   if (isSafeSessionId(sessionId)) {

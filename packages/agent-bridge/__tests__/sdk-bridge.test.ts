@@ -7,7 +7,7 @@ import { configuredClaudeExecutable, startSdkQuery, type EffortLevel, type Exter
 type QueryParams = Parameters<QueryFactory>[0];
 type SdkQuery = ReturnType<QueryFactory>;
 
-function fakeQuery(stopTask?: (taskId: string) => Promise<void>): { factory: QueryFactory; params: () => QueryParams | undefined } {
+function fakeQuery(stopTask?: SdkQuery["stopTask"], rewindFiles?: SdkQuery["rewindFiles"]): { factory: QueryFactory; params: () => QueryParams | undefined } {
   let captured: QueryParams | undefined;
   const factory = ((params: QueryParams): SdkQuery => {
     captured = params;
@@ -16,6 +16,7 @@ function fakeQuery(stopTask?: (taskId: string) => Promise<void>): { factory: Que
     query.interrupt = async (): Promise<void> => undefined;
     query.close = (): void => undefined;
     if (stopTask) query.stopTask = stopTask;
+    query.rewindFiles = rewindFiles;
     return generator as unknown as SdkQuery;
   }) as unknown as QueryFactory;
   return { factory, params: () => captured };
@@ -39,6 +40,8 @@ test("resume turn passes model override and omits sessionId", () => {
   assert.equal(sdkOptions.resume, "11111111-1111-4111-8111-111111111111");
   assert.equal(sdkOptions.model, "fable");
   assert.equal(Object.hasOwn(sdkOptions, "sessionId"), false);
+  assert.equal(sdkOptions.enableFileCheckpointing, true);
+  assert.deepEqual(sdkOptions.extraArgs, { "replay-user-messages": null });
   handle.close();
 });
 
@@ -183,6 +186,7 @@ test("only an explicit bypassPermissions turn enables the SDK bypass option", ()
     readOnlySideChat: true, permissionMode: "bypassPermissions",
   }, side.factory).close();
   assert.equal(side.params()?.options?.permissionMode, "dontAsk");
+  assert.equal(side.params()?.options?.enableFileCheckpointing, false);
   assert.equal(side.params()?.options?.allowDangerouslySkipPermissions, undefined);
 });
 
@@ -205,4 +209,40 @@ test("stopTask forwards task ID to the original live Query and rejects closed or
   const unsupported = options(fakeQuery(async () => { throw new Error("Unsupported control request subtype: stop_task"); }).factory);
   await assert.rejects(unsupported.stopTask("agent-1"), { code: "task_stop_unavailable" });
   unsupported.close();
+});
+
+test("file controls use a non-persisted resume, no prompt, and forward native rewind options", async () => {
+  const calls: Array<Parameters<SdkQuery["rewindFiles"]>> = [];
+  const fake = fakeQuery(undefined, async (...args) => {
+    calls.push(args);
+    return { canRewind: true, filesChanged: ["notes.txt"], insertions: 2, deletions: 1 };
+  });
+  const resume = "/tmp/project/session.jsonl";
+  const checkpoint = "11111111-1111-4111-8111-111111111111";
+  const handle = startSdkQuery({
+    cwd: "/tmp/project", resume, rewindControl: true, signal: new AbortController().signal,
+    canUseTool: async () => ({ behavior: "deny", message: "test" }),
+  }, fake.factory);
+  const launch = fake.params()?.options;
+  assert.equal(launch?.resume, resume);
+  assert.equal(launch?.enableFileCheckpointing, true);
+  assert.equal(launch?.persistSession, false);
+  assert.equal(launch?.permissionMode, "dontAsk");
+  assert.equal(launch?.strictMcpConfig, true);
+  assert.deepEqual(launch?.tools, []);
+  assert.deepEqual(launch?.skills, []);
+  assert.deepEqual(launch?.mcpServers, {});
+  assert.deepEqual(launch?.settingSources, []);
+  assert.deepEqual(launch?.settings, { disableAllHooks: true });
+  const input = fake.params()?.prompt;
+  assert.ok(input && typeof input !== "string");
+  const first = input[Symbol.asyncIterator]().next();
+  await assert.rejects(handle.steer("unexpected input"));
+  assert.deepEqual(await handle.rewindFiles(checkpoint, { dryRun: true }), {
+    canRewind: true, filesChanged: ["notes.txt"], insertions: 2, deletions: 1,
+  });
+  await handle.rewindFiles(checkpoint, { dryRun: false });
+  assert.deepEqual(calls, [[checkpoint, { dryRun: true }], [checkpoint, { dryRun: false }]]);
+  await handle.closeAndWait();
+  assert.equal((await first).done, true);
 });

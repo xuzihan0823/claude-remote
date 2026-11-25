@@ -1,6 +1,7 @@
 import type {
   SDKCompactBoundaryMessage, SDKControlGetContextUsageResponse, SDKRateLimitInfo, SDKResultMessage, SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk";
+export type { RewindFilesResult } from "@anthropic-ai/claude-agent-sdk";
 
 import type { CommandOutputPart } from "./command-output.js";
 

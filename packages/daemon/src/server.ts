@@ -26,13 +26,13 @@ import type { DaemonConfig } from "./config.js";
 import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
 import { FileAccessError, IMAGE_FILE_LIMIT_BYTES, SESSION_FILE_LIMIT_BYTES, fileMeta, fileTypeOf, openRequestedFile, parseRange, type SessionFile } from "./session-file-access.js";
-import { isSafeSessionId, readSessionCwd, resolveSessionFile } from "./session-files.js";
 import { sdkSessionOperations, type SessionOperations } from "./session-operations.js";
+import { isSafeSessionId, isUuid, readSessionCwd, resolveSessionFile } from "./session-files.js";
 import { StreamBuffer } from "./run/stream-buffer.js";
 import { approvalLink, NotIdleError, sessionLink, RunRequestError, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
 import { listSessions, readSessionSummary } from "./transcript/indexer.js";
 import { buildProjectIndex } from "./transcript/projects.js";
-import { readBefore, readTail, readTranscriptUsage } from "./transcript/reader.js";
+import { readBefore, readTail, readTranscriptCheckpoints, readTranscriptUsage } from "./transcript/reader.js";
 import { searchSessions } from "./transcript/search.js";
 import type { ActivityTracker } from "./watch/activity.js";
 import type { SessionWatcher } from "./watch/watcher.js";
@@ -120,7 +120,7 @@ export class DaemonServer {
   readonly #wss: WebSocketServer;
   readonly #clients = new Map<WebSocket, ClientState>();
   readonly #activeRuns = new Map<string, TurnHandle>();
-  readonly #sessionEdits = new Set<string>();
+  readonly #sessionControls = new Set<string>();
   readonly #newSessions = new Map<string, NodeJS.Timeout>();
   readonly #messageRequests = new Map<string, { sessionId: string; runId: string; clientMessageId: string; expiresAt: number }>();
   readonly #watchActivations = new Set<string>();
@@ -356,6 +356,16 @@ export class DaemonServer {
       return;
     }
 
+    const fileControl = /^\/api\/sessions\/([^/]+)\/(checkpoints|rewind)$/.exec(rawPath);
+    if (fileControl && ((method === "GET" && fileControl[2] === "checkpoints") ||
+      (method === "POST" && fileControl[2] === "rewind"))) {
+      const sessionId = decodePathSegment(fileControl[1]).toLowerCase();
+      if (!isUuid(sessionId)) { this.#json(res, 400, { error: "invalid_session_id" }); return; }
+      if (method === "GET") await this.#handleCheckpoints(res, sessionId);
+      else await this.#handleRewind(req, res, sessionId);
+      return;
+    }
+
     const p1Match = /^\/api\/sessions\/([^/]+)\/(state|context|usage|steer|compact|btw|workspace)(?:\/([^/]+)(\/send-now)?)?$/.exec(path);
     if (p1Match) {
       const [, encodedId, operation, messageId, sendNow] = p1Match;
@@ -541,7 +551,7 @@ export class DaemonServer {
     const cliAlive = await isCliAlive(sessionId);
     if (this.#rejectClosing(res) || this.#rejectSessionWrite(res, sessionId, cliAlive)) return;
     const lockId = sessionId.toLowerCase();
-    this.#sessionEdits.add(lockId);
+    this.#sessionControls.add(lockId);
     try {
       if (!fork) {
         await sessionOperations.rename(file, sessionId, title);
@@ -562,12 +572,12 @@ export class DaemonServer {
     } catch {
       this.#json(res, 503, { error: fork ? "session_fork_unavailable" : "session_rename_unavailable" });
     } finally {
-      this.#sessionEdits.delete(lockId);
+      this.#sessionControls.delete(lockId);
     }
   }
 
   #rejectSessionWrite(res: ServerResponse, sessionId: string, cliAlive = false): boolean {
-    const status = this.#sessionEdits.has(sessionId.toLowerCase()) ? "daemon-driving" : this.#options.tracker.getStatus(sessionId);
+    const status = this.#sessionControls.has(sessionId.toLowerCase()) ? "daemon-driving" : this.#options.tracker.getStatus(sessionId);
     if (status === "idle" && !cliAlive) return false;
     this.#json(res, 409, { error: "not_idle", status: status === "idle" ? "terminal-driving" : status });
     return true;
@@ -815,6 +825,88 @@ export class DaemonServer {
     }
   }
 
+  async #handleCheckpoints(res: ServerResponse, sessionId: string): Promise<void> {
+    const file = await this.#p1SessionFile(res, sessionId);
+    if (!file) return;
+    try {
+      this.#json(res, 200, { checkpoints: await readTranscriptCheckpoints(file, sessionId) });
+    } catch (error) {
+      if (!isEnoent(error)) throw error;
+      this.#json(res, 404, { error: "session_not_found" });
+    }
+  }
+
+  async #handleRewind(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
+    const body = await this.#readJsonBody(req, res);
+    if (body === undefined) return;
+    const { userMessageId, dryRun = true } = body as Record<string, unknown>;
+    if (typeof userMessageId !== "string" || !isUuid(userMessageId)) {
+      this.#json(res, 400, { error: "invalid_user_message_id" });
+      return;
+    }
+    if (typeof dryRun !== "boolean") {
+      this.#json(res, 400, { error: "invalid_dry_run" });
+      return;
+    }
+
+    const file = await this.#p1SessionFile(res, sessionId);
+    if (!file) return;
+    const { runner, isCliAlive } = this.#options;
+    if (this.#rejectSessionWrite(res, sessionId)) return;
+    const controller = new AbortController();
+    const disconnect = (): void => controller.abort();
+    res.once("close", disconnect);
+    if (res.destroyed) disconnect();
+    try {
+      const checkpoints = await readTranscriptCheckpoints(file, sessionId);
+      const checkpoint = checkpoints.find((item) => item.userMessageId.toLowerCase() === userMessageId.toLowerCase());
+      const cwd = checkpoint ? await readSessionCwd(file) : "";
+      const cliAlive = await isCliAlive(sessionId);
+      if (res.destroyed || this.#rejectClosing(res) || this.#rejectSessionWrite(res, sessionId, cliAlive)) return;
+      if (!checkpoint) {
+        this.#json(res, 404, { canRewind: false, error: "checkpoint_not_found" });
+        return;
+      }
+      if (!isAbsolute(cwd) || cwd.includes("\0")) {
+        this.#json(res, 503, { canRewind: false, error: "invalid_session_cwd" });
+        return;
+      }
+      if (!dryRun && !supportsSafeRewind(this.#options.claudeCliVersion())) {
+        this.#json(res, 503, { canRewind: false, error: "unsafe_cli_version" });
+        return;
+      }
+
+      this.#sessionControls.add(sessionId);
+      const outcome = await runner.rewindFiles({
+        cwd, file, sessionId, userMessageId: checkpoint.userMessageId, dryRun,
+        isCliAlive: () => isCliAlive(sessionId), signal: controller.signal,
+      }).finally(() => this.#sessionControls.delete(sessionId));
+      if (!dryRun && (outcome.result?.canRewind || outcome.error === "rewind_failed" || outcome.error === "rewind_outcome_unknown")) {
+        this.#broadcastToSubscribers(sessionId, { type: "workspace-invalidated", sessionId });
+      }
+      if (res.destroyed) return;
+      if (outcome.error === "terminal_driving") {
+        this.#json(res, 409, { error: "not_idle", status: "terminal-driving" });
+      } else if (outcome.error) {
+        this.#json(res, 503, { canRewind: false, error: outcome.error });
+      } else {
+        const { canRewind, filesChanged, insertions, deletions } = outcome.result;
+        const skippedLinks = "skippedLinks" in outcome.result ? outcome.result.skippedLinks : undefined;
+        this.#json(res, canRewind ? 200 : 409, { canRewind, filesChanged, insertions, deletions,
+          ...(typeof skippedLinks === "number" ? { skippedLinks } : {}),
+          ...(!canRewind ? { error: "rewind_refused" } : {}),
+        });
+      }
+    } catch (error) {
+      if (res.destroyed) return;
+      if (isEnoent(error)) this.#json(res, 404, { error: "session_not_found" });
+      else if (error instanceof NotIdleError) this.#respondNotIdle(res, sessionId);
+      else throw error;
+    } finally {
+      res.off("close", disconnect);
+    }
+  }
+
   async #handleWorkspace(res: ServerResponse, sessionId: string): Promise<void> {
     const file = await this.#p1SessionFile(res, sessionId);
     if (!file) return;
@@ -893,7 +985,8 @@ export class DaemonServer {
       handle = runner.startTurn({ sessionId, cwd, text, compact: { clientMessageId } });
     } catch (error) {
       if (!(error instanceof NotIdleError || error instanceof RunRequestError)) throw error;
-      this.#json(res, 409, { error: error instanceof RunRequestError ? error.code : "not_idle", status: tracker.getStatus(sessionId) });
+      if (error instanceof NotIdleError) this.#respondNotIdle(res, sessionId);
+      else this.#json(res, 409, { error: error.code, status: tracker.getStatus(sessionId) });
       return;
     }
     this.#activeRuns.set(handle.runId, handle);
@@ -1166,7 +1259,7 @@ export class DaemonServer {
       });
     } catch (error) {
       if (error instanceof NotIdleError) {
-        this.#json(res, 409, { error: "not_idle", status: this.#options.tracker.getStatus(sessionId) });
+        this.#respondNotIdle(res, sessionId);
         return;
       }
       if (error instanceof TypeError) {
@@ -1478,6 +1571,11 @@ export class DaemonServer {
     }
   }
 
+  #respondNotIdle(res: ServerResponse, sessionId: string): void {
+    const status = this.#options.tracker.getStatus(sessionId);
+    this.#json(res, 409, { error: "not_idle", status: status === "idle" ? "daemon-driving" : status });
+  }
+
   #rejectClosing(res: ServerResponse): boolean {
     if (!this.#closed) return false;
     this.#json(res, 503, { error: "server_closing" });
@@ -1751,6 +1849,12 @@ function snippet(text: string): string {
   return collapsed.length > 60 ? `${collapsed.slice(0, 60)}…` : collapsed;
 }
 
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+function supportsSafeRewind(version: string): boolean {
+  // Claude Code before 2.1.216 can write or delete through links during rewind.
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:\s|$)/.exec(version);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = Number(match[3]);
+  return major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 216)));
 }

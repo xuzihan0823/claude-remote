@@ -22,6 +22,7 @@ import { pairPayload } from "../src/pair.js";
 import type { SessionOperations } from "../src/session-operations.js";
 import { ApprovalBridge, TurnRunner, type ActivityGate, type Notifier } from "../src/run/index.js";
 import { DaemonServer, type RelayStatus } from "../src/server.js";
+import { resolveSessionFile } from "../src/session-files.js";
 import { ActivityTracker, type ActivityTrackerOptions } from "../src/watch/activity.js";
 import { CliExitReleaser, readLiveCliSessions } from "../src/watch/cli-presence.js";
 import { SessionWatcher } from "../src/watch/watcher.js";
@@ -71,6 +72,8 @@ interface FakeSdk {
   systemMessages?: Array<Record<string, unknown>>;
   finalSystemMessages?: Array<Record<string, unknown>>;
   stopTask?: (taskId: string) => Promise<void>;
+  rewindFiles?: SdkQuery["rewindFiles"];
+  cliVersion?: string;
 }
 
 function fakeSdk(): FakeSdk {
@@ -107,6 +110,7 @@ function fakeSdk(): FakeSdk {
     };
     augmented.close = (): void => {};
     if (holder.stopTask) augmented.stopTask = holder.stopTask;
+    augmented.rewindFiles = holder.rewindFiles;
     return generator as unknown as SdkQuery;
   }) as unknown as QueryFactory;
   return holder;
@@ -183,7 +187,7 @@ async function startHarness(
 
   server = new DaemonServer({
     config, watcher, tracker, runner, approvals: bridge, notifier,
-    version: "0.1.0-test", claudeCliVersion: () => "9.9.9-test",
+    version: "0.1.0-test", claudeCliVersion: () => sdk.cliVersion ?? "9.9.9-test",
     isCliAlive,
     modelCatalog: () => readModelCatalog(settingsPath),
     effortOptions: async () => ({ levels: ["low", "high", "max"], verified: true }),
@@ -505,6 +509,7 @@ test("a pending SDK fork excludes concurrent session writes and releases the loc
     await Promise.race([entered, pending.then((res) => assert.fail(`fork returned early: ${res.status}`))]);
     for (const [path, method, body] of [
       ["/fork", "POST", "{}"], ["", "PATCH", '{"title":"queued"}'], ["/messages", "POST", '{"text":"queued"}'],
+      ["/rewind", "POST", JSON.stringify({ userMessageId: CHECKPOINT_ID })],
       ["/compact", "POST", JSON.stringify({ clientMessageId: DAEMON_ID })],
     ] as const) {
       const blocked = await fetch(`${source}${path}`, authed({ method, body }));
@@ -1758,4 +1763,164 @@ test("task stop HTTP validates identity and WS snapshots recover current and rec
   assert.deepEqual(calls, ["agent-1"]);
   h.sdk.finish();
   await idle.waitFor((event) => event.type === "run" && event.runId === next.runId && event.state === "done");
+});
+
+const CHECKPOINT_ID = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+const UNKNOWN_ID = "bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb";
+
+async function seedCheckpoint(h: Harness): Promise<string> {
+  const jsonl = userLine(CHECKPOINT_ID, null, "Update notes") + assistantLine("a1", CHECKPOINT_ID, "Done") + jsonlLine({
+    type: "file-history-snapshot", messageId: CHECKPOINT_ID, isSnapshotUpdate: false,
+    snapshot: { messageId: CHECKPOINT_ID, trackedFileBackups: { "notes.txt": { backupFileName: "opaque@v1" } } },
+  });
+  await writeFile(h.sessionFile, jsonl);
+  return jsonl;
+}
+
+function requestRewind(h: Harness, body: unknown, id = SESSION_ID): Promise<Response> {
+  return fetch(`${h.base}/api/sessions/${id}/rewind`, authed({ method: "POST", body: JSON.stringify(body) }));
+}
+
+test("checkpoints and rewind preview/execute a file restore with the transcript unchanged", async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  const list = () => fetch(`${h.base}/api/sessions/${SESSION_ID}/checkpoints`, authed());
+  assert.deepEqual(await (await list()).json(), { checkpoints: [] });
+  const transcript = await seedCheckpoint(h);
+  const file = join(h.projectsDir, "..", "notes.txt");
+  await writeFile(file, "changed\n");
+  const checks = await list();
+  assert.equal(checks.status, 200);
+  assert.deepEqual(await checks.json(), { checkpoints: [{
+    userMessageId: CHECKPOINT_ID, timestamp: "2026-07-18T10:00:00.000Z", preview: "Update notes", trackedFiles: ["notes.txt"],
+  }] });
+
+  const sink = new FrameSink(h.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  sink.send({ type: "subscribe", sessionId: SESSION_ID });
+  await sink.waitFor((frame) => frame.type === "session-state");
+
+  h.sdk.cliVersion = "2.1.330 (Claude Code)";
+  const calls: Array<boolean | undefined> = [];
+  h.sdk.rewindFiles = async (id, options) => {
+    assert.equal(id, CHECKPOINT_ID);
+    calls.push(options?.dryRun);
+    if (options?.dryRun === true) return { canRewind: true, filesChanged: [file], insertions: 1, deletions: 1 };
+    await writeFile(file, "original\n");
+    return { canRewind: true, skippedLinks: 0 };
+  };
+  for (const body of [{ userMessageId: CHECKPOINT_ID.toUpperCase() }, { userMessageId: CHECKPOINT_ID, dryRun: true }]) {
+    const preview = await requestRewind(h, body);
+    assert.equal(preview.status, 200);
+    assert.deepEqual(await preview.json(), { canRewind: true, filesChanged: [file], insertions: 1, deletions: 1 });
+    assert.equal(await readFile(file, "utf8"), "changed\n");
+    assert.equal(sink.frames.some((frame) => frame.type === "workspace-invalidated"), false);
+  }
+  const execution = await requestRewind(h, { userMessageId: CHECKPOINT_ID, dryRun: false });
+  assert.equal(execution.status, 200);
+  assert.deepEqual(await execution.json(), { canRewind: true, skippedLinks: 0 });
+  assert.deepEqual(calls, [true, true, true, false]);
+  assert.equal(await readFile(file, "utf8"), "original\n");
+  assert.equal(await readFile(h.sessionFile, "utf8"), transcript);
+  assert.equal(h.sdk.params?.options?.persistSession, false);
+  assert.equal(h.sdk.params?.options?.resume, await resolveSessionFile(h.projectsDir, SESSION_ID));
+  assert.equal(h.tracker.getStatus(SESSION_ID), "idle");
+  assert.deepEqual(await sink.waitFor((frame) => frame.type === "workspace-invalidated"), {
+    type: "workspace-invalidated", sessionId: SESSION_ID,
+  });
+});
+
+test("checkpoint endpoints reject invalid input, unknown sessions, and unavailable checkpoints", async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  await seedCheckpoint(h);
+  const list = (id: string, auth = true) => fetch(`${h.base}/api/sessions/${id}/checkpoints`, auth ? authed() : {});
+  assert.equal((await list(SESSION_ID, false)).status, 401);
+  for (const [response, status, body] of [
+    [await list("..%2Fbad"), 400, { error: "invalid_session_id" }],
+    [await list(UNKNOWN_ID), 404, { error: "session_not_found" }],
+    [await requestRewind(h, { userMessageId: CHECKPOINT_ID }, "invalid"), 400, { error: "invalid_session_id" }],
+    [await requestRewind(h, { userMessageId: CHECKPOINT_ID }, UNKNOWN_ID), 404, { error: "session_not_found" }],
+    [await requestRewind(h, {}), 400, { error: "invalid_user_message_id" }],
+    [await requestRewind(h, { userMessageId: "bad" }), 400, { error: "invalid_user_message_id" }],
+    [await requestRewind(h, { userMessageId: CHECKPOINT_ID, dryRun: null }), 400, { error: "invalid_dry_run" }],
+    [await requestRewind(h, { userMessageId: UNKNOWN_ID }), 404, { canRewind: false, error: "checkpoint_not_found" }],
+  ] as const) {
+    assert.equal(response.status, status);
+    assert.deepEqual(await response.json(), body);
+  }
+  await symlink(h.sessionFile, join(h.projectsDir, "-tmp-claude-remote-it", `${UNKNOWN_ID}.jsonl`));
+  assert.equal((await list(UNKNOWN_ID)).status, 404);
+
+  h.sdk.cliVersion = "2.1.212 (Claude Code)";
+  const old = await requestRewind(h, { userMessageId: CHECKPOINT_ID, dryRun: false });
+  assert.equal(old.status, 503);
+  assert.deepEqual(await old.json(), { canRewind: false, error: "unsafe_cli_version" });
+  assert.equal(h.sdk.calls, undefined);
+  h.sdk.rewindFiles = async () => ({ canRewind: false, error: "native details" });
+  const refused = await requestRewind(h, { userMessageId: CHECKPOINT_ID });
+  assert.equal(refused.status, 409);
+  assert.deepEqual(await refused.json(), { canRewind: false, error: "rewind_refused" });
+  h.sdk.rewindFiles = async () => { throw new Error("native details"); };
+  const broken = await requestRewind(h, { userMessageId: CHECKPOINT_ID });
+  assert.equal(broken.status, 503);
+  assert.deepEqual(await broken.json(), { canRewind: false, error: "sdk_unavailable" });
+  h.sdk.cliVersion = "2.1.330 (Claude Code)";
+  h.sdk.rewindFiles = async (_id, options) => {
+    if (options?.dryRun) return { canRewind: true };
+    throw new Error("Failed to rewind: No files were restored");
+  };
+  const failed = await requestRewind(h, { userMessageId: CHECKPOINT_ID, dryRun: false });
+  assert.equal(failed.status, 503);
+  assert.deepEqual(await failed.json(), { canRewind: false, error: "rewind_failed" });
+  assert.equal(h.tracker.getStatus(SESSION_ID), "idle");
+});
+
+test("rewind rejects both terminal and daemon driving and holds the lock against concurrent writes", async (t) => {
+  let cliAlive = true;
+  const h = await startHarness(async () => cliAlive);
+  t.after(() => h.dispose());
+  await seedCheckpoint(h);
+  const rewind = () => requestRewind(h, { userMessageId: CHECKPOINT_ID });
+  const terminal = await rewind();
+  assert.equal(terminal.status, 409);
+  assert.deepEqual(await terminal.json(), { error: "not_idle", status: "terminal-driving" });
+  cliAlive = false;
+  const send = () => fetch(`${h.base}/api/sessions/${SESSION_ID}/messages`, authed({
+    method: "POST", body: JSON.stringify({ text: "continue" }),
+  }));
+  const turn = await send();
+  assert.equal(turn.status, 202);
+  const busy = await rewind();
+  assert.equal(busy.status, 409);
+  assert.deepEqual(await busy.json(), { error: "not_idle", status: "daemon-driving" });
+  const idle = once(h.tracker, "change");
+  h.sdk.finish();
+  await idle;
+
+  let enter!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  h.sdk.rewindFiles = async () => {
+    enter();
+    await released;
+    return { canRewind: true };
+  };
+  const preview = rewind();
+  await Promise.race([entered, preview.then(() => { throw new Error("rewind did not enter SDK"); })]);
+  try {
+    const session = `${h.base}/api/sessions/${SESSION_ID}`;
+    const rename = fetch(session, authed({ method: "PATCH", body: '{"title":"busy"}' }));
+    const fork = fetch(`${session}/fork`, authed({ method: "POST" }));
+    for (const response of await Promise.all([rewind(), send(), rename, fork])) {
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), { error: "not_idle", status: "daemon-driving" });
+    }
+  } finally {
+    release();
+  }
+  assert.equal((await preview).status, 200);
+  assert.equal(h.tracker.getStatus(SESSION_ID), "idle");
 });

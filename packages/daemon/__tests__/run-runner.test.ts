@@ -512,3 +512,48 @@ test("replacing a Query settles its tasks and fences a delayed stop acknowledgem
   secondDone.resolve();
   assert.deepEqual(await run.completion, { state: "done" });
 });
+
+test("rewind reserves the turn lock through SDK shutdown, including UUID case variants", async () => {
+  const { gate, begun, ended } = stubGate();
+  const closing = deferred();
+  const release = deferred();
+  const calls: Array<boolean | undefined> = [];
+  const factory: QueryFactory = () => {
+    const generator = (async function* () {})();
+    return Object.assign(generator, {
+      rewindFiles: async (_id: string, options?: { dryRun?: boolean }) => {
+        calls.push(options?.dryRun);
+        return { canRewind: true };
+      },
+      return: async () => {
+        closing.resolve();
+        await release.promise;
+        return { done: true, value: undefined };
+      },
+    }) as unknown as SdkQuery;
+  };
+  const runner = new TurnRunner({ gate, permissions: denyAll, queryFactory: factory });
+  const sessionId = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+  const options = {
+    sessionId, cwd: "/tmp/project", file: "/tmp/projects/session.jsonl", dryRun: false,
+    userMessageId: "bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb", signal: new AbortController().signal,
+    isCliAlive: async () => false,
+  };
+  const pending = runner.rewindFiles(options);
+  await closing.promise;
+  try {
+    assert.deepEqual(calls, [true, false]);
+    assert.equal(runner.activeRunId(sessionId), undefined);
+    assert.throws(() => runner.startTurn({ ...options, sessionId: sessionId.toUpperCase(), text: "continue" }), NotIdleError);
+    await assert.rejects(runner.rewindFiles(options), NotIdleError);
+    assert.deepEqual(ended, []);
+  } finally {
+    release.resolve();
+  }
+  assert.deepEqual(await pending, { result: { canRewind: true } });
+  assert.deepEqual(begun, [sessionId]);
+  assert.deepEqual(ended, [sessionId]);
+  const terminal = await runner.rewindFiles({ ...options, isCliAlive: async () => true });
+  assert.deepEqual(terminal, { error: "terminal_driving" });
+  assert.deepEqual(calls, [true, false, true]);
+});

@@ -24,6 +24,13 @@ export interface SessionSummary {
   status: SessionStatus;
 }
 
+export interface FileCheckpoint {
+  userMessageId: string;
+  timestamp?: string;
+  preview: string;
+  trackedFiles: string[];
+}
+
 export type RenderRole = "user" | "assistant";
 export type RenderKind = "text" | "tool_use" | "tool_result" | "thinking" | "meta" | "command_output" | "compact_boundary";
 
