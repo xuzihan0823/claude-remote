@@ -80,6 +80,7 @@ export interface RelayStatus {
 export interface ConnectInfo {
   bases: string[];
   relays: RelayStatus[];
+  daemonId?: string;
 }
 
 export class ApiError extends Error {
@@ -125,7 +126,7 @@ export class Api {
     return parsed as T;
   }
 
-  health(): Promise<{ ok: boolean; version: string; claudeCliVersion: string }> {
+  health(): Promise<{ ok: boolean; version: string; claudeCliVersion: string; daemonId?: string }> {
     return this.#request("GET", "/api/health");
   }
 

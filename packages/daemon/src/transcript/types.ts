@@ -13,7 +13,7 @@ export interface SessionSummary {
   cwd: string;
   /** 编码目录名（仅展示分组用，不用于反解路径）。 */
   projectDirName: string;
-  /** 首条真实 user 文本截 60 字；无则 "(空会话)"。 */
+  /** 最新原生自定义标题，或首条真实用户文本截 60 字，无文本时为 "(空会话)"。 */
   title: string;
   /** 最后一条主链消息文本截 80 字；无则 ""。 */
   lastPreview: string;

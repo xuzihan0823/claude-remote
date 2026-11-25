@@ -49,6 +49,7 @@ async function startDaemon(relayStatuses?: () => ReturnType<RelayConnector["stat
   await mkdir(projectsDir, { recursive: true });
   const config: DaemonConfig = {
     token: TOKEN,
+    daemonId: "aaaaaaaa-2222-4333-8444-555555555555",
     host: "127.0.0.1",
     port: 0,
     projectsDir,

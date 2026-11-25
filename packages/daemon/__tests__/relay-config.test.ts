@@ -66,8 +66,9 @@ test("http:// 只允许 localhost / 127.0.0.1", () => {
 });
 
 test("loadConfig：单 relay 旧键保持兼容，未配置时 relays 为空", () => {
-  assert.equal(loadConfig({ BRIDGE_TOKEN: "t", ...env() }).relays[0]?.url, "https://relay.example.com");
-  assert.deepEqual(loadConfig({ BRIDGE_TOKEN: "t" }).relays, []);
+  const config = { BRIDGE_TOKEN: "t", DAEMON_ID: "aaaaaaaa-2222-4333-8444-555555555555" };
+  assert.equal(loadConfig({ ...config, ...env() }).relays[0]?.url, "https://relay.example.com");
+  assert.deepEqual(loadConfig(config).relays, []);
 });
 
 test("多个 relay：按编号读取，共用身份，密钥可含逗号和竖线", () => {

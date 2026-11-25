@@ -12,14 +12,14 @@ Claude Remote iOS 客户端
                                                   ▲ Mac 主动连出
 Mac daemon (packages/daemon)  ── connector ───────┘
    ├── 读 ~/.claude/projects/**/*.jsonl（只读）
-   ├── 经 Agent SDK 续聊（packages/agent-bridge）
+   ├── 经 Agent SDK 续聊、改名与分支（packages/agent-bridge）
    └── 审批状态机（packages/interactions，SQLite）
 cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 ```
 
 ## 会话数据
 
-- JSONL 是唯一的数据来源。Claude Code 对话时逐行追加，daemon 增量 tail 实现实时镜像，自己不写 JSONL。
+- JSONL 是会话数据的来源。Claude Code 对话时逐行追加，daemon 增量 tail 实现实时镜像。会话变更都交给 Claude Code 或 Claude Agent SDK。daemon 本身只读转录文件，改名与分支分别调用官方 `renameSession()` 和 `forkSession()`。
 - `claude --resume <id>` 返回同一个 session_id，并追加到原文件；`--fork-session` 才会复制出新文件。手机续聊和终端续聊因此写的是同一个文件。
 - 手机建的会话要能出现在终端 `/resume` 列表里：CLI 会隐藏 entrypoint 为 `sdk-cli`/`sdk-ts`/`sdk-py` 的会话，所以 `sdk-bridge.ts` 把子进程的 `CLAUDE_CODE_ENTRYPOINT` 设为 `claude-remote`。SDK 的 `options.env` 会整体替换子进程环境，必须自己带上 `process.env`。历史会话可用 `scripts/unhide-sdk-sessions.mjs` 修复。
 - 驾驶状态（`watch/activity.ts`）分三种：`daemon-driving`（手机端有运行中的轮次）、`terminal-driving`（运行之外检测到文件写入）、`idle`。只要仍有存活 CLI 登记该会话，静默超时也保持终端占用，手机须等终端 `/exit` 后再接管，不区分登记中的 busy/idle。`cli-presence.ts` 每 2 秒读取 `~/.claude/sessions/<pid>.json` 并缓存存活集合供冷却检查使用，存活登记即使还没有写入（daemon 重启、刚 resume、会话未被订阅）也直接判为终端占用；daemon 经 SDK 起的子进程登记的 entrypoint 为 `claude-remote`，不计入；启动时先完成一轮读取，已见过的进程退出后自动释放。无存活登记的旧版 CLI 仍按 `ACTIVITY_COOLDOWN_MS`（默认 120 秒）回落 idle。
@@ -49,8 +49,10 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 - daemon 用 `RelayManager` 管理这些 connector：各自退避、重连和发送心跳，单台失败不影响其他连接。不改变 relay 服务端或隧道协议。
 - 运行中改 relay 配置不必重启 daemon：`cr relay add/remove/on/off` 写完文件后调用仅本机的 `POST /api/relay/reload`，daemon 重读配置文件里的 `RELAY_*`，按地址 diff 增删 connector。参数（地址、密钥、设备身份）完全没变的连接原样保留，所以活跃轮次和手机连接都不受影响；成功后向所有 WS 连接广播 `{"type":"channels"}`。旧 daemon 没有这个接口时 cr 退回重启；端口、token、通知等进程级配置仍要重启。
 - 所有 relay 共用 `RELAY_DEVICE_ID` / `RELAY_DEVICE_KEY`。`add` 追加地址或更新已有地址的密钥；`remove <地址>` 重排编号并保留设备身份；`remove --all` 清除身份。每台 relay 都会收到设备私钥，并能看到转发的 token 和内容，因此仅适用于自己控制的服务器。
-- 配对码和 `GET /api/connect-info` 都在直连地址后追加所有已启用的 relay 地址，暂时故障的 relay 也保留。`connect-info` 返回 `{ bases: string[], relays: RelayStatus[] }`，不再返回单数 `relay`；未启用时 `relays` 为空，状态只含 `state`、`base`、`since` 和可选 `error`，不包含密钥。
+- 配对码和 `GET /api/connect-info` 都在直连地址后追加所有已启用的 relay 地址，暂时故障的 relay 也保留。`connect-info` 返回 `{ bases: string[], relays: RelayStatus[], daemonId: string }`。未启用时 `relays` 为空，状态只含 `state`、`base`、`since` 和可选 `error`。
 - `cr pair --tailscale` 写入私有 HTTPS Serve 地址，配对码与 `connect-info` 共同发布。daemon 只监听回环时，启用 Serve 后省略局域网和 Tailscale IP 直连地址。CLI 通过仅本机可用的 `POST /api/channels/refresh` 通知在线手机同步地址。
+- `daemonId` 是用于多端配对设备去重的安装标识。daemon 启动或 `cr setup` 首次需要时生成随机 UUID，保存在配置文件同目录的 `.data/DAEMON_ID`。进程环境或配置文件可显式设置 `DAEMON_ID`，有效值统一为小写。标识与 token、relay 密钥、主机名和通道地址独立，重启及 token 轮换后保持稳定。
+- `GET /api/health` 和 `GET /api/connect-info` 鉴权后返回 `daemonId`。本机 `GET /api/pair-info` 和配对 URI 发布同一个值。URI 保留 `v=1` 并追加 `&daemonId=<uuid>`，旧客户端可忽略这个参数。
 
 ## 手机端多通道
 
@@ -69,7 +71,7 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 
 ## 会话运行接口契约
 
-以下路径相对 daemon base；经 relay 时 base 包含 `/d/<deviceId>`。HTTP 使用 `Authorization: Bearer <token>`；WS 为 `/ws?token=<token>`。除配对接口外，未鉴权返回 `401 {"error":"unauthorized"}`。JSON 请求体上限 1 MiB，超出返回 413 `payload_too_large`；坏 JSON、空正文（停止接口除外）或 null/标量返回 400 `invalid_json`。客户端使用 JSON 对象传参。错误响应使用 `{ "error": "<code>" }`，必要时附加状态字段。
+以下路径相对 daemon base，经过 relay 时 base 包含 `/d/<deviceId>`。HTTP 使用 `Authorization: Bearer <token>`，WS 为 `/ws?token=<token>`。除配对接口外，未鉴权返回 `401 {"error":"unauthorized"}`。JSON 请求体上限 1 MiB，超出返回 413 `payload_too_large`。坏 JSON、null 或标量返回 400 `invalid_json`。客户端使用 JSON 对象传参，允许省略正文的写入接口会在其契约中注明。错误响应使用 `{ "error": "<code>" }`，必要时附加状态字段。
 
 ### 新建会话：`POST /api/sessions`
 
@@ -94,6 +96,19 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 ```
 
 `text` 必填；模型、权限校验同新建。cwd 从该会话 JSONL 读取，无 cwd 时回退 daemon 用户主目录；客户端不能在此覆盖 cwd。成功返回 `202 { "runId": "<uuid>" }`。未知会话返回 404 `session_not_found`，非空闲或已有活跃 run 返回 `409 { "error": "not_idle", "status": "terminal-driving" }` 或 `daemon-driving`。客户端应及时绑定响应 runId，并防止迟到响应覆盖更新的运行终态/新轮次。
+
+### 会话改名与分支（V2-06）
+
+| 请求 | 成功响应 |
+| --- | --- |
+| `PATCH /api/sessions/:id`，JSON `{ "title": "新标题" }` | `200`，返回与会话列表条目同形状的当前摘要，含 `sessionId`、`title`、`lastPreview`、`cwd`、`projectDirName`、`lastActiveAt`、`sizeBytes` 和 `status` |
+| `POST /api/sessions/:id/fork`，可省略正文，也可传 `{ "title": "分支标题" }` 或 `{}` | `201 { sessionId, parentSessionId, title?, cwd? }`，其中 `sessionId` 为新会话 ID，`parentSessionId` 为源会话 ID。省略标题时由 SDK 生成分支标题 |
+
+ID 须为 UUID，拒绝 `..`、路径分隔符及控制字符，非法返回 400 `invalid_session_id`。标题去除两端空白后须为 1–200 个 Unicode 码点，原始字符串不得含 NUL 或其他控制字符，非法返回 400 `invalid_title`。未知会话返回 404 `session_not_found`。两个接口只操作安全定位到的普通 JSONL 文件。SDK 数据目录按 `CLAUDE_CONFIG_DIR` 或默认 `~/.claude` 定位，源文件须有唯一匹配且已经写完最后一行。SDK 不可用、数据目录不匹配或无法读取结果时返回 503，错误分别为 `session_rename_unavailable`、`session_fork_unavailable`。
+
+改名和分支要求源会话空闲。daemon 重新检查存活 CLI 登记与自身驾驶状态，遇占用返回 `409 { "error": "not_idle", "status": "daemon-driving" }` 或 `terminal-driving`。同一个 daemon 在 SDK 操作期间拒绝这个会话的改名、分支、续聊与压缩，响应状态为 `daemon-driving`。外部 CLI 的启动独立于 daemon，正在使用源会话时应先退出 CLI，再发起请求。
+
+改名与分支成功后从转录重新读取摘要。会话列表和搜索按文件状态重用或更新摘要，原生 `custom-title` 或 `customTitle` 记录中最新的有效标题优先于首条用户消息，重启后也从转录恢复。分支复制会话历史并保留源转录，新会话立即可查。分支沿用项目工作目录，需要隔离项目文件时须另行准备工作目录或 Git worktree。SDK 分支不复制撤销快照。
 
 ### 消息身份与发送重试
 

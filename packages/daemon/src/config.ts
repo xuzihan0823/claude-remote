@@ -3,8 +3,10 @@
 // 缺 BRIDGE_TOKEN 抛 ConfigError 由入口拒绝启动；数值变量非法同样拒启
 // （静默回退默认值会掩盖配置错误，宁可启动失败）。
 
+import { randomUUID } from "node:crypto";
+import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import process from "node:process";
 
 import { deriveDeviceId, isDeviceId, isDeviceKey } from "@claude-remote/relay/protocol";
@@ -22,6 +24,7 @@ export interface RelaySettings {
 
 export interface DaemonConfig {
   token: string;
+  daemonId: string;
   host: string;
   port: number;
   projectsDir: string;
@@ -142,6 +145,45 @@ export function loadRelaySettings(env: NodeJS.ProcessEnv = process.env): RelaySe
   return entries.map((entry) => ({ ...entry, deviceId, deviceKey }));
 }
 
+function normalizeDaemonId(value: string): string {
+  const id = value.trim().toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) {
+    throw new ConfigError("DAEMON_ID must be a UUID");
+  }
+  return id;
+}
+
+export function ensureDaemonId(envFile: string, configured?: string): string {
+  if (configured?.trim()) return normalizeDaemonId(configured);
+
+  const dir = join(dirname(envFile), ".data");
+  const file = join(dir, "DAEMON_ID");
+  try {
+    return normalizeDaemonId(readFileSync(file, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  const id = randomUUID();
+  const temp = join(dir, `.daemon-id-${id}`);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(temp, `${id}\n`, { flag: "wx", mode: 0o600 });
+  try {
+    // An overlapping setup or daemon start can publish its UUID first.
+    linkSync(temp, file);
+    return id;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return normalizeDaemonId(readFileSync(file, "utf8"));
+  } finally {
+    unlinkSync(temp);
+  }
+}
+
+export function claudeProjectsDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join((env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")).normalize("NFC"), "projects");
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   const token = readString(env, "BRIDGE_TOKEN");
   if (token === undefined) {
@@ -156,9 +198,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   const relays = loadRelaySettings(env);
   return {
     token,
+    daemonId: ensureDaemonId(readString(env, "CLAUDE_REMOTE_ENV_FILE") ?? ".env", env.DAEMON_ID),
     host: readString(env, "BRIDGE_HOST") ?? "127.0.0.1",
     port,
-    projectsDir: readString(env, "CLAUDE_PROJECTS_DIR") ?? join(homedir(), ".claude", "projects"),
+    projectsDir: readString(env, "CLAUDE_PROJECTS_DIR") ?? claudeProjectsDir(env),
     uploadsDir: readString(env, "UPLOADS_DIR") ?? join(homedir(), ".claude-remote", "uploads"),
     cooldownMs: readInt(env, "ACTIVITY_COOLDOWN_MS", 120_000),
     interactionsDbPath: dbPath === ":memory:" || isAbsolute(dbPath) ? dbPath : join(process.cwd(), dbPath),

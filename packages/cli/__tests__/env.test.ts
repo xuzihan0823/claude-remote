@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { ensureToken, loadCliEnv, parseDotenv, upsertDotenv } from "../src/env.js";
+import { loadConfig } from "@claude-remote/daemon/config";
+import { ensureDaemonId, ensureToken, loadCliEnv, parseDotenv, upsertDotenv } from "../src/env.js";
 
 test("parseDotenv：引号、注释、export 前缀、空值", () => {
   const parsed = parseDotenv(`# c\nBRIDGE_TOKEN="a b#c"\nexport BRIDGE_PORT=8788 # 端口\nEMPTY=\nBAD LINE\nQ='x'`);
@@ -79,4 +80,27 @@ test("package 模式：配置与数据在 ~/.claude-remote（CLAUDE_REMOTE_HOME 
   assert.equal(action, "generated");
   assert.equal(statSync(a.envFile).mode & 0o777, 0o600);
   assert.equal(statSync(join(home, ".claude-remote")).mode & 0o777, 0o700);
+});
+
+test("DAEMON_ID persists across setup, daemon startup and token rotation", (t) => {
+  const dir = repo("BRIDGE_TOKEN=old-test-token\n");
+  const other = repo();
+  t.after(() => { for (const root of [dir, other]) rmSync(root, { recursive: true, force: true }); });
+  const envFile = join(dir, ".env");
+  const id = ensureDaemonId(envFile, {});
+  assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(readFileSync(join(dir, ".data", "DAEMON_ID"), "utf8").trim(), id);
+  assert.equal(readFileSync(envFile, "utf8"), "BRIDGE_TOKEN=old-test-token\n");
+  writeFileSync(envFile, "BRIDGE_TOKEN=rotated-test-token\n");
+  assert.equal(loadConfig({ CLAUDE_REMOTE_ENV_FILE: envFile, BRIDGE_TOKEN: "rotated-test-token" }).daemonId, id);
+  assert.equal(ensureDaemonId(envFile, {}), id);
+  const otherEnv = join(other, "config.env");
+  const otherId = loadConfig({ CLAUDE_REMOTE_ENV_FILE: otherEnv, BRIDGE_TOKEN: "rotated-test-token" }).daemonId;
+  assert.notEqual(otherId, id);
+  assert.equal(ensureDaemonId(otherEnv, {}), otherId);
+
+  writeFileSync(otherEnv, `DAEMON_ID=${id.toUpperCase()}\n`);
+  assert.equal(ensureDaemonId(otherEnv, {}), id);
+  assert.equal(ensureDaemonId(otherEnv, { DAEMON_ID: otherId }), otherId);
+  assert.throws(() => ensureDaemonId(otherEnv, { DAEMON_ID: "not-a-uuid" }), /DAEMON_ID must be a UUID/);
 });

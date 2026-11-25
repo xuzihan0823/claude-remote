@@ -1,23 +1,22 @@
 // 会话索引器：扫描 <projectsDir>/<编码目录>/<sessionId>.jsonl 产出 SessionSummary。
 // 对数据源只读。projectsDir 由调用方注入（默认值在调用侧给 ~/.claude/projects）。
 //
-// 每个文件两次有界读：
-//  - 头部流式读：拿 cwd（行内字段，不从目录名反解）与 title（首条真实 user 文本），拿齐即断流；
-//  - 尾部块读：拿 lastPreview（最后一条主链可显示消息——文件最后一条非 sidechain、
-//    非 isMeta 的 user/assistant 行必在主链上，无需整链回溯）。
+// 标题流式扫描完整转录，预览保持有界尾读。摘要只在文件状态改变时重新扫描。
 
 import { createReadStream } from "node:fs";
-import { open, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, open, readdir, realpath } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
-import { stripWrapperTags } from "./reader.js";
+import { isCustomTitleType, stripWrapperTags } from "./reader.js";
 import type { SessionSummary } from "./types.js";
 
 const TITLE_MAX_CHARS = 60;
 const PREVIEW_MAX_CHARS = 80;
 const PREVIEW_INITIAL_TAIL_BYTES = 64 * 1024;
 const PREVIEW_MAX_TAIL_BYTES = 1024 * 1024;
+const SUMMARY_CACHE_SIZE = 4096;
+const summaryCache = new Map<string, { signature: string; summary: SessionSummary | undefined }>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -71,6 +70,7 @@ function previewText(o: Record<string, unknown>): string {
 interface HeadInfo {
   cwd: string;
   title: string;
+  customTitle: string;
   /** 发起该会话的客户端（取首个带 cwd 的行上的 entrypoint）；旧版本无此字段时为 ""。 */
   entrypoint: string;
 }
@@ -79,15 +79,17 @@ interface HeadInfo {
 // 第三方模式的桌面端是 "claude-desktop-3p"，与 CLI 一样保留。
 const HIDDEN_ENTRYPOINTS = new Set(["claude-desktop"]);
 
-/** 头部流式扫：cwd 取首个带 cwd 字段的行；title 取首条真实 user 文本。拿齐即停。 */
-async function scanHead(filePath: string): Promise<HeadInfo> {
-  const stream = createReadStream(filePath, { encoding: "utf8" });
+async function scanMetadata(filePath: string, sessionId: string, size: number): Promise<HeadInfo> {
+  if (size === 0) return { cwd: "", title: "", customTitle: "", entrypoint: "" };
+  const stream = createReadStream(filePath, { encoding: "utf8", end: size - 1 });
   const lines = createInterface({ input: stream, crlfDelay: Infinity });
   let cwd = "";
   let title = "";
+  let customTitle = "";
   let entrypoint = "";
   try {
     for await (const line of lines) {
+      if (cwd !== "" && title !== "" && !line.includes('"customTitle"')) continue;
       const trimmed = line.trim();
       if (trimmed === "") continue;
       let o: unknown;
@@ -97,21 +99,29 @@ async function scanHead(filePath: string): Promise<HeadInfo> {
         continue;
       }
       if (!isRecord(o)) continue;
+      if (isCustomTitleType(o.type)) {
+        if (o.isSidechain !== true && (o.sessionId === undefined ||
+          (typeof o.sessionId === "string" && o.sessionId.toLowerCase() === sessionId.toLowerCase())) &&
+          typeof o.customTitle === "string" && !/\p{Cc}/u.test(o.customTitle) && o.customTitle.trim() !== "") {
+          customTitle = o.customTitle.trim();
+        }
+        continue;
+      }
       if (cwd === "" && typeof o.cwd === "string" && o.cwd !== "") {
         cwd = o.cwd;
         if (typeof o.entrypoint === "string") entrypoint = o.entrypoint;
+        if (HIDDEN_ENTRYPOINTS.has(entrypoint)) break;
       }
       if (title === "") {
         const text = realUserText(o);
         if (text !== "") title = toSingleLineTruncated(text, TITLE_MAX_CHARS);
       }
-      if (cwd !== "" && title !== "") break;
     }
   } finally {
     lines.close();
     stream.destroy();
   }
-  return { cwd, title, entrypoint };
+  return { cwd, title, customTitle, entrypoint };
 }
 
 /** 尾部块读最后一条非 sidechain、非 isMeta 的 user/assistant 行，提取预览文本。 */
@@ -151,14 +161,44 @@ async function scanLastPreview(filePath: string, fileSize: number): Promise<stri
   }
 }
 
+export async function readSessionSummary(filePath: string): Promise<SessionSummary | undefined> {
+  const stats = await lstat(filePath);
+  if (!stats.isFile()) return undefined;
+  const signature = `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}:${stats.ctimeMs}`;
+  const cached = summaryCache.get(filePath);
+  if (cached?.signature === signature) return cached.summary;
+
+  const sessionId = basename(filePath, ".jsonl");
+  const metadata = await scanMetadata(filePath, sessionId, stats.size);
+  const summary: SessionSummary | undefined = HIDDEN_ENTRYPOINTS.has(metadata.entrypoint) ? undefined : {
+    sessionId,
+    cwd: metadata.cwd,
+    projectDirName: basename(dirname(filePath)),
+    title: metadata.customTitle || metadata.title || "(空会话)",
+    lastPreview: await scanLastPreview(filePath, stats.size),
+    lastActiveAt: Math.round(stats.mtimeMs),
+    sizeBytes: stats.size,
+    status: "idle",
+  };
+  summaryCache.delete(filePath);
+  summaryCache.set(filePath, { signature, summary });
+  if (summaryCache.size > SUMMARY_CACHE_SIZE) {
+    const oldest = summaryCache.keys().next().value;
+    if (oldest !== undefined) summaryCache.delete(oldest);
+  }
+  return summary;
+}
+
 /**
  * 列出 projectsDir 下所有会话摘要（跳过官方桌面端会话），按 lastActiveAt 降序。
  * 目录不存在返回空数组；status 本卡固定 "idle"（真实状态由 03 卡覆盖）。
  */
 export async function listSessions(projectsDir: string): Promise<SessionSummary[]> {
+  let root: string;
   let projectDirs;
   try {
-    projectDirs = await readdir(projectsDir, { withFileTypes: true });
+    root = await realpath(projectsDir);
+    projectDirs = await readdir(root, { withFileTypes: true });
   } catch (error) {
     if (isRecord(error) && error.code === "ENOENT") return [];
     throw error;
@@ -167,7 +207,7 @@ export async function listSessions(projectsDir: string): Promise<SessionSummary[
   const summaries: SessionSummary[] = [];
   for (const projectDir of projectDirs) {
     if (!projectDir.isDirectory()) continue;
-    const dirPath = join(projectsDir, projectDir.name);
+    const dirPath = join(root, projectDir.name);
     let files;
     try {
       files = await readdir(dirPath, { withFileTypes: true });
@@ -178,20 +218,8 @@ export async function listSessions(projectsDir: string): Promise<SessionSummary[
       if (!file.isFile() || !file.name.endsWith(".jsonl")) continue;
       const filePath = join(dirPath, file.name);
       try {
-        const stats = await stat(filePath);
-        const head = await scanHead(filePath);
-        if (HIDDEN_ENTRYPOINTS.has(head.entrypoint)) continue;
-        const lastPreview = await scanLastPreview(filePath, stats.size);
-        summaries.push({
-          sessionId: file.name.slice(0, -".jsonl".length),
-          cwd: head.cwd,
-          projectDirName: projectDir.name,
-          title: head.title === "" ? "(空会话)" : head.title,
-          lastPreview,
-          lastActiveAt: Math.round(stats.mtimeMs),
-          sizeBytes: stats.size,
-          status: "idle",
-        });
+        const summary = await readSessionSummary(filePath);
+        if (summary !== undefined) summaries.push(summary);
       } catch {
         continue; // 文件消失等瞬态错误：跳过该文件
       }

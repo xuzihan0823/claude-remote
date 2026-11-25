@@ -11,6 +11,8 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { ensureDaemonId as ensureInstallationId } from "@claude-remote/daemon/config";
+
 export type TokenSource = "env" | "dotenv" | "keychain" | "none";
 
 /**
@@ -204,4 +206,8 @@ export function ensureToken(cliEnv: CliEnv): { token: string; action: "kept" | "
   mkdirSync(dirname(cliEnv.envFile), { recursive: true, mode: 0o700 });
   writeFileSync(cliEnv.envFile, upsertDotenv(current, "BRIDGE_TOKEN", token), { mode: 0o600 });
   return { token, action: migrated === undefined ? "generated" : "migrated" };
+}
+
+export function ensureDaemonId(envFile: string, env: NodeJS.ProcessEnv = process.env): string {
+  return ensureInstallationId(envFile, env.DAEMON_ID ?? readDotenv(envFile).DAEMON_ID);
 }

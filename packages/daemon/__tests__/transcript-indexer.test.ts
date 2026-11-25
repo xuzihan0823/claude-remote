@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, rm, utimes, writeFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdtemp, rm, utimes, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -135,4 +135,31 @@ test("official Claude Desktop sessions are hidden; 3p desktop and CLI sessions s
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("native titles survive long transcripts and use the latest valid record", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "claude-remote-title-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  await mkdir(project);
+  const file = join(project, `${basicId}.jsonl`);
+  const line = (record: object) => `${JSON.stringify(record)}\n`;
+  await writeFile(file,
+    line({ type: "user", uuid: "u1", cwd: "/project", message: { content: "first prompt" } }) +
+    line({ type: "custom-title", sessionId: basicId, customTitle: "first rename" }) +
+    line({ type: "assistant", uuid: "a1", parentUuid: "u1", message: { content: "x".repeat(1024 * 1024 + 1) } }) +
+    line({ type: "assistant", uuid: "a2", parentUuid: "a1", message: { content: "last response" } }),
+  );
+  assert.equal((await listSessions(root))[0]?.title, "first rename");
+  const latest = "新标题 🎉 ".repeat(20).trim();
+  await appendFile(file,
+    line({ type: "customTitle", customTitle: latest, sessionId: basicId }) +
+    line({ type: "custom-title", customTitle: "  " }) +
+    line({ type: "custom-title", customTitle: 42 }) +
+    line({ type: "custom-title", customTitle: "different session", sessionId: forkId }) +
+    line({ type: "custom-title", customTitle: "\u0000invalid" }),
+  );
+  const [summary] = await listSessions(root);
+  assert.equal(summary?.title, latest);
+  assert.equal(summary?.lastPreview, "last response");
 });

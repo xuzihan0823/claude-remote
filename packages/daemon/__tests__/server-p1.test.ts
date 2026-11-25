@@ -54,7 +54,7 @@ async function harness(t: TestContext, options: Pick<DaemonServerOptions, "effor
   const wire = memoryHttp(t);
   const terminal = new Set<string>();
   const server = new DaemonServer({
-    config: { token: TOKEN, host: "127.0.0.1", port: 0, projectsDir, uploadsDir: join(root, "uploads"),
+    config: { token: TOKEN, daemonId: "aaaaaaaa-2222-4333-8444-555555555555", host: "127.0.0.1", port: 0, projectsDir, uploadsDir: join(root, "uploads"),
       cooldownMs: 120000, interactionsDbPath: ":memory:", permissionTimeoutMs: 5000, relays: [] },
     tracker, watcher, approvals, runner, version: "fixture", notifier: async () => {}, claudeCliVersion: () => "2.1.330",
     isCliAlive: async (id) => terminal.has(id),

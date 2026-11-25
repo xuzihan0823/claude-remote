@@ -2,14 +2,15 @@
 // SDK 侧走 fake QueryFactory（不触真 SDK/网络）。fixture 会话文件建在临时目录。
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, mkdir, appendFile, readFile, writeFile, rm, symlink, truncate, utimes } from "node:fs/promises";
 import { request } from "node:http";
 import { homedir, tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { test, after } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 import { WebSocket } from "ws";
 
 import { InteractionManager, InteractionStore } from "@claude-remote/interactions";
@@ -17,6 +18,8 @@ import type { QueryFactory } from "@claude-remote/agent-bridge";
 
 import { ConfigError, loadConfig, type DaemonConfig } from "../src/config.js";
 import { readModelCatalog } from "../src/model-config.js";
+import { pairPayload } from "../src/pair.js";
+import type { SessionOperations } from "../src/session-operations.js";
 import { ApprovalBridge, TurnRunner, type ActivityGate, type Notifier } from "../src/run/index.js";
 import { DaemonServer, type RelayStatus } from "../src/server.js";
 import { ActivityTracker, type ActivityTrackerOptions } from "../src/watch/activity.js";
@@ -29,6 +32,7 @@ import { projectWorkspaces } from "./fixtures/project-workspaces.js";
 const SESSION_ID = "11111111-2222-3333-4444-555555555555";
 const SESSION_CWD = "/tmp/claude-remote-it";
 const TOKEN = "it-token";
+const DAEMON_ID = "aaaaaaaa-2222-4333-8444-555555555555";
 const PICKER_MODELS = Array.from({ length: 25 }, (_, index) => ({
   model: `provider-${index}/shared-model`, label: `Configured model ${index}`,
 }));
@@ -130,6 +134,7 @@ async function startHarness(
   trackerOptions: ActivityTrackerOptions = {},
   reloadRelays?: () => Promise<RelayStatus[]>,
   tailscaleServeUrl?: () => string | undefined,
+  sessionOperations?: SessionOperations,
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "claude-remote-it-"));
   const settingsPath = join(root, "settings.json");
@@ -147,6 +152,7 @@ async function startHarness(
 
   const config: DaemonConfig = {
     token: TOKEN,
+    daemonId: DAEMON_ID,
     host: "127.0.0.1",
     port: 0,
     projectsDir,
@@ -183,6 +189,7 @@ async function startHarness(
     effortOptions: async () => ({ levels: ["low", "high", "max"], verified: true }),
     ...(reloadRelays === undefined ? {} : { reloadRelays }),
     ...(tailscaleServeUrl === undefined ? {} : { tailscaleServeUrl }),
+    ...(sessionOperations === undefined ? {} : { sessionOperations }),
   });
   await server.listen();
   const { port } = server.address();
@@ -255,7 +262,7 @@ after(() => harness.dispose());
 test("loadConfig: 缺 BRIDGE_TOKEN 拒绝启动；默认值正确", () => {
   assert.throws(() => loadConfig({}), ConfigError);
   assert.throws(() => loadConfig({ BRIDGE_TOKEN: "  " }), ConfigError);
-  const config = loadConfig({ BRIDGE_TOKEN: "t" });
+  const config = loadConfig({ BRIDGE_TOKEN: "t", DAEMON_ID });
   assert.equal(config.host, "127.0.0.1");
   assert.equal(config.port, 8787);
   assert.equal(config.cooldownMs, 120_000);
@@ -273,7 +280,9 @@ test("鉴权：/api 无 token 401；错 token 401；对 token 放行", async () 
   const ok = await fetch(`${harness.base}/api/health`, authed());
   assert.equal(ok.status, 200);
   const health = await ok.json();
-  assert.deepEqual({ ...health, hostname: undefined }, { ok: true, version: "0.1.0-test", claudeCliVersion: "9.9.9-test", hostname: undefined });
+  assert.deepEqual({ ...health, hostname: undefined }, {
+    ok: true, version: "0.1.0-test", claudeCliVersion: "9.9.9-test", hostname: undefined, daemonId: DAEMON_ID,
+  });
   assert.equal(typeof health.hostname, "string");
 });
 
@@ -302,6 +311,11 @@ test("配对端点：本机直连放行；带代理特征头（隧道/反代）�
   assert.equal(direct.status, 200);
   const info = await direct.json();
   assert.equal(info.token, TOKEN);
+  assert.equal(info.daemonId, DAEMON_ID);
+  const payload = new URL(pairPayload(harness.server.pairInfo));
+  assert.equal(payload.searchParams.get("v"), "1");
+  assert.equal(payload.searchParams.get("token"), TOKEN);
+  assert.equal(payload.searchParams.get("daemonId"), DAEMON_ID);
   assert.ok(Array.isArray(info.bases));
 
   for (const header of ["x-forwarded-for", "cf-connecting-ip", "cf-ray", "x-real-ip", "forwarded"]) {
@@ -320,7 +334,8 @@ test("GET /api/connect-info：需鉴权；返回直连地址与 relay 状态，�
   const res = await fetch(`${harness.base}/api/connect-info`, authed());
   assert.equal(res.status, 200);
   const info = (await res.json()) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(info).sort(), ["bases", "relays"]);
+  assert.deepEqual(Object.keys(info).sort(), ["bases", "daemonId", "relays"]);
+  assert.equal(info.daemonId, DAEMON_ID);
   assert.deepEqual(info.bases, harness.server.pairInfo.bases);
   assert.deepEqual(info.relays, []);
   assert.equal(JSON.stringify(info).includes(TOKEN), false);
@@ -343,12 +358,169 @@ test("配置 Serve 后在线手机收到 channels，同步新地址，代理无�
   await sink.waitFor((frame) => frame.type === "channels");
 
   const res = await fetch(`${h.base}/api/connect-info`, authed({ headers }));
-  assert.deepEqual(await res.json(), { bases: [serve], relays: [] });
+  assert.deepEqual(await res.json(), { bases: [serve], relays: [], daemonId: DAEMON_ID });
   const pair = await fetch(`${h.base}/api/pair-info`);
-  assert.deepEqual(await pair.json(), { bases: [serve], token: TOKEN });
+  assert.deepEqual(await pair.json(), { bases: [serve], token: TOKEN, daemonId: DAEMON_ID });
   for (const path of ["/api/pair-info", "/api/pair-qr.svg"]) {
     assert.equal((await fetch(`${h.base}${path}`, { headers })).status, 403);
   }
+});
+
+test("session rename and fork use the official SDK and publish immediately readable summaries", async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = dirname(h.projectsDir);
+  t.after(() => {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  });
+  const source = `${h.base}/api/sessions/${SESSION_ID}`;
+  const list = async () => (await (await fetch(`${h.base}/api/sessions`, authed())).json() as { sessions: SessionSummary[] }).sessions;
+  const original = await readFile(h.sessionFile, "utf8");
+  assert.equal((await list())[0]?.title, "hello daemon");
+  for (const title of ["first rename", "最新标题 🎉"]) {
+    const renamed = await fetch(source, authed({ method: "PATCH", body: JSON.stringify({ title: `  ${title}  ` }) }));
+    assert.equal(renamed.status, 200);
+    const summary = await renamed.json();
+    assert.equal(summary.sessionId, SESSION_ID);
+    assert.equal(summary.title, title);
+    assert.equal(summary.lastPreview, "hi human");
+    assert.equal(summary.status, "idle");
+    assert.deepEqual((await list())[0], summary);
+  }
+  const renamedSource = await readFile(h.sessionFile, "utf8");
+  assert.ok(renamedSource.startsWith(original));
+  assert.match(renamedSource, /"type":"custom-title","customTitle":"最新标题 🎉"/);
+
+  for (const [body, title] of [[JSON.stringify({ title: "  新分支  " }), "新分支"], [undefined, "最新标题 🎉 (fork)"]] as const) {
+    const fork = await fetch(`${source}/fork`, authed({ method: "POST", ...(body === undefined ? {} : { body }) }));
+    assert.equal(fork.status, 201);
+    const forked = (await fork.json()) as { sessionId: string; parentSessionId: string; title: string; cwd: string };
+    assert.notEqual(forked.sessionId, SESSION_ID);
+    assert.deepEqual(forked, { sessionId: forked.sessionId, parentSessionId: SESSION_ID, title, cwd: SESSION_CWD });
+    assert.equal((await list()).find((s) => s.sessionId === forked.sessionId)?.title, title);
+    const messages = await fetch(`${h.base}/api/sessions/${forked.sessionId}/messages`, authed());
+    assert.equal(messages.status, 200);
+    const history = (await messages.json()) as { messages: Array<{ text?: string }> };
+    assert.deepEqual(history.messages.map((message) => message.text), ["hello daemon", "hi human"]);
+    assert.equal(await readFile(h.sessionFile, "utf8"), renamedSource);
+  }
+  const search = await fetch(`${h.base}/api/sessions/search?q=${encodeURIComponent("新分支")}`, authed());
+  const results = (await search.json()) as { results: SessionSummary[] };
+  assert.deepEqual(results.results.map((result) => result.title), ["新分支"]);
+  const readFromDisk = `const { listSessions } = await import(process.argv[1]);
+    process.stdout.write(JSON.stringify(await listSessions(process.argv[2])));`;
+  const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", readFromDisk,
+    new URL("../src/transcript/indexer.ts", import.meta.url).href, h.projectsDir]);
+  const reloaded = JSON.parse(stdout) as SessionSummary[];
+  assert.equal(reloaded.find((session) => session.sessionId === SESSION_ID)?.title, "最新标题 🎉");
+  assert.ok(reloaded.some((session) => session.title === "新分支"));
+});
+
+test("session edit routes reject unauthenticated, unsafe, invalid and unknown requests before invoking the SDK", async (t) => {
+  const unexpected = () => assert.fail("SDK should not be called");
+  const h = await startHarness(async () => false, {}, undefined, undefined, { rename: unexpected, fork: unexpected });
+  t.after(() => h.dispose());
+  const unknown = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const linked = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  await symlink(h.sessionFile, join(dirname(h.sessionFile), `${linked}.jsonl`));
+  for (const method of ["PATCH", "POST"]) {
+    const url = (id: string) => `${h.base}/api/sessions/${id}${method === "POST" ? "/fork" : ""}`;
+    const request = (id: string, body = '{"title":"title"}') => fetch(url(id), authed({ method, body }));
+    assert.equal((await fetch(url(SESSION_ID), { method })).status, 401);
+    for (const id of ["not-a-uuid", "foo..bar", "%2F", "%5c", "%00", "%E0%A4"]) {
+      const invalid = await request(id);
+      assert.equal(invalid.status, 400);
+      assert.deepEqual(await invalid.json(), { error: "invalid_session_id" });
+    }
+    for (const body of ["[]", "null", "42", "{"]) {
+      const invalid = await request(SESSION_ID, body);
+      assert.equal(invalid.status, 400);
+      assert.deepEqual(await invalid.json(), { error: "invalid_json" });
+    }
+    for (const title of ["   ", "\ttrimmed", "line\nbreak", "\u0000", "\u0085", "🎉".repeat(201), 17, null]) {
+      const invalid = await request(SESSION_ID, JSON.stringify({ title }));
+      assert.equal(invalid.status, 400);
+      assert.deepEqual(await invalid.json(), { error: "invalid_title" });
+    }
+    for (const id of [unknown, linked]) {
+      const missing = await request(id);
+      assert.equal(missing.status, 404);
+      assert.deepEqual(await missing.json(), { error: "session_not_found" });
+    }
+  }
+  const missingTitle = await fetch(`${h.base}/api/sessions/${SESSION_ID}`, authed({ method: "PATCH", body: "{}" }));
+  assert.equal(missingTitle.status, 400);
+  assert.deepEqual(await missingTitle.json(), { error: "invalid_title" });
+});
+
+test("session edits reject daemon and terminal driving, including newly detected CLI presence", async (t) => {
+  let cliAlive = false;
+  const unexpected = () => assert.fail("SDK should not be called");
+  const h = await startHarness(async () => cliAlive, {}, undefined, undefined, { rename: unexpected, fork: unexpected });
+  t.after(() => h.dispose());
+  const source = `${h.base}/api/sessions/${SESSION_ID}`;
+  const check = async (status: string) => {
+    for (const [path, method] of [["", "PATCH"], ["/fork", "POST"]] as const) {
+      const response = await fetch(`${source}${path}`, authed({ method, body: '{"title":"blocked"}' }));
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), { error: "not_idle", status });
+    }
+  };
+  const accepted = await fetch(`${source}/messages`, authed({ method: "POST", body: '{"text":"run"}' }));
+  assert.equal(accepted.status, 202);
+  await check("daemon-driving");
+  const settled = once(h.tracker, "change");
+  h.sdk.finish();
+  await settled;
+  assert.equal(h.tracker.getStatus(SESSION_ID), "idle");
+  cliAlive = true;
+  await check("terminal-driving");
+  cliAlive = false;
+  h.tracker.noteCliAlive(SESSION_ID);
+  await check("terminal-driving");
+});
+
+test("a pending SDK fork excludes concurrent session writes and releases the lock on failure", async (t) => {
+  let markEntered: () => void = () => {};
+  let release: () => void = () => {};
+  const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+  const blockedSdk = new Promise<void>((resolve) => { release = resolve; });
+  const fork: SessionOperations["fork"] = async (_file, id, title) => {
+    assert.equal(id, SESSION_ID);
+    assert.equal(title, undefined);
+    markEntered();
+    await blockedSdk;
+    throw new Error("local SDK failure");
+  };
+  const h = await startHarness(async () => false, {}, undefined, undefined, {
+    fork,
+    rename: async (file, id, title) => appendFile(file, jsonlLine({ type: "custom-title", sessionId: id, customTitle: title })),
+  });
+  t.after(() => h.dispose());
+  const source = `${h.base}/api/sessions/${SESSION_ID}`;
+  const pending = fetch(`${source}/fork`, authed({ method: "POST", body: "{}" }));
+  try {
+    await Promise.race([entered, pending.then((res) => assert.fail(`fork returned early: ${res.status}`))]);
+    for (const [path, method, body] of [
+      ["/fork", "POST", "{}"], ["", "PATCH", '{"title":"queued"}'], ["/messages", "POST", '{"text":"queued"}'],
+      ["/compact", "POST", JSON.stringify({ clientMessageId: DAEMON_ID })],
+    ] as const) {
+      const blocked = await fetch(`${source}${path}`, authed({ method, body }));
+      assert.equal(blocked.status, 409);
+      assert.deepEqual(await blocked.json(), { error: "not_idle", status: "daemon-driving" });
+    }
+  } finally {
+    release();
+  }
+  const failed = await pending;
+  assert.equal(failed.status, 503);
+  assert.deepEqual(await failed.json(), { error: "session_fork_unavailable" });
+  const title = "🎉".repeat(200);
+  const renamed = await fetch(source, authed({ method: "PATCH", body: JSON.stringify({ title }) }));
+  assert.equal(renamed.status, 200);
+  assert.equal((await renamed.json()).title, title);
 });
 
 test("WS 应用层心跳：ping 立即回 pong，且不影响后续订阅帧", async (t) => {

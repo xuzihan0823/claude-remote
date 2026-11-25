@@ -6,6 +6,7 @@ import { parseEnv } from "node:util";
 export interface PairInfo {
   bases: string[];
   token: string;
+  daemonId: string;
 }
 
 export function isLoopbackAddress(address: string | undefined): boolean {
@@ -96,5 +97,5 @@ export function pairBases(port: number, relayBases: string[] = [], serve?: { bas
 
 export function pairPayload(info: PairInfo): string {
   const bases = info.bases.map((base) => encodeURIComponent(base)).join(",");
-  return `claude-remote://setup?v=1&token=${encodeURIComponent(info.token)}&bases=${bases}`;
+  return `claude-remote://setup?v=1&token=${encodeURIComponent(info.token)}&bases=${bases}&daemonId=${encodeURIComponent(info.daemonId)}`;
 }

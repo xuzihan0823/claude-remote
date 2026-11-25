@@ -20,7 +20,7 @@ import {
 } from "./daemon-control.js";
 import { CONFIG_FIELDS, findField, readConfig, rotateToken, setConfig } from "./config.js";
 import { countProjects, detectClaude, inspectClaude, type DetectDeps, type DetectedClaude } from "./detect.js";
-import { ensureToken, loadCliEnv } from "./env.js";
+import { ensureDaemonId, ensureToken, loadCliEnv } from "./env.js";
 import { isTailscaleAddress, normalizeTailscaleServeUrl } from "@claude-remote/daemon/pair";
 import { readRelayFile, snapshotRelayLine } from "./relay.js";
 import { configureTailscaleServe } from "./tailscale.js";
@@ -317,6 +317,7 @@ export function setupClaude(envFile: string, deps: DetectDeps = {}): DetectedCla
 
 export async function cmdSetup(ctx: Context, binPath: string): Promise<void> {
   const { action } = ensureToken(ctx.env);
+  ensureDaemonId(ctx.env.envFile);
   const where = ctx.env.mode === "repo" ? ".env" : ctx.env.envFile.replace(homedir(), "~");
   const tokenMsg = {
     kept: `沿用 ${where} 里的 BRIDGE_TOKEN`,

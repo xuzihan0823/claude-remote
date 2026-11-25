@@ -27,9 +27,10 @@ import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo 
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
 import { FileAccessError, IMAGE_FILE_LIMIT_BYTES, SESSION_FILE_LIMIT_BYTES, fileMeta, fileTypeOf, openRequestedFile, parseRange, type SessionFile } from "./session-file-access.js";
 import { isSafeSessionId, readSessionCwd, resolveSessionFile } from "./session-files.js";
+import { sdkSessionOperations, type SessionOperations } from "./session-operations.js";
 import { StreamBuffer } from "./run/stream-buffer.js";
 import { approvalLink, NotIdleError, sessionLink, RunRequestError, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
-import { listSessions } from "./transcript/indexer.js";
+import { listSessions, readSessionSummary } from "./transcript/indexer.js";
 import { buildProjectIndex } from "./transcript/projects.js";
 import { readBefore, readTail, readTranscriptUsage } from "./transcript/reader.js";
 import { searchSessions } from "./transcript/search.js";
@@ -50,6 +51,7 @@ const MESSAGES_LIMIT_MAX = 500;
 const WS_HEARTBEAT_MS = 30_000;
 const MAX_SIDE_QUESTION_BYTES = 32 * 1024;
 const MAX_COMPACT_INSTRUCTIONS_BYTES = 8 * 1024;
+const MAX_SESSION_TITLE_CHARS = 200;
 
 const VALID_PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "auto", "bypassPermissions"]);
 type PermissionMode = ExternalPermissionMode;
@@ -65,6 +67,7 @@ export interface DaemonServerOptions {
   /** 返回启动时探测的 claude CLI 版本（未就绪/失败时 "unknown"）。 */
   claudeCliVersion: () => string;
   isCliAlive: (sessionId: string) => Promise<boolean>;
+  sessionOperations?: SessionOperations;
   /** 新建会话尚未落盘时，等待 watcher 可用的上限。 */
   newSessionWatchTimeoutMs?: number;
   /** 测试/嵌入方可注入；默认每次请求重新读取 Mac 设置，以反映即时切换。 */
@@ -117,6 +120,7 @@ export class DaemonServer {
   readonly #wss: WebSocketServer;
   readonly #clients = new Map<WebSocket, ClientState>();
   readonly #activeRuns = new Map<string, TurnHandle>();
+  readonly #sessionEdits = new Set<string>();
   readonly #newSessions = new Map<string, NodeJS.Timeout>();
   readonly #messageRequests = new Map<string, { sessionId: string; runId: string; clientMessageId: string; expiresAt: number }>();
   readonly #watchActivations = new Set<string>();
@@ -158,8 +162,8 @@ export class DaemonServer {
 
   /** 配对信息（候选地址每次现查——Tailscale 可能在 daemon 启动后才拉起）；listen() 后用实际端口。 */
   get pairInfo(): PairInfo {
-    const { token } = this.#options.config;
-    return { bases: this.#connectionBases(this.#options.relayStatuses?.() ?? []), token };
+    const { token, daemonId } = this.#options.config;
+    return { bases: this.#connectionBases(this.#options.relayStatuses?.() ?? []), token, daemonId };
   }
 
   #connectionBases(relays: RelayStatus[]): string[] {
@@ -275,13 +279,14 @@ export class DaemonServer {
         version: this.#options.version,
         claudeCliVersion: this.#options.claudeCliVersion(),
         hostname: hostname(),
+        daemonId: this.#options.config.daemonId,
       });
       return;
     }
 
     if (method === "GET" && path === "/api/connect-info") {
       const relays = this.#options.relayStatuses?.() ?? [];
-      this.#json(res, 200, { bases: this.#connectionBases(relays), relays });
+      this.#json(res, 200, { bases: this.#connectionBases(relays), relays, daemonId: this.#options.config.daemonId });
       return;
     }
 
@@ -339,6 +344,15 @@ export class DaemonServer {
 
     if (method === "GET" && path === "/api/commands") {
       await this.#handleCommands(res, url);
+      return;
+    }
+
+    // Match the raw path so URL dot-segment normalization cannot hide an unsafe ID.
+    const rawPath = req.url?.split("?", 1)[0] ?? "";
+    const editMatch = method === "PATCH" ? /^\/api\/sessions\/([^/]+)$/.exec(rawPath)
+      : method === "POST" ? /^\/api\/sessions\/([^/]+)\/fork$/.exec(rawPath) : null;
+    if (editMatch !== null) {
+      await this.#handleSessionEdit(req, res, decodePathSegment(editMatch[1]), method === "POST");
       return;
     }
 
@@ -492,6 +506,71 @@ export class DaemonServer {
       status: this.#options.tracker.getStatus(summary.sessionId),
     }));
     this.#json(res, 200, { sessions, total: filtered.length });
+  }
+
+  async #handleSessionEdit(req: IncomingMessage, res: ServerResponse, sessionId: string, fork: boolean): Promise<void> {
+    if (!isSafeSessionId(sessionId) || !isUuid(sessionId)) {
+      this.#json(res, 400, { error: "invalid_session_id" });
+      return;
+    }
+    const body = await this.#readJsonBody(req, res, fork);
+    if (body === undefined) return;
+    if (Array.isArray(body)) {
+      this.#json(res, 400, { error: "invalid_json" });
+      return;
+    }
+    const rawTitle = (body as { title?: unknown }).title;
+    const title = typeof rawTitle === "string" && !/\p{Cc}/u.test(rawTitle) ? rawTitle.trim() : "";
+    if ((!fork || rawTitle !== undefined) && (title === "" || Array.from(title).length > MAX_SESSION_TITLE_CHARS)) {
+      this.#json(res, 400, { error: "invalid_title" });
+      return;
+    }
+
+    const file = await this.#p1SessionFile(res, sessionId);
+    if (file === undefined) return;
+    const summary = await readSessionSummary(file).catch((error: unknown) => {
+      if (!isEnoent(error)) throw error;
+      return undefined;
+    });
+    if (summary === undefined) {
+      this.#json(res, 404, { error: "session_not_found" });
+      return;
+    }
+
+    const { isCliAlive, sessionOperations = sdkSessionOperations, config, tracker } = this.#options;
+    const cliAlive = await isCliAlive(sessionId);
+    if (this.#rejectClosing(res) || this.#rejectSessionWrite(res, sessionId, cliAlive)) return;
+    const lockId = sessionId.toLowerCase();
+    this.#sessionEdits.add(lockId);
+    try {
+      if (!fork) {
+        await sessionOperations.rename(file, sessionId, title);
+        const updated = await readSessionSummary(file);
+        if (updated === undefined) throw new Error("Renamed session is unavailable");
+        this.#json(res, 200, { ...updated, status: tracker.getStatus(sessionId) });
+      } else {
+        const { sessionId: newId } = await sessionOperations.fork(file, sessionId, title || undefined);
+        if (!isUuid(newId) || newId.toLowerCase() === lockId) throw new Error("Invalid fork session ID");
+        const forkFile = await resolveSessionFile(config.projectsDir, newId);
+        const created = await readSessionSummary(forkFile);
+        if (created === undefined) throw new Error("Forked session is unavailable");
+        this.#json(res, 201, {
+          sessionId: newId, parentSessionId: sessionId, title: created.title,
+          ...(created.cwd === "" ? {} : { cwd: created.cwd }),
+        });
+      }
+    } catch {
+      this.#json(res, 503, { error: fork ? "session_fork_unavailable" : "session_rename_unavailable" });
+    } finally {
+      this.#sessionEdits.delete(lockId);
+    }
+  }
+
+  #rejectSessionWrite(res: ServerResponse, sessionId: string, cliAlive = false): boolean {
+    const status = this.#sessionEdits.has(sessionId.toLowerCase()) ? "daemon-driving" : this.#options.tracker.getStatus(sessionId);
+    if (status === "idle" && !cliAlive) return false;
+    this.#json(res, 409, { error: "not_idle", status: status === "idle" ? "terminal-driving" : status });
+    return true;
   }
 
   async #handleSearch(res: ServerResponse, url: URL): Promise<void> {
@@ -795,21 +874,14 @@ export class DaemonServer {
     }
     let previous = runner.compactReceipt(sessionId, clientMessageId);
     if (previous) { this.#json(res, 202, { ...previous, sessionId, replayed: true }); return; }
-    if (tracker.getStatus(sessionId) !== "idle") {
-      this.#json(res, 409, { error: "not_idle", status: tracker.getStatus(sessionId) });
-      return;
-    }
+    if (this.#rejectSessionWrite(res, sessionId)) return;
     const file = await this.#p1SessionFile(res, sessionId);
     if (!file) return;
     const cwd = (await readSessionCwd(file)) || homedir();
     const cliAlive = await this.#options.isCliAlive(sessionId);
     previous = runner.compactReceipt(sessionId, clientMessageId);
     if (previous) { this.#json(res, 202, { ...previous, sessionId, replayed: true }); return; }
-    if (this.#rejectClosing(res)) return;
-    if (cliAlive) {
-      this.#json(res, 409, { error: "not_idle", status: cliAlive ? "terminal-driving" : tracker.getStatus(sessionId) });
-      return;
-    }
+    if (this.#rejectClosing(res) || this.#rejectSessionWrite(res, sessionId, cliAlive)) return;
     if (this.#hasMessageRequest(sessionId, clientMessageId) || runner.steerReceipt(sessionId, clientMessageId)) {
       this.#json(res, 409, { error: "message_id_conflict" });
       return;
@@ -1074,11 +1146,8 @@ export class DaemonServer {
     const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
     if (effort === false) return;
     const cliAlive = await this.#options.isCliAlive(sessionId);
-    if (this.#rejectClosing(res) || this.#repeatMessage(res, sessionId, clientMessageId)) return;
-    if (cliAlive) {
-      this.#json(res, 409, { error: "not_idle", status: "terminal-driving" });
-      return;
-    }
+    if (this.#rejectClosing(res) || this.#repeatMessage(res, sessionId, clientMessageId) ||
+      this.#rejectSessionWrite(res, sessionId, cliAlive)) return;
     if (clientMessageId !== undefined && (this.#options.runner.steerReceipt(sessionId, clientMessageId) ||
       this.#options.runner.compactReceipt(sessionId, clientMessageId))) {
       this.#json(res, 409, { error: "message_id_conflict" });

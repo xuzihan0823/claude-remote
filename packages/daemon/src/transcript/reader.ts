@@ -28,6 +28,10 @@ const KNOWN_META_TYPES = new Set([
   "todo",
 ]);
 
+export function isCustomTitleType(type: unknown): boolean {
+  return type === "custom-title" || type === "customTitle";
+}
+
 /** CLI 注入的包裹标签：剥掉后剩余才算真实用户文本。 */
 const WRAPPER_TAGS = [
   "local-command-caveat",
@@ -176,7 +180,7 @@ export function parseTranscriptLine(line: string, seq: number): RenderMessage[] 
     return [];
   }
   if (!isRecord(o)) return [];
-  if (o.isSidechain === true) return [];
+  if (o.isSidechain === true || isCustomTitleType(o.type)) return [];
   const type = typeof o.type === "string" ? o.type : "";
   const base = baseOf(o, seq);
   if (base === null) return [];
@@ -284,6 +288,7 @@ function indexLine(text: string, seq: number, offset: number, length: number): L
     entry.bad = true;
     return entry;
   }
+  if (isCustomTitleType(o.type)) return entry;
   if (typeof o.uuid === "string") entry.uuid = o.uuid;
   if (typeof o.parentUuid === "string") entry.parentUuid = o.parentUuid;
   if (typeof o.type === "string") entry.type = o.type;

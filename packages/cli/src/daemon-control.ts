@@ -10,7 +10,7 @@ import { isLoopbackAddress, pairBases, pairPayload, readTailscaleServeUrl, type 
 
 import { Api, ApiError, type ApprovalCard, type ConnectInfo, type SessionSummary } from "./api.js";
 import { AttachedDaemon } from "./attached.js";
-import { readDotenv, type CliEnv } from "./env.js";
+import { ensureDaemonId, readDotenv, type CliEnv } from "./env.js";
 import { Launchd, packageProgram, repoProgram, type LaunchdState, type LaunchProgram } from "./launchd.js";
 import { readRelayFile, runRelay, type RelayFileState, type RestartResult } from "./relay.js";
 
@@ -209,7 +209,11 @@ export function pairInfo(ctx: Context): PairInfo | undefined {
   const base = readTailscaleServeUrl(ctx.env.envFile);
   const loopbackOnly = ctx.env.host === "localhost" || isLoopbackAddress(ctx.env.host);
   const serve = base === undefined ? undefined : { base, loopbackOnly };
-  return { bases: pairBases(ctx.env.port, configuredRelayBases(ctx.env.envFile), serve), token: ctx.env.token };
+  return {
+    bases: pairBases(ctx.env.port, configuredRelayBases(ctx.env.envFile), serve),
+    token: ctx.env.token,
+    daemonId: ensureDaemonId(ctx.env.envFile),
+  };
 }
 
 /**

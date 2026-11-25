@@ -14,7 +14,7 @@ import { open, lstat, realpath } from "node:fs/promises";
 import { join } from "node:path";
 
 import { resolveSessionFile } from "../session-files.js";
-import { parseTranscriptLine } from "../transcript/reader.js";
+import { isCustomTitleType, parseTranscriptLine } from "../transcript/reader.js";
 import type { RenderMessage } from "../transcript/types.js";
 
 // ---------------------------------------------------------------------------
@@ -409,6 +409,7 @@ function lineChainInfo(line: string): ChainInfo | null {
   }
   if (typeof o !== "object" || o === null || Array.isArray(o)) return null;
   const record = o as Record<string, unknown>;
+  if (isCustomTitleType(record.type)) return null;
   return {
     uuid: typeof record.uuid === "string" ? record.uuid : null,
     parentUuid: typeof record.parentUuid === "string" ? record.parentUuid : null,
