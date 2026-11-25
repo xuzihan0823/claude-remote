@@ -165,8 +165,8 @@ test("重复决策与坏输入全是结构化结果，绝不抛异常", async ()
     assert.deepEqual(app.bridge.decide(card.interactionId, { type: "deny" }), { status: "already_resolved" });
     assert.deepEqual(app.bridge.decide("no-such-id", { type: "allow_once" }), { status: "not_found" });
     assert.deepEqual(
-      app.bridge.decide(card.interactionId, { type: "reboot" } as unknown as Parameters<Harness["bridge"]["decide"]>[1]),
-      { status: "invalid", message: "unknown decision type" },
+      app.bridge.decide(card.interactionId, { type: "reboot" }),
+      { status: "invalid", message: "unknown or conflicting decision type" },
     );
     await pending;
   } finally {
@@ -191,7 +191,7 @@ test("决策类型与交互种类不匹配 → invalid", async () => {
     assert.equal(mismatch2.status, "invalid");
     const badAnswers = app.bridge.decide(
       questionCard.interactionId,
-      { type: "answer", answers: null } as unknown as Parameters<Harness["bridge"]["decide"]>[1],
+      { type: "answer", answers: null },
     );
     assert.equal(badAnswers.status, "invalid");
     // 缺答案（漏题）也 invalid
@@ -440,11 +440,57 @@ test("a late HTTP decision conflicts and broadcasts an expired approval", async 
   t.mock.method(Date, "now", () => now);
   const app = harness({ ttlMs: 60_000 });
   t.after(() => app.close());
-  const waiting = app.bridge.request(approvalRequest(), new AbortController().signal);
+  const canUseTool = createPermissionAdapter(app.bridge, { sessionKey: "sess-1", userId: "web" }, { timeoutMs: 60_000 });
+  const waiting = canUseTool("ExitPlanMode", { plan: "# Plan" }, {
+    signal: new AbortController().signal, requestId: "deadline", toolUseID: "tool",
+    suggestions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }],
+  });
   const card = app.cards()[0]!;
   now = card.expiresAt;
-  assert.deepEqual(app.bridge.decide(card.interactionId, { type: "allow_once" }), { status: "already_resolved" });
-  assert.equal((await waiting).type, "deny");
+  assert.deepEqual(app.bridge.decide(card.interactionId, {
+    type: "allow_once", applySuggestionIds: ["deadline:0"],
+  }), { status: "already_resolved" });
+  assert.equal((await waiting)?.behavior, "deny");
   assert.deepEqual(app.resolved(), [{ type: "approval.resolved", interactionId: card.interactionId, status: "expired" }]);
   assert.deepEqual(app.bridge.pending(), []);
+});
+
+test("an unexpected resolution error cancels a native rule choice and denies the SDK", async (t) => {
+  const app = harness();
+  t.after(() => app.close());
+  const canUseTool = createPermissionAdapter(app.bridge, { sessionKey: "sess-1", userId: "web" });
+  const pending = canUseTool("Read", {}, {
+    signal: new AbortController().signal, requestId: "store-error", toolUseID: "tool",
+    suggestions: [{ type: "addRules", behavior: "allow", rules: [{ toolName: "Read" }], destination: "userSettings" }],
+  });
+  const card = app.cards()[0]!;
+  const failure = t.mock.method(app.manager, "resolve", () => { throw new Error("storage unavailable"); });
+  const decision = { type: "allow_once", applySuggestionIds: ["store-error:0"] };
+  assert.deepEqual(app.bridge.decide(card.interactionId, decision), { status: "invalid", message: "approval decision failed" });
+  failure.mock.restore();
+  assert.equal((await pending)?.behavior, "deny");
+  assert.equal(app.manager.get(card.interactionId)?.status, "denied");
+  assert.deepEqual(app.bridge.decide(card.interactionId, decision), { status: "already_resolved" });
+});
+
+test("restarting with a registered native suggestion denies the pending approval without replay", async (t) => {
+  const app = harness();
+  t.after(() => app.close());
+  const canUseTool = createPermissionAdapter(app.bridge, { sessionKey: "sess-1", userId: "web" });
+  const pending = canUseTool("Read", {}, {
+    signal: new AbortController().signal, requestId: "before-restart", toolUseID: "tool",
+    suggestions: [{ type: "addRules", behavior: "allow", rules: [{ toolName: "Read" }], destination: "projectSettings" }],
+  });
+  const card = app.cards()[0]!;
+  app.manager.close();
+  const restarted = new InteractionManager(app.manager.store);
+  t.after(() => restarted.close());
+  const bridge = new ApprovalBridge({ manager: restarted });
+  assert.equal((await pending)?.behavior, "deny");
+  const record = restarted.get(card.interactionId);
+  assert.equal(record?.status, "denied");
+  assert.deepEqual(record?.payload.suggestions, card.suggestions);
+  assert.deepEqual(bridge.decide(card.interactionId, { type: "allow_once", applySuggestionIds: ["before-restart:0"] }),
+    { status: "already_resolved" });
+  assert.deepEqual(bridge.pending(), []);
 });

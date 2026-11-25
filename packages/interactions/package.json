@@ -13,6 +13,9 @@
     "test": "tsx --test __tests__/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@claude-remote/agent-bridge": "workspace:*"
+  },
   "devDependencies": {
     "typescript": "^5.9.0",
     "tsx": "^4.20.0",

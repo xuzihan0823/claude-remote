@@ -1,5 +1,6 @@
 import type {
-  SDKCompactBoundaryMessage, SDKControlGetContextUsageResponse, SDKRateLimitInfo, SDKResultMessage, SDKUserMessage, SlashCommand,
+  PermissionUpdate, PermissionUpdateDestination, SDKCompactBoundaryMessage, SDKControlGetContextUsageResponse,
+  SDKRateLimitInfo, SDKResultMessage, SDKUserMessage, SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk";
 export type { RewindFilesResult } from "@anthropic-ai/claude-agent-sdk";
 
@@ -81,7 +82,29 @@ export type WorkerEvent =
   | { type: "tool_result"; toolUseId: string; content: string; isError: boolean; messageId?: string }
   | ({ type: "result"; subtype: string; isError: boolean; result?: string; errors?: string[]; messageId: string; inputIds?: string[]; turnModelUsage?: Record<string, unknown> } & ResultUsage);
 
+export interface PermissionSuggestion {
+  id: string;
+  destination: PermissionUpdateDestination;
+  type: PermissionUpdate["type"];
+  description: string;
+}
+
+export interface PlanApproval {
+  text?: string;
+  filePath?: string;
+  allowedPrompts?: Array<{ tool: string; prompt: string }>;
+}
+
+export interface PermissionMetadata {
+  suggestions?: PermissionSuggestion[];
+  decisionReason?: string;
+  blockedPath?: string;
+  agentId?: string;
+  toolUseId?: string;
+  plan?: PlanApproval;
+}
+
 export type InteractionDecision =
-  | { type: "allow_once" }
+  | { type: "allow_once"; applySuggestionIds?: string[] }
   | { type: "deny"; message?: string }
   | { type: "answer"; answers: Record<string, string> };

@@ -14,13 +14,13 @@ import { promisify } from "node:util";
 import { WebSocket } from "ws";
 
 import { InteractionManager, InteractionStore } from "@claude-remote/interactions";
-import type { QueryFactory } from "@claude-remote/agent-bridge";
+import { createPermissionAdapter, type QueryFactory } from "@claude-remote/agent-bridge";
 
 import { ConfigError, loadConfig, type DaemonConfig } from "../src/config.js";
 import { readModelCatalog } from "../src/model-config.js";
 import { pairPayload } from "../src/pair.js";
 import type { SessionOperations } from "../src/session-operations.js";
-import { ApprovalBridge, TurnRunner, type ActivityGate, type Notifier } from "../src/run/index.js";
+import { ApprovalBridge, TurnRunner, type ActivityGate, type ApprovalCard, type Notifier } from "../src/run/index.js";
 import { DaemonServer, type RelayStatus } from "../src/server.js";
 import { resolveSessionFile } from "../src/session-files.js";
 import { ActivityTracker, type ActivityTrackerOptions } from "../src/watch/activity.js";
@@ -1295,6 +1295,141 @@ test("审批闭环：approval 帧广播 → HTTP 决议 200 → resolved 帧；�
     method: "POST", body: JSON.stringify({ type: "wat" }),
   }));
   assert.equal(invalid.status, 400);
+});
+
+test("plan approval exposes native suggestions over WS and HTTP, and applies only selected IDs", async (t) => {
+  const sink = new FrameSink(harness.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  const canUseTool = createPermissionAdapter(harness.bridge, { sessionKey: SESSION_ID, userId: "web" });
+  const input = { plan: "# Plan\n\nRun the project tests.\n", allowedPrompts: [{ tool: "Bash", prompt: "run tests" }] };
+  const mode = { type: "setMode", destination: "session", mode: "acceptEdits" } as const;
+  const rule = { type: "addRules", destination: "localSettings", behavior: "allow", rules: [{ toolName: "Read" }] } as const;
+  const localRule = { ...rule, rules: [...rule.rules] };
+  const pending = canUseTool("ExitPlanMode", input, {
+    signal: new AbortController().signal, requestId: "plan", toolUseID: "plan-tool", agentID: "plan-agent",
+    title: "Approve plan?", decisionReason: "Ready to implement", blockedPath: "/tmp/example",
+    suggestions: [mode, localRule],
+  });
+  const frame = await sink.waitFor((frame) => frame.type === "approval");
+  const card = frame.interaction as ApprovalCard;
+  assert.deepEqual(card.plan, { text: input.plan, allowedPrompts: input.allowedPrompts });
+  assert.deepEqual(card.input, input);
+  assert.equal(card.prompt, "Approve plan?");
+  assert.equal(card.toolUseId, "plan-tool");
+  assert.equal(card.agentId, "plan-agent");
+  assert.equal(card.decisionReason, "Ready to implement");
+  assert.equal(card.blockedPath, "/tmp/example");
+  assert.deepEqual(card.suggestions, [
+    { id: "plan:0", destination: "session", type: "setMode", description: "Set permission mode to acceptEdits" },
+    { id: "plan:1", destination: "localSettings", type: "addRules", description: "Add allow rules: Read" },
+  ]);
+  const url = `${harness.base}/api/interactions/${card.interactionId}/decision`;
+  const decide = (body: unknown) => fetch(url, authed({ method: "POST", body: JSON.stringify(body) }));
+  for (const body of [
+    { decision: "allow_once", applySuggestionIds: "plan:0" },
+    { decision: "allow_once", applySuggestionIds: null },
+    { decision: "allow_once", applySuggestionIds: [0] },
+    { decision: "allow_once", applySuggestionIds: [localRule] },
+    { decision: "allow_once", applySuggestionIds: ["plan:0", "plan:0"] },
+    { decision: "allow_once", applySuggestionIds: ["plan:0", "plan:2"] },
+    { decision: "allow_once", applySuggestionIds: ["another-request:0"] },
+    { decision: "allow_once", applySuggestionIds: ["plan:0"], updatedPermissions: [localRule] },
+    { decision: "deny", applySuggestionIds: ["plan:0"] },
+    { decision: "allow_once", type: "deny" },
+  ]) {
+    const response = await decide(body);
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.equal((await response.json() as { error: string }).error, "invalid");
+    const listed = await fetch(`${harness.base}/api/interactions/pending`, authed());
+    assert.deepEqual(await listed.json(), { interactions: [card] });
+  }
+  assert.equal(sink.frames.some((frame) => frame.type === "approval.resolved"), false);
+  const chosen = await decide({ decision: "allow_once", applySuggestionIds: ["plan:1"] });
+  assert.equal(chosen.status, 200);
+  assert.deepEqual(await chosen.json(), { status: "allowed" });
+  assert.deepEqual(await pending, { behavior: "allow", updatedInput: input, updatedPermissions: [localRule] });
+  await sink.waitFor((frame) => frame.type === "approval.resolved" && frame.interactionId === card.interactionId);
+  assert.equal((await decide({ decision: "allow_once", applySuggestionIds: ["plan:0"] })).status, 409);
+});
+
+test("ordinary approvals and legacy deny and answer decisions keep their SDK behavior", async () => {
+  const canUseTool = createPermissionAdapter(harness.bridge, { sessionKey: SESSION_ID, userId: "web" });
+  const decide = async (body: unknown) => {
+    const card = harness.bridge.pending()[0];
+    assert.ok(card);
+    const res = await fetch(`${harness.base}/api/interactions/${card.interactionId}/decision`,
+      authed({ method: "POST", body: JSON.stringify(body) }));
+    assert.equal(res.status, 200);
+    return res.json();
+  };
+  const sdkOptions = { signal: new AbortController().signal, requestId: "plain", toolUseID: "tool" };
+  const update = { type: "addRules", destination: "userSettings", behavior: "allow", rules: [{ toolName: "Read" }] } as const;
+  for (const [index, body] of [{ decision: "allow_once" }, { type: "allow_once", applySuggestionIds: [] }].entries()) {
+    const pending = canUseTool("Read", {}, {
+      ...sdkOptions, requestId: `plain-${index}`, suggestions: [{ ...update, rules: [...update.rules] }],
+    });
+    assert.deepEqual(await decide(body), { status: "allowed" });
+    assert.deepEqual(await pending, { behavior: "allow", updatedInput: {} });
+  }
+  const denied = canUseTool("Read", {}, sdkOptions);
+  assert.deepEqual(await decide({ decision: "deny", message: "Review first" }), { status: "denied" });
+  assert.deepEqual(await denied, { behavior: "deny", message: "Review first" });
+  const input = { questions: [{ question: "Continue?", header: "Confirm", multiSelect: false,
+    options: [{ label: "Yes", description: "Continue" }, { label: "No", description: "Stop" }] }] };
+  const answered = canUseTool("AskUserQuestion", input, sdkOptions);
+  const answers = { "Continue?": "Yes" };
+  assert.deepEqual(await decide({ decision: "answer", answers }), { status: "answered" });
+  assert.deepEqual(await answered, { behavior: "allow", updatedInput: { ...input, answers } });
+});
+
+test("losing the last WebSocket denies a pending native suggestion", { timeout: 5_000 }, async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  const sink = new FrameSink(h.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  const canUseTool = createPermissionAdapter(h.bridge, { sessionKey: SESSION_ID, userId: "web" });
+  const pending = canUseTool("ExitPlanMode", { plan: "# Plan" }, {
+    signal: new AbortController().signal, requestId: "disconnect", toolUseID: "tool",
+    suggestions: [{ type: "setMode", destination: "session", mode: "acceptEdits" }],
+  });
+  const frame = await sink.waitFor((frame) => frame.type === "approval");
+  const card = frame.interaction as ApprovalCard;
+  sink.close();
+  assert.equal((await pending)?.behavior, "deny");
+  assert.deepEqual(h.bridge.pending(), []);
+  const late = await fetch(`${h.base}/api/interactions/${card.interactionId}/decision`, authed({
+    method: "POST", body: JSON.stringify({ decision: "allow_once", applySuggestionIds: ["disconnect:0"] }),
+  }));
+  assert.equal(late.status, 409);
+});
+
+test("disconnect during the decision body denies the pending approval", { timeout: 5_000 }, async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  const canUseTool = createPermissionAdapter(h.bridge, { sessionKey: SESSION_ID, userId: "web" });
+  const pending = canUseTool("Read", {}, {
+    signal: new AbortController().signal, requestId: "http-disconnect", toolUseID: "tool",
+    suggestions: [{ type: "setMode", destination: "session", mode: "acceptEdits" }],
+  });
+  const card = h.bridge.pending()[0];
+  assert.ok(card);
+  const url = `${h.base}/api/interactions/${card.interactionId}/decision`;
+  const body = JSON.stringify({ decision: "allow_once", applySuggestionIds: ["http-disconnect:0"] });
+  const interrupted = request(url, { method: "POST", headers: {
+    Authorization: `Bearer ${TOKEN}`, Expect: "100-continue", "Content-Length": Buffer.byteLength(body),
+  } });
+  t.after(() => { interrupted.destroy(); });
+  interrupted.on("error", () => {});
+  const continued = once(interrupted, "continue");
+  interrupted.flushHeaders();
+  await continued;
+  interrupted.write(body.slice(0, -1));
+  interrupted.destroy();
+  assert.equal((await pending)?.behavior, "deny");
+  const late = await fetch(url, authed({ method: "POST", body }));
+  assert.equal(late.status, 409);
 });
 
 test("GET /api/sessions/search：默认只搜标题/路径；full=1 搜全文并给片段；空 q 400", async () => {

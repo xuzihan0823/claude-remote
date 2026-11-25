@@ -121,6 +121,10 @@ importers:
         version: 5.9.3
 
   packages/interactions:
+    dependencies:
+      '@claude-remote/agent-bridge':
+        specifier: workspace:*
+        version: link:../agent-bridge
     devDependencies:
       '@types/node':
         specifier: ^24.0.0

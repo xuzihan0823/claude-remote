@@ -286,6 +286,35 @@ run.state 为 started/done/error；`error` 和 `permissionMode` 可选，permiss
 
 客户端 `{ "type": "ping" }` 收到 `{ "type": "pong" }`，与订阅无关。会话快照及上述 HTTP/WS 行为由 `server.test.ts` 集成测试覆盖。
 
+### 权限规则建议与规划审批（V2-09）
+
+WS `approval` 帧的 `interaction` 与 `GET /api/interactions/pending` 的 `interactions` 元素使用同一结构。原有 `interactionId`、`sessionId`、`kind`、`toolName`、`input`、`prompt`、`expiresAt` 及问答的 `questions` 保持兼容。`prompt` 优先使用 SDK 的 `title`，问答仍按单题提示。SDK 提供时另含 `decisionReason`、`blockedPath`、`agentId` 和 `toolUseId`。
+
+`ExitPlanMode` 附带 `plan` 对象。SDK 工具输入包含 `plan` 正文时，`plan.text` 提供完整原文。`plan.filePath` 优先取输入中的 `planFilePath`，兼容 `filePath`。结构有效的 `allowedPrompts` 以 `plan.allowedPrompts` 返回，每项为 `{ tool, prompt }`。字段按实际输入出现，其余原生内容保留在 `input`。`allowedPrompts` 是供展示的原生计划提示。在计划卡上批准或拒绝使用同一决策接口。
+
+`suggestions` 只来自当前 `CanUseTool` 的 SDK 建议。SDK 省略时响应也省略。每项含 `{ id, destination, type, description }`，其中 `type` 是 `addRules`、`replaceRules`、`removeRules`、`setMode`、`addDirectories` 或 `removeDirectories`。客户端应在确认前展示动作及 `destination`，并将 `id` 当作仅在此条审批中有效的字符串。
+
+| `destination` | SDK 作用范围和保存位置 |
+| --- | --- |
+| `session` | 当前 SDK/CLI 会话的运行时权限 |
+| `cliArg` | 当前 SDK/CLI 进程的命令行级运行时设置 |
+| `localSettings` | 项目本地设置 `.claude/settings.local.json` |
+| `projectSettings` | 项目共享设置 `.claude/settings.json` |
+| `userSettings` | 用户级 `$CLAUDE_CONFIG_DIR/settings.json`，默认 `~/.claude/settings.json` |
+
+`POST /api/interactions/:id/decision` 接收以下请求，兼容用 `type` 表示同一个决策。两者同时出现时值必须一致。
+
+```json
+{ "decision": "allow_once", "applySuggestionIds": ["<suggestion-id>"] }
+{ "decision": "deny", "message": "请先修订计划" }
+{ "decision": "answer", "answers": { "问题原文": "选项" } }
+```
+
+`applySuggestionIds` 仅用于批准，须为唯一字符串 ID 的数组。每个 ID 都必须命中该待决审批在 SQLite 中登记的建议；错误类型、重复、未知 ID 或额外字段（包括客户端提交的规则对象）返回 `400 { "error": "invalid", "message": "..." }`，保留待决状态。省略或传空数组仅批准当前调用。显式选中的更新由当前回调按 SDK 提供顺序交回 `PermissionResult.updatedPermissions`。SDK/CLI 负责应用规则和写入相应设置。`200` 表示审批已受理，规则是否写入由 SDK/CLI 决定。
+
+成功响应为 `200 { "status": "allowed" | "denied" | "answered" }`。未知审批返回 404 `not_found`，已决议或已过期返回 409 `already_resolved`。首次有效决议生效，后续冲突请求无状态副作用。SDK 取消、超时、决策处理异常、最后一条已鉴权 WS 断开或 daemon 关闭均拒绝尚未决议的审批。决策 HTTP 请求在受理前断开时拒绝该审批。重启时拒绝数据库遗留的未决项并保留审计，已登记的规则不会自动重放。现有 SQLite JSON 载荷兼容旧记录。
+
+这组决策可改变当前运行中的实际权限，具体作用范围由选中的 SDK 建议决定。会话新建和续聊的 `permissionMode` 仍是下一次发起运行时的选择。当前审批的结果只由本次决策交给 SDK，客户端保留下一轮选择。
 
 ### 命令、补充指令、上下文、用量与任务
 

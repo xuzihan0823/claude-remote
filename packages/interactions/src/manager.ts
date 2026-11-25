@@ -18,6 +18,7 @@ export class InteractionUnauthorizedError extends Error {}
 export class InteractionAlreadyResolvedError extends Error {}
 export class InteractionTypeError extends Error {}
 export class InvalidInteractionAnswerError extends Error {}
+export class InvalidPermissionSuggestionError extends Error {}
 
 interface Waiter {
   resolve: (decision: Decision) => void;
@@ -230,6 +231,13 @@ export class InteractionManager {
     }
     if (record.kind === "question" && decision.type !== "answer") {
       throw new InteractionTypeError("question must be resolved with answers");
+    }
+    if (record.kind === "approval" && decision.type === "allow_once" && decision.applySuggestionIds !== undefined) {
+      const ids = decision.applySuggestionIds;
+      const allowed = new Set((record.payload as Approval).suggestions?.map(({ id }) => id));
+      if (!Array.isArray(ids) || new Set(ids).size !== ids.length || ids.some((id) => !allowed.has(id))) {
+        throw new InvalidPermissionSuggestionError("applySuggestionIds must contain unique IDs from this approval");
+      }
     }
     if (record.kind === "question" && decision.type === "answer") {
       const question = record.payload as Question;

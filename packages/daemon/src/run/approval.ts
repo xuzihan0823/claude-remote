@@ -7,7 +7,7 @@
 // 超时 auto-deny 与重启 auto-deny 由 interactions 包既有逻辑负责；本模块只在
 // awaitDecision 返回后按落库状态补发 approval.resolved（含 expired）。
 
-import type { InteractionDecision, PermissionBroker, PermissionRequest } from "@claude-remote/agent-bridge";
+import type { InteractionDecision, PermissionBroker, PermissionMetadata, PermissionRequest } from "@claude-remote/agent-bridge";
 import {
   InteractionAlreadyResolvedError,
   InteractionManager,
@@ -15,6 +15,7 @@ import {
   InteractionTypeError,
   InteractionUnauthorizedError,
   InvalidInteractionAnswerError,
+  InvalidPermissionSuggestionError,
   questionFromAskUserInput,
   type Approval,
   type Decision,
@@ -25,8 +26,8 @@ import {
 
 export type ResolvedStatus = "allowed" | "denied" | "answered" | "expired";
 
-/** WS `approval` 帧的 interaction 载荷（见 docs/api-contract.md）。 */
-export interface ApprovalCard {
+/** WS `approval` 帧的 interaction 载荷（见 docs/architecture.md）。 */
+export interface ApprovalCard extends PermissionMetadata {
   interactionId: string;
   sessionId: string;
   kind: "approval" | "question";
@@ -55,17 +56,50 @@ export interface ApprovalBridgeOptions {
   onEvent?: (event: ApprovalEvent) => void;
 }
 
-/** AskUserQuestion 多题拆成单题卡串行提问（沿旧项目 dev-worker 手法）。 */
-function splitQuestion(question: Question): Question[] {
-  return question.questions.map((item) => ({ questions: [item] }));
+const DECISION_FIELDS = { allow_once: ["applySuggestionIds"], deny: ["message"], answer: ["answers"] };
+
+function parseDecision(raw: unknown): Decision {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new InteractionTypeError("unknown decision type");
+  }
+  const body = raw as Record<string, unknown>;
+  const type = Object.hasOwn(body, "decision") ? body.decision : body.type;
+  if ((type !== "allow_once" && type !== "deny" && type !== "answer") ||
+      (Object.hasOwn(body, "type") && body.type !== type)) {
+    throw new InteractionTypeError("unknown or conflicting decision type");
+  }
+  const fields = ["type", "decision", ...DECISION_FIELDS[type]];
+  if (Object.keys(body).some((key) => !fields.includes(key))) {
+    throw new InteractionTypeError("unexpected decision field");
+  }
+  if (type === "allow_once") {
+    const ids = body.applySuggestionIds;
+    if (!Object.hasOwn(body, "applySuggestionIds")) return { type };
+    if (!Array.isArray(ids) || !ids.every((id): id is string => typeof id === "string")) {
+      throw new InvalidPermissionSuggestionError("applySuggestionIds must be an array of strings");
+    }
+    return ids.length === 0 ? { type } : { type, applySuggestionIds: ids };
+  }
+  if (type === "deny") {
+    if (!Object.hasOwn(body, "message")) return { type };
+    if (typeof body.message !== "string") throw new InteractionTypeError("message must be a string");
+    return { type, message: body.message };
+  }
+  const { answers } = body;
+  if (typeof answers !== "object" || answers === null || Array.isArray(answers)) {
+    throw new InvalidInteractionAnswerError("answers must be an object");
+  }
+  const entries = Object.entries(answers);
+  if (!entries.every((entry): entry is [string, string] => typeof entry[1] === "string")) {
+    throw new InvalidInteractionAnswerError("answers must contain string values");
+  }
+  return { type, answers: Object.fromEntries(entries) };
 }
 
 export class ApprovalBridge implements PermissionBroker {
   readonly #manager: InteractionManager;
   readonly #onEvent: ((event: ApprovalEvent) => void) | undefined;
-  readonly #resolvedEmitted = new Set<string>();
-  /** 已发出卡片但尚未决议的交互（后连上的客户端如 CLI 用它补齐，WS 广播只覆盖在线连接）。 */
-  readonly #pending = new Map<string, ApprovalCard>();
+  readonly #pending = new Map<string, { card: ApprovalCard; controller: AbortController; signal: AbortSignal }>();
 
   constructor(options: ApprovalBridgeOptions) {
     this.#manager = options.manager;
@@ -75,28 +109,21 @@ export class ApprovalBridge implements PermissionBroker {
   /** SDK 审批入口（经 permission-adapter 调用）。fail-closed：异常一律 deny。 */
   async request(request: PermissionRequest, signal: AbortSignal): Promise<InteractionDecision> {
     try {
-      if (request.kind === "approval") {
+      if (signal.aborted) return { type: "deny", message: "Interaction cancelled" };
+      const { sessionKey, userId, kind, requestId: _requestId, toolName, input, prompt, ...metadata } = request;
+      if (kind === "approval") {
         const record = this.#manager.createApproval({
-          sessionKey: request.sessionKey,
-          userId: request.userId,
-          payload: { toolName: request.toolName, input: request.input, prompt: request.prompt },
+          sessionKey, userId, payload: { toolName, input, prompt, ...metadata },
         });
-        this.#emitCard(record);
-        const decision = await this.#manager.awaitDecision(record.interactionId, signal);
-        this.#emitResolved(record.interactionId, decision.type === "deny" ? "denied" : undefined);
-        return decision;
+        return await this.#waitForDecision(record, signal);
       }
 
       const answers: Record<string, string> = {};
-      for (const payload of splitQuestion(questionFromAskUserInput(request.input))) {
+      for (const question of questionFromAskUserInput(input).questions) {
         const record = this.#manager.createQuestion({
-          sessionKey: request.sessionKey,
-          userId: request.userId,
-          payload,
+          sessionKey, userId, payload: { questions: [question], ...metadata },
         });
-        this.#emitCard(record);
-        const decision = await this.#manager.awaitDecision(record.interactionId, signal);
-        this.#emitResolved(record.interactionId, decision.type === "deny" ? "denied" : undefined);
+        const decision = await this.#waitForDecision(record, signal);
         if (decision.type !== "answer") return { type: "deny", message: "Question was not answered" };
         Object.assign(answers, decision.answers);
       }
@@ -110,44 +137,77 @@ export class ApprovalBridge implements PermissionBroker {
   }
 
   /** HTTP 决策入口（POST /api/interactions/:id/decision）。永不抛异常。 */
-  decide(interactionId: string, decision: Decision): DecideOutcome {
-    if (
-      typeof decision !== "object" || decision === null ||
-      (decision.type !== "allow_once" && decision.type !== "deny" && decision.type !== "answer")
-    ) {
-      return { status: "invalid", message: "unknown decision type" };
-    }
-    if (decision.type === "answer" && (typeof decision.answers !== "object" || decision.answers === null)) {
-      return { status: "invalid", message: "answers must be an object" };
-    }
+  decide(interactionId: string, raw: unknown): DecideOutcome {
     try {
-      if (this.#resolvedEmitted.has(interactionId)) return { status: "already_resolved" };
+      const decision = parseDecision(raw);
       const record = this.#manager.get(interactionId);
       if (record === undefined) return { status: "not_found" };
+      const pending = this.#pending.get(interactionId);
+      if (pending === undefined || pending.signal.aborted || record.status !== "pending") {
+        return { status: "already_resolved" };
+      }
       // 单用户系统：鉴权在 HTTP Bearer 层，这里用记录自身的 userId 决议。
       const resolution = this.#manager.resolve(interactionId, record.userId, decision);
-      this.#emitResolved(interactionId);
+      if (resolution.record.status !== "pending") this.#emitResolved(interactionId, resolution.record.status);
       const { status } = resolution.record;
       return status === "allowed" || status === "denied" || status === "answered"
         ? { status } : { status: "already_resolved" };
     } catch (error) {
-      if (error instanceof InteractionAlreadyResolvedError) return { status: "already_resolved" };
+      if (error instanceof InteractionAlreadyResolvedError) {
+        this.cancelPending(interactionId);
+        return { status: "already_resolved" };
+      }
       if (error instanceof InteractionNotFoundError) return { status: "not_found" };
       if (error instanceof InteractionUnauthorizedError) return { status: "invalid", message: "unauthorized" };
-      if (error instanceof InteractionTypeError || error instanceof InvalidInteractionAnswerError) {
+      if (error instanceof InteractionTypeError || error instanceof InvalidInteractionAnswerError ||
+          error instanceof InvalidPermissionSuggestionError) {
         return { status: "invalid", message: error.message };
       }
-      return { status: "invalid", message: error instanceof Error ? error.message : String(error) };
+      this.cancelPending(interactionId);
+      return { status: "invalid", message: "approval decision failed" };
     }
+  }
+
+  cancelPending(interactionId?: string): void {
+    if (interactionId !== undefined) {
+      this.#pending.get(interactionId)?.controller.abort();
+      return;
+    }
+    for (const { controller } of this.#pending.values()) controller.abort();
   }
 
   /** 当前待决审批卡片，按创建先后。 */
   pending(): ApprovalCard[] {
     const now = Date.now();
-    return [...this.#pending.values()].filter((card) => card.expiresAt > now);
+    return [...this.#pending.values()].flatMap(({ card, signal }) =>
+      !signal.aborted && card.expiresAt > now ? [card] : []);
   }
 
-  #emitCard(record: InteractionRecord): void {
+  async #waitForDecision(record: InteractionRecord, signal: AbortSignal): Promise<Decision> {
+    const { interactionId } = record;
+    const controller = new AbortController();
+    const combined = AbortSignal.any([signal, controller.signal]);
+    try {
+      const waiting = this.#manager.awaitDecision(interactionId, combined);
+      if (!combined.aborted) {
+        const card = this.#card(record);
+        this.#pending.set(interactionId, { card, controller, signal: combined });
+        this.#emit({ type: "approval", interaction: card });
+      }
+      const decision = await waiting;
+      if (this.#pending.has(interactionId)) {
+        const status = this.#manager.get(interactionId)?.status;
+        this.#emitResolved(interactionId, status === undefined || status === "pending" ? "denied" : status);
+      }
+      return combined.aborted ? { type: "deny", message: "Interaction cancelled" } : decision;
+    } catch (error) {
+      controller.abort();
+      this.#emitResolved(interactionId, "denied");
+      throw error;
+    }
+  }
+
+  #card(record: InteractionRecord): ApprovalCard {
     const base = {
       interactionId: record.interactionId,
       sessionId: record.sessionKey,
@@ -155,37 +215,21 @@ export class ApprovalBridge implements PermissionBroker {
       expiresAt: record.expiresAt,
     };
     if (record.kind === "approval") {
-      const payload = record.payload as Approval;
-      const card: ApprovalCard = { ...base, toolName: payload.toolName, input: payload.input, prompt: payload.prompt };
-      this.#pending.set(card.interactionId, card);
-      this.#emit({ type: "approval", interaction: card });
-      return;
+      return { ...base, ...record.payload as Approval };
     }
-    const payload = record.payload as Question;
-    const card: ApprovalCard = {
+    const { questions, ...metadata } = record.payload as Question;
+    return {
       ...base,
+      ...metadata,
       toolName: "AskUserQuestion",
-      input: { questions: payload.questions },
-      prompt: payload.questions[0]?.question ?? "AskUserQuestion",
-      questions: payload.questions,
+      input: { questions },
+      prompt: questions[0]?.question ?? "AskUserQuestion",
+      questions,
     };
-    this.#pending.set(card.interactionId, card);
-    this.#emit({ type: "approval", interaction: card });
   }
 
-  /** 按落库终态补发 approval.resolved；decide 与 awaitDecision 续体都会走到，Set 去重。 */
-  #emitResolved(interactionId: string, fallback?: ResolvedStatus): void {
-    if (this.#resolvedEmitted.has(interactionId)) return;
-    let status = fallback;
-    try {
-      const record = this.#manager.get(interactionId);
-      if (record !== undefined && record.status !== "pending") status = record.status;
-    } catch (error) {
-      if (status === undefined) throw error;
-    }
-    if (status === undefined) return;
-    this.#pending.delete(interactionId);
-    this.#resolvedEmitted.add(interactionId);
+  #emitResolved(interactionId: string, status: ResolvedStatus): void {
+    if (!this.#pending.delete(interactionId)) return;
     this.#emit({ type: "approval.resolved", interactionId, status });
   }
 

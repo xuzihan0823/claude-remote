@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 
 import {
   InteractionAlreadyResolvedError,
   InteractionManager,
   InteractionUnauthorizedError,
+  InvalidPermissionSuggestionError,
 } from "../src/manager.js";
 import { decisionToAgentSdkResult } from "../src/sdk-contract.js";
 import { InteractionStore } from "../src/store.js";
@@ -248,4 +253,65 @@ test("an expiry callback denies its waiters even if SQLite cannot record the tim
   now += 5;
   t.mock.timers.tick(5);
   assert.equal((await waiter).type, "deny");
+});
+
+test("suggestion choices are validated against the persisted approval before settling", async (t) => {
+  const context = setup();
+  t.after(() => context.close());
+  const payload = {
+    toolName: "ExitPlanMode", input: {}, prompt: "Approve?", plan: { text: "# Plan" },
+    suggestions: [{ id: "native:0", type: "setMode", destination: "session", description: "Accept edits" }],
+  } as const;
+  const approval = context.manager.createApproval({
+    sessionKey: "s", userId: "u", payload: { ...payload, suggestions: [...payload.suggestions] },
+  });
+  assert.deepEqual(context.store.get(approval.interactionId)?.payload, payload);
+  const waiter = context.manager.awaitDecision(approval.interactionId);
+  for (const applySuggestionIds of [["fake"], ["native:0", "native:0"], ["native:0", "native:1"]]) {
+    assert.throws(() => context.manager.resolve(approval.interactionId, "u", { type: "allow_once", applySuggestionIds }),
+      InvalidPermissionSuggestionError);
+    assert.equal(context.store.get(approval.interactionId)?.status, "pending");
+  }
+  const decision = { type: "allow_once", applySuggestionIds: ["native:0"] } as const;
+  const result = context.manager.resolve(approval.interactionId, "u", { ...decision, applySuggestionIds: [...decision.applySuggestionIds] });
+  assert.deepEqual(result.record.decision, decision);
+  assert.deepEqual(await waiter, decision);
+});
+
+test("a legacy database keeps its pending payload and closes it safely on startup", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "interaction-v2-09-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const path = join(root, "legacy.sqlite");
+  const payload = { toolName: "Read", input: { file_path: "/tmp/example.txt" }, prompt: "Read?" };
+  const legacy = new DatabaseSync(path);
+  try {
+    legacy.exec(`CREATE TABLE interactions (
+      interaction_id TEXT PRIMARY KEY, session_key TEXT NOT NULL, user_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('approval', 'question')), payload TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'allowed', 'denied', 'answered', 'expired')),
+      expires_at INTEGER NOT NULL, resolved_at INTEGER, decision TEXT, created_at INTEGER NOT NULL
+    )`);
+    legacy.prepare("INSERT INTO interactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run("old-approval", "old-session", "owner", "approval", JSON.stringify(payload), "pending", 60_000, null, null, 1_000);
+  } finally {
+    legacy.close();
+  }
+  const store = new InteractionStore(path);
+  try {
+    assert.deepEqual(store.listPending().map((record) => record.payload), [payload]);
+    const manager = new InteractionManager(store, { now: () => 2_000 });
+    try {
+      const record = manager.get("old-approval");
+      assert.deepEqual(record?.payload, payload);
+      assert.equal(record?.status, "denied");
+      assert.equal(record?.decision?.type, "deny");
+      assert.equal(store.listAudit("old-approval").at(-1)?.action, "auto_deny_restart");
+      assert.throws(() => manager.resolve("old-approval", "owner", { type: "allow_once", applySuggestionIds: ["native:0"] }),
+        InteractionAlreadyResolvedError);
+    } finally {
+      manager.close();
+    }
+  } finally {
+    store.close();
+  }
 });

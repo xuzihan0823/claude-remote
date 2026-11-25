@@ -43,3 +43,55 @@ test("the absolute deadline denies an allow returned before the timeout callback
   } }, { sessionKey: "s", userId: "u" }, { timeoutMs: 50 });
   assert.equal((await callback("Bash", {}, options()))?.behavior, "deny");
 });
+
+test("ExitPlanMode exposes only native metadata and applies selected updates in SDK order", async () => {
+  const input = {
+    plan: "# Plan\n\n1. Review files.\n2. Run tests.\n",
+    planFilePath: "/tmp/plan.md",
+    allowedPrompts: [{ tool: "Bash", prompt: "run tests" }],
+    nativeExtra: true,
+  };
+  const suggestions: NonNullable<Parameters<ReturnType<typeof createPermissionAdapter>>[2]["suggestions"]> = [
+    { type: "setMode", mode: "acceptEdits", destination: "session" },
+    { type: "addRules", behavior: "allow", rules: [{ toolName: "Read", ruleContent: "test/**" }], destination: "localSettings" },
+    { type: "addDirectories", directories: ["/tmp/tests"], destination: "cliArg" },
+  ];
+  const callback = createPermissionAdapter({ request: async (request) => {
+    assert.deepEqual(request, {
+      requestId: "req", sessionKey: "s", userId: "u", kind: "approval", toolName: "ExitPlanMode",
+      input, prompt: "Approve plan?", decisionReason: "Plan complete", blockedPath: "/tmp/tests",
+      agentId: "agent", toolUseId: "tool",
+      plan: { text: input.plan, filePath: input.planFilePath, allowedPrompts: input.allowedPrompts },
+      suggestions: [
+        { id: "req:0", type: "setMode", destination: "session", description: "Set permission mode to acceptEdits" },
+        { id: "req:1", type: "addRules", destination: "localSettings", description: "Add allow rules: Read(test/**)" },
+        { id: "req:2", type: "addDirectories", destination: "cliArg", description: "Add directories: /tmp/tests" },
+      ],
+    });
+    return { type: "allow_once", applySuggestionIds: ["req:2", "req:0"] };
+  } }, { sessionKey: "s", userId: "u" });
+  assert.deepEqual(await callback("ExitPlanMode", input, {
+    ...options(), suggestions, title: "Approve plan?", decisionReason: "Plan complete",
+    blockedPath: "/tmp/tests", agentID: "agent",
+  }), { behavior: "allow", updatedInput: input, updatedPermissions: [suggestions[0], suggestions[2]] });
+});
+
+test("missing SDK suggestions are omitted and plain or empty approvals never return updates", async () => {
+  const allow = createPermissionAdapter({ request: async (request) => {
+    assert.equal(Object.hasOwn(request, "suggestions"), false);
+    assert.equal(Object.hasOwn(request, "plan"), false);
+    return { type: "allow_once" };
+  } }, { sessionKey: "s", userId: "u" });
+  assert.deepEqual(await allow("Read", {}, options()), { behavior: "allow", updatedInput: {} });
+
+  const sdkOptions = { ...options(), suggestions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }] } as const;
+  const nativeOptions = { ...sdkOptions, suggestions: [...sdkOptions.suggestions] };
+  for (const applySuggestionIds of [undefined, [], ["req:0", "req:0"], ["req:0", "req:1"], ["other:0"]]) {
+    const callback = createPermissionAdapter({ request: async () => ({
+      type: "allow_once", ...(applySuggestionIds === undefined ? {} : { applySuggestionIds }),
+    }) }, { sessionKey: "s", userId: "u" });
+    const result = await callback("Read", {}, nativeOptions);
+    if (applySuggestionIds?.length) assert.equal(result?.behavior, "deny");
+    else assert.deepEqual(result, { behavior: "allow", updatedInput: {} });
+  }
+});

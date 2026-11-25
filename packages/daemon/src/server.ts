@@ -209,6 +209,7 @@ export class DaemonServer {
     if (this.#closed) return;
     this.#closed = true;
     this.#options.runner.closeMetadata();
+    this.#options.approvals.cancelPending();
     if (this.#heartbeat !== undefined) clearInterval(this.#heartbeat);
     for (const timer of this.#watchRetryTimers.values()) clearTimeout(timer);
     this.#watchRetryTimers.clear();
@@ -1597,25 +1598,37 @@ export class DaemonServer {
   }
 
   async #handleDecision(req: IncomingMessage, res: ServerResponse, interactionId: string): Promise<void> {
-    const body = await this.#readJsonBody(req, res);
-    if (body === undefined) return;
-    if (this.#rejectClosing(res)) return;
-    const outcome = this.#options.approvals.decide(interactionId, body as never);
-    switch (outcome.status) {
-      case "allowed":
-      case "denied":
-      case "answered":
-        this.#json(res, 200, { status: outcome.status });
+    const cancelOnDisconnect = (): void => this.#options.approvals.cancelPending(interactionId);
+    res.once("close", cancelOnDisconnect);
+    try {
+      const body = await this.#readJsonBody(req, res);
+      if (res.destroyed || req.aborted) {
+        cancelOnDisconnect();
         return;
-      case "not_found":
-        this.#json(res, 404, { error: "not_found" });
-        return;
-      case "already_resolved":
-        this.#json(res, 409, { error: "already_resolved" });
-        return;
-      case "invalid":
-        this.#json(res, 400, { error: "invalid", message: outcome.message });
-        return;
+      }
+      if (body === undefined || this.#rejectClosing(res)) return;
+      const outcome = this.#options.approvals.decide(interactionId, body);
+      switch (outcome.status) {
+        case "allowed":
+        case "denied":
+        case "answered":
+          this.#json(res, 200, { status: outcome.status });
+          return;
+        case "not_found":
+          this.#json(res, 404, { error: "not_found" });
+          return;
+        case "already_resolved":
+          this.#json(res, 409, { error: "already_resolved" });
+          return;
+        case "invalid":
+          this.#json(res, 400, { error: "invalid", message: outcome.message });
+          return;
+      }
+    } catch (error) {
+      cancelOnDisconnect();
+      if (!res.destroyed && !req.aborted) throw error;
+    } finally {
+      res.off("close", cancelOnDisconnect);
     }
   }
 
@@ -1694,6 +1707,7 @@ export class DaemonServer {
     });
     ws.on("close", () => {
       this.#clients.delete(ws);
+      if (this.#clients.size === 0) this.#options.approvals.cancelPending();
       state.subscribing.clear();
       for (const sessionId of state.subs) this.#releaseWatch(sessionId);
     });

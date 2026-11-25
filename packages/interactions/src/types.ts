@@ -1,7 +1,9 @@
+import type { InteractionDecision, PermissionMetadata } from "@claude-remote/agent-bridge";
+
 export type InteractionKind = "approval" | "question";
 export type InteractionStatus = "pending" | "allowed" | "denied" | "answered" | "expired";
 
-export interface Approval {
+export interface Approval extends PermissionMetadata {
   toolName: string;
   input: Record<string, unknown>;
   prompt: string;
@@ -20,16 +22,13 @@ export interface QuestionItem {
   multiSelect: boolean;
 }
 
-export interface Question {
+export interface Question extends PermissionMetadata {
   questions: QuestionItem[];
 }
 
 export type InteractionPayload = Approval | Question;
 
-export type Decision =
-  | { type: "allow_once" }
-  | { type: "deny"; message?: string }
-  | { type: "answer"; answers: Record<string, string> };
+export type Decision = InteractionDecision;
 
 export interface InteractionRecord<T extends InteractionPayload = InteractionPayload> {
   interactionId: string;

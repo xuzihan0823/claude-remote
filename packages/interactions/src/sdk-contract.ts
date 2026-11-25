@@ -27,6 +27,9 @@ export function decisionToAgentSdkResult(
 ): AgentSdkPermissionResult {
   switch (decision.type) {
     case "allow_once":
+      if (decision.applySuggestionIds?.length) {
+        return { behavior: "deny", message: "Permission suggestions require the original SDK request" };
+      }
       return { behavior: "allow", updatedInput: originalInput };
     case "deny":
       return { behavior: "deny", message: decision.message ?? "User denied this action" };
