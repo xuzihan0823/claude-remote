@@ -1,5 +1,5 @@
 import type {
-  SDKCompactBoundaryMessage, SDKControlGetContextUsageResponse, SDKRateLimitInfo, SDKResultMessage, SlashCommand,
+  SDKCompactBoundaryMessage, SDKControlGetContextUsageResponse, SDKRateLimitInfo, SDKResultMessage, SDKUserMessage, SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk";
 export type { RewindFilesResult } from "@anthropic-ai/claude-agent-sdk";
 
@@ -50,6 +50,12 @@ export const TASK_OUTPUT_LIMIT = 4096;
 export function isTaskId(value: string): boolean {
   return /^[A-Za-z0-9_-]{1,128}$/.test(value);
 }
+
+type UserBlock = Exclude<SDKUserMessage["message"]["content"], string>[number];
+export type NativeImageMime = Extract<Extract<UserBlock, { type: "image" }>["source"], { type: "base64" }>["media_type"];
+export type NativeMediaInput =
+  | { mediaType: NativeImageMime; data: string }
+  | { mediaType: "application/pdf"; data: string; title: string };
 
 export type WorkerEvent =
   | TaskEvent

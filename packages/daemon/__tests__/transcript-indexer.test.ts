@@ -163,3 +163,22 @@ test("native titles survive long transcripts and use the latest valid record", a
   assert.equal(summary?.title, latest);
   assert.equal(summary?.lastPreview, "last response");
 });
+
+test("latest oversized media line supplies preview and pure media can title a session", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "cr-index-media-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  await mkdir(project);
+  const row = (content: unknown) => JSON.stringify({ type: "user", uuid: "u", cwd: "/project", message: { content } });
+  await writeFile(join(project, "media.jsonl"), [row("<system-reminder>skip</system-reminder>"),
+    row([{ type: "document" }]), row([{ type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA".repeat(300_000) } }]),
+    row([{ type: "text", text: "<command-name>skip</command-name>" }]),
+  ].join("\n"));
+  const [session] = await listSessions(root);
+  assert.equal(session?.title, "[文档]");
+  assert.equal(session?.lastPreview, "[图片]");
+  await appendFile(join(project, "media.jsonl"), `\n${JSON.stringify({ type: "custom-title", customTitle: "图片记录" })}\n`);
+  const [renamed] = await listSessions(root);
+  assert.equal(renamed?.title, "图片记录");
+  assert.equal(renamed?.lastPreview, "[图片]");
+});

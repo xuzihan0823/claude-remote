@@ -11,13 +11,14 @@ export const IMAGE_FILE_LIMIT_BYTES = 25 * 1024 * 1024;
 export const SESSION_FILE_LIMIT_BYTES = 64 * 1024 * 1024;
 
 export type PreviewKind = "html" | "image" | "text" | "markdown" | "pdf" | "none";
-export type FileAccessErrorCode = "invalid_path" | "sensitive_file" | "file_not_found" | "payload_too_large";
+export type FileAccessErrorCode = "invalid_path" | "sensitive_file" | "file_not_found" | "payload_too_large" | "unsupported_media_type";
 
 const ERROR_STATUS: Record<FileAccessErrorCode, number> = {
   invalid_path: 400,
   sensitive_file: 403,
   file_not_found: 404,
   payload_too_large: 413,
+  unsupported_media_type: 415,
 };
 
 export class FileAccessError extends Error {

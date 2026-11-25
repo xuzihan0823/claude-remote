@@ -79,7 +79,7 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 { "cwd": "/path/to/project", "text": "检查这个项目", "model": "sonnet", "permissionMode": "plan" }
 ```
 
-`cwd`、`text` 必填且不能全为空白。cwd 去除两端空白后必须精确命中已有会话中非空的原始 cwd 或 daemon 用户主目录；项目分组 ID 不能代替 cwd，也不接受任意目录。错误分别为 400 `invalid_cwd`、`invalid_text`、`unknown_cwd`。
+`cwd` 必填且去除两端空白后必须精确命中已有会话中非空的原始 cwd 或 daemon 用户主目录。项目分组 ID 不能代替 cwd。没有原生附件时，`text` 必须是非空白字符串。错误分别为 400 `invalid_cwd`、`unknown_cwd`、`invalid_text`。原生附件参数见下文。
 
 `model` 和 `permissionMode` 为本轮可选覆盖，新建与续聊使用相同校验：
 
@@ -95,7 +95,7 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 { "text": "继续检查", "model": "sonnet", "permissionMode": "acceptEdits" }
 ```
 
-`text` 必填；模型、权限校验同新建。cwd 从该会话 JSONL 读取，无 cwd 时回退 daemon 用户主目录；客户端不能在此覆盖 cwd。成功返回 `202 { "runId": "<uuid>" }`。未知会话返回 404 `session_not_found`，非空闲或已有活跃 run 返回 `409 { "error": "not_idle", "status": "terminal-driving" }` 或 `daemon-driving`。客户端应及时绑定响应 runId，并防止迟到响应覆盖更新的运行终态/新轮次。
+`text` 与原生附件规则同新建，模型、权限校验也相同。cwd 从该会话 JSONL 读取，无 cwd 时回退 daemon 用户主目录，客户端不能在此覆盖 cwd。成功返回 `202 { "runId": "<uuid>" }`。未知会话返回 404 `session_not_found`，非空闲或已有活跃 run 返回 `409 { "error": "not_idle", "status": "terminal-driving" }` 或 `daemon-driving`。客户端应及时绑定响应 runId，并防止迟到响应覆盖更新的运行终态或新轮次。
 
 ### 会话改名与分支（V2-06）
 
@@ -139,7 +139,7 @@ App 发送前生成 UUID（Hermes 缺少 crypto.randomUUID 时有兜底），保
 
 ### 模型目录与消息读取
 
-CLI 注入的 `<task-notification>` 与 `<system-reminder>` 等包裹内容在读取用户消息、会话标题和预览时统一过滤。过滤后为空的用户行不展示，混排的实际用户文本仍保留。
+CLI 注入的 `<task-notification>` 与 `<system-reminder>` 等包裹内容在读取用户消息、会话标题和预览时统一过滤。过滤后没有实际文本或媒体的用户行不展示，混排的实际用户文本仍保留。
 
 `GET /api/models` 返回 `{ "models": [{ "id": "provider/model", "alias": "sonnet", "displayName": "Sonnet" }], "defaultModel": "sonnet" }`，defaultModel 可缺省。目录读取用户 settings，不解析指定 cwd 的 project/local 设置，不包含凭据或 picker description；不能据此宣称项目一定使用某模型。
 
@@ -168,6 +168,51 @@ daemon 只读解析原生 `file-history-snapshot` 与 `file-history-delta`，跳
 常规持久化 Query 通过 `enableFileCheckpointing: true` 启用原生备份，沿用 `replay-user-messages`。SDK 0.3.212 自行设置 `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`。空闲操作用已校验的 JSONL 路径恢复临时 Query，关闭持久化、配置来源、hooks、工具和 MCP 自动加载，工具回调一律拒绝。Query 保持输入流打开且不发送用户消息。CLI 2.1.212 和 2.1.330 已在隔离目录验证可预览与恢复，控制阶段无模型请求且转录逐字节一致。执行要求 `CLAUDE_BIN` 已探测到 CLI 2.1.216 或更新版本，以使用原生的链接和备份安全检查。SDK 0.3.212 自带 CLI 2.1.212 可预览，执行返回 `unsafe_cli_version`。参考 [Agent SDK 文件检查点](https://code.claude.com/docs/en/agent-sdk/file-checkpointing)。
 
 **仅回退 SDK 跟踪的文件改动，不回退对话历史，也不保证恢复 Bash 工具或子代理造成的文件变更。**
+
+### 原生富媒体消息与历史还原（V2-10）
+
+`POST /api/sessions` 和 `POST /api/sessions/:id/messages` 均接受可选的 `attachments: string[]`，每项使用 `POST /api/upload` 或 `POST /api/sessions/:id/upload` 返回的绝对 `path`。daemon 只从 `config.uploadsDir` 读取这些引用。新建仍需传 `cwd`。有附件时允许省略 `text`，也接受空串或空白字符串。非空白文本作为第一个块，随后按数组顺序传入附件。
+
+```json
+{
+  "text": "比较图片与 PDF",
+  "attachments": ["/absolute/uploads/new/uploaded-chart.png", "/absolute/uploads/new/uploaded-report.pdf"],
+  "clientMessageId": "11111111-1111-4111-8111-111111111111"
+}
+```
+
+发送白名单为 `image/png`、`image/jpeg`、`image/gif`、`image/webp`、`application/pdf`。daemon 核对文件扩展名与格式签名，将图片和 PDF 分别作为 SDK 0.3.212 的 `image` 与 `document` base64 块传入。每条消息最多 16 项，原始文件合计最多 25 MiB，单项也受该字节上限约束。上游模型与网关可能有更低的限制。`clientMessageId` 沿用原回执语义，已受理的重试直接返回回执，即使附件已被移走。尚未受理的重试需要附件仍可读取。
+
+| HTTP | 错误码 | 发送失败原因 |
+| --- | --- | --- |
+| 400 | `invalid_attachments` | 数组格式非法、含空路径或超过 16 项 |
+| 400 | `invalid_path` | 路径非法、非绝对路径或含路径穿越段 |
+| 403 | `sensitive_file` | 请求路径或真实路径命中会话文件的敏感规则 |
+| 404 | `file_not_found` | 上传根目录范围外、缺失、非普通文件或经由上传根目录下的符号链接 |
+| 413 | `payload_too_large` | 原始附件数据超过 25 MiB |
+| 415 | `unsupported_media_type` | 扩展名或文件签名不符合白名单，包括 SVG 和伪装成支持格式的文件 |
+
+上传接口仍可落盘其他格式，原有把路径放入 `text` 的方式仍有效，由 Agent 按会话工具权限处理该文件。历史原生媒体来自会话 JSONL 的内容块，可包含终端会话的附件，读取时无须上传文件仍存在。两种来源使用各自的读取接口。
+
+`GET /api/sessions/:id/messages` 与 WS `message` 帧使用相同的媒体描述符。顶层用户媒体用 `kind: "media"` 和单项 `media` 数组，`blockIndex` 仍为原数组下标。`kind: "tool_result"` 保留原 `text`、`toolUseId` 和 `isError`，其中 `media` 可选。嵌套描述符用 `partIndex` 表示 `tool_result.content` 的原始下标，包含未知或不支持的非文字项。
+
+```json
+{
+  "category": "document",
+  "status": "available",
+  "sourceType": "base64",
+  "mediaType": "application/pdf",
+  "title": "report.pdf",
+  "byteLength": 18740,
+  "partIndex": 1
+}
+```
+
+`category` 为 `image`、`document` 或 `unsupported`。`status` 为 `available`、`missing`、`too_large` 或 `unsupported`。其余字段按可用信息给出。`byteLength` 为解码后字节数，`title` 最多 256 个 UTF-16 代码单元。描述符里不包含原始内容。纯媒体用户行的会话标题及预览可回退为 `[图片]`、`[文档]` 或 `[附件]`。
+
+历史白名单包含上述发送类型及 `text/plain`、`text/markdown`。支持合规 base64、文本及纯文本的 document `content` source。坏 base64、SVG、未知 source、含非文字项的 document `content` source 和未知块提供 `unsupported` 占位。有效 HTTP(S) URL source 可包含最长 2,048 个 UTF-16 代码单元的 `url`，其状态为 `missing`，表示转录中没有可下载的字节。daemon 不请求远程 URL。
+
+`GET /api/sessions/:id/messages/:seq/media/:blockIndex` 使用 Bearer 鉴权。`seq` 是从 1 起的 JSONL 物理行号，`blockIndex` 从 0 起。读取 `tool_result.content` 中的媒体时传 `?part=<n>`，从 0 起。按行定位时跳过元数据、sidechain 和非用户行。单块上限 25 MiB。成功返回 200、解码后字节和对应 `Content-Type`，固定发送 `Content-Disposition: attachment`、`X-Content-Type-Options: nosniff`、`Cache-Control: private, no-store`。非法会话 ID 或下标返回 400 `invalid_session_id` 或 `invalid_media_index`。会话不存在返回 404 `session_not_found`，目标不存在或不可用返回 404 `media_not_found`，超限返回 413 `payload_too_large`，不支持返回 415 `unsupported_media_type`。
 
 ### 读取会话文件
 

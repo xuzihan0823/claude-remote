@@ -13,7 +13,7 @@ import type { SessionSummary } from "./types.js";
 
 const TITLE_MAX_CHARS = 60;
 const PREVIEW_MAX_CHARS = 80;
-const PREVIEW_INITIAL_TAIL_BYTES = 64 * 1024;
+const PREVIEW_CHUNK_BYTES = 64 * 1024;
 const PREVIEW_MAX_TAIL_BYTES = 1024 * 1024;
 const SUMMARY_CACHE_SIZE = 4096;
 const summaryCache = new Map<string, { signature: string; summary: SessionSummary | undefined }>();
@@ -39,14 +39,25 @@ function textBlocksJoined(content: unknown): string {
     .join("");
 }
 
-/** 首条"真实 user 文本"：非 sidechain、非 isMeta、剥包裹标签后非空；纯 tool_result 行不算。 */
+function mediaLabel(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  for (const part of content) {
+    if (!isRecord(part) || typeof part.type !== "string" || part.type === "text" || part.type === "tool_result") continue;
+    if (part.type === "image") return "[图片]";
+    if (part.type === "document") return "[文档]";
+    return "[附件]";
+  }
+  return "";
+}
+
+/** 首条真实 user 消息：过滤元数据、包裹标签与纯 tool_result 行。 */
 function realUserText(o: Record<string, unknown>): string {
   if (o.type !== "user" || o.isSidechain === true || o.isMeta === true) return "";
   const message = isRecord(o.message) ? o.message : undefined;
   if (message === undefined) return "";
   const content = message.content;
   const raw = typeof content === "string" ? content : textBlocksJoined(content);
-  return stripWrapperTags(raw).trim();
+  return stripWrapperTags(raw).trim() || mediaLabel(content);
 }
 
 /** 最后一条主链消息的展示文本：text 优先，无 text 时降级到工具/思考摘要。 */
@@ -64,7 +75,7 @@ function previewText(o: Record<string, unknown>): string {
     if (part.type === "tool_result") return "[工具结果]";
     if (part.type === "thinking" && typeof part.thinking === "string") return part.thinking.trim();
   }
-  return "";
+  return o.type === "user" ? mediaLabel(content) : "";
 }
 
 interface HeadInfo {
@@ -124,38 +135,46 @@ async function scanMetadata(filePath: string, sessionId: string, size: number): 
   return { cwd, title, customTitle, entrypoint };
 }
 
+function linePreview(line: Buffer): string {
+  if (line.length === 0) return "";
+  let o: unknown;
+  try { o = JSON.parse(line.toString("utf8")); } catch { return ""; }
+  if (!isRecord(o) || o.isSidechain === true || o.isMeta === true || (o.type !== "user" && o.type !== "assistant")) return "";
+  return toSingleLineTruncated(previewText(o), PREVIEW_MAX_CHARS);
+}
+
 /** 尾部块读最后一条非 sidechain、非 isMeta 的 user/assistant 行，提取预览文本。 */
 async function scanLastPreview(filePath: string, fileSize: number): Promise<string> {
   if (fileSize === 0) return "";
   const handle = await open(filePath, "r");
   try {
-    let tailBytes = PREVIEW_INITIAL_TAIL_BYTES;
-    for (;;) {
-      const readBytes = Math.min(tailBytes, fileSize);
-      const start = fileSize - readBytes;
-      const buffer = Buffer.alloc(readBytes);
-      await handle.read(buffer, 0, readBytes, start);
-      const lines = buffer.toString("utf8").split("\n");
-      // 非从文件头起读时，首段可能是被截断的半行，丢弃
-      const firstIndex = start === 0 ? 0 : 1;
-      for (let i = lines.length - 1; i >= firstIndex; i -= 1) {
-        const trimmed = (lines[i] ?? "").trim();
-        if (trimmed === "") continue;
-        let o: unknown;
-        try {
-          o = JSON.parse(trimmed);
-        } catch {
-          continue;
+    let end = fileSize;
+    const scanStart = Math.max(0, fileSize - PREVIEW_MAX_TAIL_BYTES);
+    const suffix: Buffer[] = [];
+    // 跨窗口的长行继续读到行首，避免大附件使该行预览丢失。
+    while (end > 0 && (end > scanStart || suffix.length > 0)) {
+      const start = Math.max(0, end - PREVIEW_CHUNK_BYTES);
+      const buffer = Buffer.allocUnsafe(end - start);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+      if (bytesRead !== buffer.length) return "";
+      let right = buffer.length;
+      while (right > 0) {
+        const newline = buffer.lastIndexOf(10, right - 1);
+        const piece = buffer.subarray(newline + 1, right);
+        if (newline < 0 && start > 0) {
+          suffix.push(piece);
+          break;
         }
-        if (!isRecord(o)) continue;
-        if (o.isSidechain === true || o.isMeta === true) continue;
-        if (o.type !== "user" && o.type !== "assistant") continue;
-        const text = previewText(o);
-        if (text !== "") return toSingleLineTruncated(text, PREVIEW_MAX_CHARS);
+        const line = suffix.length ? Buffer.concat([piece, ...suffix.reverse()]) : piece;
+        suffix.length = 0;
+        const text = linePreview(line);
+        if (text) return text;
+        if (start + newline < scanStart) return "";
+        right = newline;
       }
-      if (readBytes >= fileSize || tailBytes >= PREVIEW_MAX_TAIL_BYTES) return "";
-      tailBytes *= 4;
+      end = start;
     }
+    return "";
   } finally {
     await handle.close();
   }

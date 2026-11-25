@@ -19,10 +19,11 @@ import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 
-import { EFFORT_LEVELS, isTaskId, type EffortLevel, type ExternalPermissionMode, type WorkerEvent } from "@claude-remote/agent-bridge";
+import { EFFORT_LEVELS, isTaskId, type EffortLevel, type ExternalPermissionMode, type NativeMediaInput, type WorkerEvent } from "@claude-remote/agent-bridge";
 import { readEffortOptions, type EffortOptions } from "./effort-levels.js";
 import { readGitWorkspace } from "./git-workspace.js";
 import type { DaemonConfig } from "./config.js";
+import { loadNativeAttachments } from "./native-media.js";
 import { isLoopbackAddress, looksProxied, pairBases, pairPayload, type PairInfo } from "./pair.js";
 import { isKnownModel, readModelCatalog, type ModelCatalog } from "./model-config.js";
 import { FileAccessError, IMAGE_FILE_LIMIT_BYTES, SESSION_FILE_LIMIT_BYTES, fileMeta, fileTypeOf, openRequestedFile, parseRange, type SessionFile } from "./session-file-access.js";
@@ -32,7 +33,7 @@ import { StreamBuffer } from "./run/stream-buffer.js";
 import { approvalLink, NotIdleError, sessionLink, RunRequestError, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
 import { listSessions, readSessionSummary } from "./transcript/indexer.js";
 import { buildProjectIndex } from "./transcript/projects.js";
-import { readBefore, readTail, readTranscriptCheckpoints, readTranscriptUsage } from "./transcript/reader.js";
+import { readBefore, readTail, readTranscriptCheckpoints, readTranscriptMedia, readTranscriptUsage } from "./transcript/reader.js";
 import { searchSessions } from "./transcript/search.js";
 import type { ActivityTracker } from "./watch/activity.js";
 import type { SessionWatcher } from "./watch/watcher.js";
@@ -40,6 +41,7 @@ import type { SessionWatcher } from "./watch/watcher.js";
 
 const BODY_LIMIT_BYTES = 1024 * 1024;
 const UPLOAD_LIMIT_BYTES = IMAGE_FILE_LIMIT_BYTES;
+const MAX_NATIVE_ATTACHMENTS = 16;
 const NEW_SESSION_WATCH_TIMEOUT_MS = 60_000;
 const IMAGE_TYPES: Record<string, string> = {
   jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
@@ -101,6 +103,12 @@ function sha256(value: string): Buffer {
 function decodePathSegment(value: string | undefined): string {
   try { return decodeURIComponent(value ?? ""); }
   catch { return ""; }
+}
+
+function parseMediaIndex(value: string, min: number): number | undefined {
+  if (value === "" || /\D/.test(value)) return undefined;
+  const index = Number(value);
+  return Number.isSafeInteger(index) && index >= min ? index : undefined;
 }
 
 function imageType(path: string, types: Record<string, string>): string | undefined {
@@ -398,6 +406,12 @@ export class DaemonServer {
     const abortMatch = /^\/api\/sessions\/([^/]+)\/abort$/.exec(path);
     if (abortMatch !== null && method === "POST") {
       await this.#handleAbort(req, res, decodePathSegment(abortMatch[1]));
+      return;
+    }
+
+    const mediaMatch = /^\/api\/sessions\/([^/]+)\/messages\/([^/]+)\/media\/([^/]+)$/.exec(path);
+    if (method === "GET" && mediaMatch) {
+      await this.#handleGetMessageMedia(res, url, mediaMatch);
       return;
     }
 
@@ -1035,20 +1049,42 @@ export class DaemonServer {
     });
   }
 
+  #messageDraft(res: ServerResponse, body: unknown): { text: string; paths: string[] } | undefined {
+    const { text, attachments = [] } = body as Record<string, unknown>;
+    if (!Array.isArray(attachments) || attachments.length > MAX_NATIVE_ATTACHMENTS ||
+      !attachments.every((path: unknown) => typeof path === "string" && path !== "")) {
+      this.#json(res, 400, { error: "invalid_attachments" });
+      return undefined;
+    }
+    if ((text !== undefined && typeof text !== "string") ||
+      (attachments.length === 0 && (typeof text !== "string" || text.trim() === ""))) {
+      this.#json(res, 400, { error: "invalid_text" });
+      return undefined;
+    }
+    return { text: text ?? "", paths: attachments };
+  }
+
+  async #messageAttachments(res: ServerResponse, paths: string[], scope: string, id: string | undefined): Promise<NativeMediaInput[] | false> {
+    try {
+      return await loadNativeAttachments(this.#options.config.uploadsDir, paths);
+    } catch (error) {
+      if (!this.#repeatMessage(res, scope, id)) this.#respondFileError(res, error);
+      return false;
+    }
+  }
+
   async #handleCreateSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await this.#readJsonBody(req, res);
     if (body === undefined) return;
     const clientMessageId = this.#clientMessageId(res, body);
     if (clientMessageId === false || this.#repeatMessage(res, "new", clientMessageId)) return;
-    const { cwd: cwdValue, text: textValue, model: modelValue, permissionMode: permModeValue } = body as Record<string, unknown>;
+    const { cwd: cwdValue, model: modelValue, permissionMode: permModeValue } = body as Record<string, unknown>;
     if (typeof cwdValue !== "string" || cwdValue.trim() === "") {
       this.#json(res, 400, { error: "invalid_cwd" });
       return;
     }
-    if (typeof textValue !== "string" || textValue.trim() === "") {
-      this.#json(res, 400, { error: "invalid_text" });
-      return;
-    }
+    const draft = this.#messageDraft(res, body);
+    if (!draft) return;
     const cwd = cwdValue.trim();
     if (!(await this.#knownCwds()).has(cwd)) {
       this.#json(res, 400, { error: "unknown_cwd" });
@@ -1061,6 +1097,8 @@ export class DaemonServer {
 
     const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
     if (effort === false) return;
+    const attachments = await this.#messageAttachments(res, draft.paths, "new", clientMessageId);
+    if (attachments === false) return;
     if (this.#rejectClosing(res) || this.#repeatMessage(res, "new", clientMessageId)) return;
 
     const sessionId = randomUUID();
@@ -1069,7 +1107,8 @@ export class DaemonServer {
       handle = this.#options.runner.startTurn({
         sessionId,
         cwd,
-        text: textValue,
+        text: draft.text,
+        ...(attachments.length === 0 ? {} : { attachments }),
         newSession: true,
         ...(clientMessageId === undefined ? {} : { clientMessageId }),
         ...(model === undefined ? {} : { model }),
@@ -1094,7 +1133,7 @@ export class DaemonServer {
     this.#activeRuns.set(handle.runId, handle);
     this.#rememberMessage("new", sessionId, handle.runId, clientMessageId);
     this.#rememberMessage(sessionId, sessionId, handle.runId, clientMessageId);
-    void this.#pumpRun(sessionId, textValue, handle);
+    void this.#pumpRun(sessionId, draft.text, handle);
     this.#json(res, 202, { sessionId, runId: handle.runId, ...(clientMessageId === undefined ? {} : { clientMessageId }) });
   }
 
@@ -1211,16 +1250,51 @@ export class DaemonServer {
     }
   }
 
+  async #handleGetMessageMedia(res: ServerResponse, url: URL, match: RegExpExecArray): Promise<void> {
+    const sessionId = decodePathSegment(match[1]);
+    if (!isSafeSessionId(sessionId)) { this.#json(res, 400, { error: "invalid_session_id" }); return; }
+    const seq = parseMediaIndex(decodePathSegment(match[2]), 1);
+    const blockIndex = parseMediaIndex(decodePathSegment(match[3]), 0);
+    const parts = url.searchParams.getAll("part");
+    const partIndex = parts[0] === undefined ? undefined : parseMediaIndex(parts[0], 0);
+    if (seq === undefined || blockIndex === undefined || parts.length > 1 || (parts.length === 1 && partIndex === undefined)) {
+      this.#json(res, 400, { error: "invalid_media_index" });
+      return;
+    }
+    const file = await this.#p1SessionFile(res, sessionId);
+    if (file === undefined) return;
+    try {
+      const media = await readTranscriptMedia(file, seq, blockIndex, partIndex);
+      switch (media.status) {
+        case "missing": this.#json(res, 404, { error: "media_not_found" }); return;
+        case "unsupported": this.#json(res, 415, { error: "unsupported_media_type" }); return;
+        case "too_large": this.#json(res, 413, { error: "payload_too_large" }); return;
+        case "available":
+          res.writeHead(200, {
+            "Content-Type": media.mediaType,
+            "Content-Length": media.bytes.length,
+            "Content-Disposition": "attachment",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+          });
+          res.end(media.bytes);
+      }
+    } catch (error) {
+      if (isEnoent(error)) { this.#json(res, 404, { error: "session_not_found" }); return; }
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EACCES" && code !== "EPERM" && code !== "ELOOP" && code !== "ENOTDIR") throw error;
+      this.#json(res, 404, { error: "media_not_found" });
+    }
+  }
+
   async #handlePostMessage(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
     const body = await this.#readJsonBody(req, res);
     if (body === undefined) return;
     const clientMessageId = this.#clientMessageId(res, body);
     if (clientMessageId === false || this.#repeatMessage(res, sessionId, clientMessageId)) return;
-    const text = (body as { text?: unknown }).text;
-    if (typeof text !== "string" || text.trim() === "") {
-      this.#json(res, 400, { error: "invalid_text" });
-      return;
-    }
+    const draft = this.#messageDraft(res, body);
+    if (!draft) return;
+    const { text } = draft;
     const model = await this.#validateModel(res, (body as { model?: unknown }).model);
     if (model === false) return;
     const permissionMode = this.#validatePermissionMode(res, (body as { permissionMode?: unknown }).permissionMode);
@@ -1238,6 +1312,8 @@ export class DaemonServer {
     const cwd = (await readSessionCwd(file)) || homedir();
     const effort = this.#validateEffort(res, (body as Record<string, unknown>).effort);
     if (effort === false) return;
+    const attachments = await this.#messageAttachments(res, draft.paths, sessionId, clientMessageId);
+    if (attachments === false) return;
     const cliAlive = await this.#options.isCliAlive(sessionId);
     if (this.#rejectClosing(res) || this.#repeatMessage(res, sessionId, clientMessageId) ||
       this.#rejectSessionWrite(res, sessionId, cliAlive)) return;
@@ -1252,6 +1328,7 @@ export class DaemonServer {
         sessionId,
         cwd,
         text,
+        ...(attachments.length === 0 ? {} : { attachments }),
         ...(clientMessageId === undefined ? {} : { clientMessageId }),
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
@@ -1417,7 +1494,7 @@ export class DaemonServer {
       return;
     }
     if (this.#rejectClosing(res)) return;
-    const root = this.#options.config.uploadsDir;
+    const root = resolve(this.#options.config.uploadsDir);
     await mkdir(root, { recursive: true, mode: 0o700 });
     const canonicalRoot = await realpath(root);
     const dir = join(canonicalRoot, subdir);

@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
-import { parseTranscriptLine, readBefore, readTail, readTranscriptCheckpoints, readTranscriptUsage, stripWrapperTags } from "../src/transcript/reader.js";
+import { parseTranscriptLine, readBefore, readTail, readTranscriptCheckpoints, readTranscriptMedia, readTranscriptUsage, stripWrapperTags } from "../src/transcript/reader.js";
 
 const fixturesDir = fileURLToPath(new URL("./fixtures/projects", import.meta.url));
 const basicFile = join(fixturesDir, "-home-alice-projA", "11111111-aaaa-4aaa-8aaa-111111111111.jsonl");
@@ -262,4 +262,54 @@ test("checkpoint snapshots and their deltas only join to main-chain user prompts
     { userMessageId: first, timestamp: messageTime, preview: "Change files", trackedFiles: ["created.txt", "updated.txt"] },
   ]);
   assert.deepEqual(await readTranscriptCheckpoints(file, "different-session"), []);
+});
+
+function mediaLine(content: unknown[], extra = {}) {
+  return JSON.stringify({ type: "user", uuid: "test", message: { content }, ...extra });
+}
+
+test("historical tool media keeps original indexes, text and physical byte lookup", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "cr-history-media-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, "session.jsonl");
+  const image = { type: "image", source: { type: "base64", data: "AQI=", media_type: "image/png" } };
+  const doc = { type: "document", title: "note", source: { type: "content", content: [
+    { type: "text", text: " hé" }, { type: "text", text: "\n文 " },
+  ] } };
+  const blocks = [{ type: "tool_result", content: [{ type: "text", text: " x\n" }, null, image,
+    { type: "text", text: " y " }, doc] }, image, { type: "future", data: "secret" }];
+  const target = mediaLine(blocks);
+  const messages = parseTranscriptLine(target, 5);
+  assert.equal(messages[0]?.text, " x\n y ");
+  assert.deepEqual(messages[0]?.media?.map((m) => [m.partIndex, m.category, m.status]),
+    [[1, "unsupported", "unsupported"], [2, "image", "available"], [4, "document", "available"]]);
+  assert.deepEqual(messages.map((m) => [m.kind, m.blockIndex]), [["tool_result", 0], ["media", 1], ["media", 2]]);
+  assert.deepEqual(messages[1]?.media, [{ category: "image", sourceType: "base64", mediaType: "image/png", byteLength: 2, status: "available" }]);
+  assert.doesNotMatch(JSON.stringify(messages), /AQI=|secret|hé/);
+  await writeFile(file, ["!".repeat(700_000), mediaLine(blocks, { isMeta: true }), mediaLine(blocks, { isSidechain: true }), "", target].join("\n"));
+  for (const seq of [1, 2, 3, 4, 6]) assert.deepEqual(await readTranscriptMedia(file, seq, 1), { status: "missing" });
+  assert.deepEqual(await readTranscriptMedia(file, 5, 0, 4), { status: "available", mediaType: "text/plain", bytes: Buffer.from(" hé\n文 ") });
+  assert.deepEqual(await readTranscriptMedia(file, 5, 1), { status: "available", mediaType: "image/png", bytes: Buffer.from([1, 2]) });
+  assert.deepEqual(await readTranscriptMedia(file, 5, 0, 1), { status: "unsupported" });
+  assert.deepEqual(await readTranscriptMedia(file, 5, 1, 0), { status: "missing" });
+});
+
+test("historical descriptors validate base64, source format, URL and size", () => {
+  const descriptor = (type: string, source: unknown) => parseTranscriptLine(mediaLine([{ type, source }]), 1)[0]?.media?.[0];
+  const image = (data: string, media_type = "image/jpeg") => descriptor("image", { type: "base64", media_type, data });
+  for (const data of ["A", "AAA?", "AZ==", "AAD=", "=AAA", "----", "AA\n="]) assert.equal(image(data)?.status, "unsupported");
+  assert.equal(image("")?.status, "missing");
+  assert.equal(image("AAAA", "image/svg+xml")?.status, "unsupported");
+  assert.equal(image("AAAA", "application/pdf")?.status, "unsupported");
+  const large = image("AAAA".repeat(Math.ceil((25 * 1024 ** 2 + 1) / 3)));
+  assert.equal(large?.status, "too_large");
+  assert.ok((large?.byteLength ?? 0) > 25 * 1024 ** 2);
+  assert.equal(descriptor("document", { type: "content", content: [{ type: "image" }] })?.status, "unsupported");
+  assert.equal(descriptor("document", { type: "text", media_type: "text/markdown", data: "文" })?.byteLength, 3);
+  assert.equal(descriptor("image", { type: "future" })?.sourceType, undefined);
+  const url = "https://example.com/attachment";
+  assert.deepEqual(descriptor("image", { type: "url", url }), { category: "image", sourceType: "url", status: "missing", url });
+  for (const unsafe of ["javascript:alert(1)", "https://user:pass@example.com/", url + "x".repeat(5000)]) {
+    assert.equal(descriptor("document", { type: "url", url: unsafe })?.url, undefined);
+  }
 });

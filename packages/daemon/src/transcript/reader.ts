@@ -8,10 +8,12 @@
 //
 // JSONL 无官方 schema 承诺：所有未知形态一律容错（跳过或降级为 kind:meta），不抛错。
 
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 
 import { commandOutputParts, localCommandOutput, type CommandOutputPart } from "@claude-remote/agent-bridge";
 import { isUuid } from "../session-files.js";
+import { inspectMedia } from "./media.js";
 import type { FileCheckpoint, ReadPage, RenderMessage, RenderRole } from "./types.js";
 
 /** 已知的元数据行 type：不渲染、不报 meta 卡。新版本 CLI 的未知 type 走 kind:meta 兜底。 */
@@ -116,10 +118,15 @@ function userMessages(base: MessageBase, content: unknown): RenderMessage[] {
     }
     if (part.type === "tool_result") {
       const toolUseId = typeof part.tool_use_id === "string" ? part.tool_use_id : undefined;
+      const media = Array.isArray(part.content) ? part.content.flatMap((item: unknown, partIndex: number) =>
+        isRecord(item) && item.type === "text" && typeof item.text === "string" ? [] : [{ ...inspectMedia(item).descriptor, partIndex }]) : [];
       messages.push({
         ...base, blockIndex, role: "user", kind: "tool_result", text: contentText(part.content),
+        ...(media.length ? { media } : {}),
         isError: part.is_error === true, ...(toolUseId === undefined ? {} : { toolUseId }),
       });
+    } else if (typeof part.type === "string" && part.type !== "text") {
+      messages.push({ ...base, blockIndex, role: "user", kind: "media", media: [inspectMedia(part).descriptor] });
     }
   });
   return messages.sort((a, b) => a.blockIndex - b.blockIndex);
@@ -548,4 +555,57 @@ export async function readTranscriptUsage(file: string, sessionId: string): Prom
     ...(seen.size ? { mainAgent: { source: "transcript", apiResponses: seen.size, usage: counts } } : {}),
     ...(sdkSession === undefined ? {} : { sdkSession }),
   };
+}
+
+type MediaRead = { status: "missing" | "too_large" | "unsupported" } | { status: "available"; mediaType: string; bytes: Buffer };
+
+async function physicalLine(file: string, seq: number): Promise<string> {
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    if (!(await handle.stat()).isFile()) return "";
+    const chunk = Buffer.allocUnsafe(256 * 1024);
+    const pieces: Buffer[] = [];
+    let current = 1;
+    for (;;) {
+      const { bytesRead } = await handle.read(chunk);
+      if (!bytesRead) break;
+      const data = chunk.subarray(0, bytesRead);
+      let start = 0;
+      while (start < bytesRead) {
+        const end = data.indexOf(10, start);
+        if (current === seq) {
+          const piece = data.subarray(start, end < 0 ? bytesRead : end);
+          if (end >= 0) return Buffer.concat([...pieces, piece]).toString("utf8");
+          pieces.push(Buffer.from(piece));
+        }
+        if (end < 0) break;
+        current++;
+        start = end + 1;
+      }
+    }
+    return Buffer.concat(pieces).toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function readTranscriptMedia(file: string, seq: number, blockIndex: number, partIndex?: number): Promise<MediaRead> {
+  if (!Number.isSafeInteger(seq) || seq < 1 || !isCount(blockIndex) || (partIndex !== undefined && !isCount(partIndex))) return { status: "missing" };
+  const line = await physicalLine(file, seq);
+  let row: unknown;
+  try { row = JSON.parse(line); } catch { return { status: "missing" }; }
+  if (!isRecord(row) || row.type !== "user" || typeof row.uuid !== "string" || row.isSidechain === true || row.isMeta === true ||
+      !isRecord(row.message) || !Array.isArray(row.message.content)) return { status: "missing" };
+  const block: unknown = row.message.content[blockIndex];
+  if (!isRecord(block) || typeof block.type !== "string" || block.type === "text") return { status: "missing" };
+  let item: unknown = block;
+  if (block.type === "tool_result") {
+    if (partIndex === undefined || !Array.isArray(block.content) || partIndex >= block.content.length) return { status: "missing" };
+    item = block.content[partIndex];
+    if (isRecord(item) && item.type === "text" && typeof item.text === "string") return { status: "missing" };
+  } else if (partIndex !== undefined) return { status: "missing" };
+  const { descriptor, decode } = inspectMedia(item);
+  if (descriptor.status !== "available") return { status: descriptor.status };
+  if (!decode || !descriptor.mediaType) return { status: "unsupported" };
+  return { status: "available", mediaType: descriptor.mediaType, bytes: decode() };
 }

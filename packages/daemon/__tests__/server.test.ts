@@ -27,7 +27,7 @@ import { ActivityTracker, type ActivityTrackerOptions } from "../src/watch/activ
 import { CliExitReleaser, readLiveCliSessions } from "../src/watch/cli-presence.js";
 import { SessionWatcher } from "../src/watch/watcher.js";
 import type { ProjectCatalog } from "../src/transcript/projects.js";
-import type { SessionSummary } from "../src/transcript/types.js";
+import type { RenderMessage, SessionSummary } from "../src/transcript/types.js";
 import { projectWorkspaces } from "./fixtures/project-workspaces.js";
 
 const SESSION_ID = "11111111-2222-3333-4444-555555555555";
@@ -1781,6 +1781,108 @@ function requestRewind(h: Harness, body: unknown, id = SESSION_ID): Promise<Resp
   return fetch(`${h.base}/api/sessions/${id}/rewind`, authed({ method: "POST", body: JSON.stringify(body) }));
 }
 
+const NATIVE_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aRZkAAAAASUVORK5CYII=", "base64");
+const NATIVE_PDF = Buffer.from("%PDF-1.4\n% media test\n%%EOF\n");
+
+test("原生附件发送：真实上传路径、图文和 PDF、纯媒体、并发去重及重试", async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  const session = `/api/sessions/${SESSION_ID}`;
+  async function upload(route: string, name: string, bytes: Buffer): Promise<string> {
+    const res = await fetch(`${h.base}${route}?filename=${name}`, authed({ method: "POST", body: new Uint8Array(bytes) }));
+    assert.equal(res.status, 200);
+    return (await res.json() as { path: string }).path;
+  }
+  const png = await upload("/api/upload", "chart.png", NATIVE_PNG);
+  const pdf = await upload(`${session}/upload`, "notes.pdf", NATIVE_PDF);
+  const image = { type: "image", source: { type: "base64", media_type: "image/png", data: NATIVE_PNG.toString("base64") } };
+  const document = { type: "document", title: basename(pdf), source: { type: "base64", media_type: "application/pdf", data: NATIVE_PDF.toString("base64") } };
+  const variants = [
+    { route: "/api/sessions", paths: [png, pdf], text: "对照图片和文档", expected: [{ type: "text", text: "对照图片和文档" }, image, document] },
+    { route: `${session}/messages`, paths: [pdf], text: undefined, expected: [document] },
+  ];
+  for (const [index, { route, paths, text, expected }] of variants.entries()) {
+    const id = `1234567${index}-1234-4567-8abc-123456789012`;
+    const send = () => fetch(`${h.base}${route}`, authed({
+      method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, text, attachments: paths, clientMessageId: id }),
+    }));
+    const results = await Promise.all([send(), send()].map(async (request) => {
+      const response = await request;
+      assert.equal(response.status, 202);
+      return await response.json() as { runId: string; clientMessageId: string; replayed?: boolean };
+    }));
+    assert.equal(results[0]?.runId, results[1]?.runId);
+    assert.equal(results[0]?.clientMessageId, id);
+    assert.equal(results.filter((item) => item.replayed).length, 1);
+    assert.equal(h.sdk.calls, index + 1);
+    const prompt = h.sdk.params?.prompt;
+    assert.ok(prompt && typeof prompt !== "string");
+    const first = await prompt[Symbol.asyncIterator]().next();
+    assert.equal(first.value.uuid, id);
+    assert.deepEqual(first.value.message.content, expected);
+    h.sdk.finish();
+    // 复用回执不重读已经消失的附件。
+    await rm(paths[0]!);
+    const retry = await send();
+    assert.equal(retry.status, 202);
+    assert.equal((await retry.json() as { runId: string }).runId, results[0]?.runId);
+    assert.equal(h.sdk.calls, index + 1);
+  }
+});
+
+test("原生附件发送：拦截越界、敏感文件、符号链接、伪装格式和超限", async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  const folder = join(h.uploadsDir, "new");
+  const outside = join(h.projectsDir, "chart.png");
+  const safe = join(folder, "chart.png");
+  const secret = join(folder, ".env.png");
+  const large = join(folder, "large.pdf");
+  const link = join(folder, "link.png");
+  const outsideLink = join(folder, "outside.png");
+  const secretLink = join(folder, "secret.png");
+  const dirLink = join(folder, "external");
+  const svg = join(folder, "chart.svg");
+  const disguised = join(folder, "disguised.png");
+  const unknown = join(folder, "sample.bin");
+  const limit = 25 * 1024 * 1024;
+  await mkdir(folder, { recursive: true });
+  await Promise.all([
+    writeFile(outside, NATIVE_PNG), writeFile(safe, NATIVE_PNG), writeFile(secret, NATIVE_PNG),
+    writeFile(large, NATIVE_PDF), writeFile(svg, "<svg/>"), writeFile(disguised, "<svg/>"), writeFile(unknown, NATIVE_PNG),
+    symlink(safe, link), symlink(outside, outsideLink), symlink(secret, secretLink), symlink(h.projectsDir, dirLink),
+  ]);
+  await truncate(large, limit + 1);
+  const cases = [
+    [null, 400, "invalid_attachments"], [[123], 400, "invalid_attachments"], [Array(17).fill(safe), 400, "invalid_attachments"],
+    [["chart.png"], 400, "invalid_path"], [[`${folder}/../new/chart.png`], 400, "invalid_path"],
+    [[outside], 404, "file_not_found"], [[link], 404, "file_not_found"], [[outsideLink], 404, "file_not_found"],
+    [[join(dirLink, "chart.png")], 404, "file_not_found"], [[secret], 403, "sensitive_file"], [[secretLink], 403, "sensitive_file"],
+    [[svg], 415, "unsupported_media_type"], [[disguised], 415, "unsupported_media_type"], [[unknown], 415, "unsupported_media_type"],
+    [[large], 413, "payload_too_large"],
+  ] as const;
+  for (const route of ["/api/sessions", `/api/sessions/${SESSION_ID}/messages`]) {
+    const send = (attachments: unknown, text: unknown = "with file") => fetch(`${h.base}${route}`, authed({
+      method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, text, attachments }),
+    }));
+    for (const [attachments, status, error] of cases) {
+      const res = await send(attachments);
+      assert.equal(res.status, status, error);
+      assert.deepEqual(await res.json(), { error });
+    }
+    const invalid = await send([], "    ");
+    assert.equal(invalid.status, 400);
+    assert.deepEqual(await invalid.json(), { error: "invalid_text" });
+  }
+  await truncate(large, limit - NATIVE_PNG.length + 1);
+  const aggregate = await fetch(`${h.base}/api/sessions`, authed({
+    method: "POST", body: JSON.stringify({ cwd: SESSION_CWD, attachments: [safe, large] }),
+  }));
+  assert.equal(aggregate.status, 413);
+  assert.deepEqual(await aggregate.json(), { error: "payload_too_large" });
+  assert.equal(h.sdk.calls ?? 0, 0);
+});
+
 test("checkpoints and rewind preview/execute a file restore with the transcript unchanged", async (t) => {
   const h = await startHarness();
   t.after(() => h.dispose());
@@ -1923,4 +2025,97 @@ test("rewind rejects both terminal and daemon driving and holds the lock against
   }
   assert.equal((await preview).status, 200);
   assert.equal(h.tracker.getStatus(SESSION_ID), "idle");
+});
+
+test("历史原生媒体：分页和 WS 只投影描述，按物理行和块索引下载", async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  const sink = new FrameSink(h.wsUrl());
+  t.after(() => sink.close());
+  await sink.open();
+  sink.send({ type: "subscribe", sessionId: SESSION_ID });
+  await sink.waitFor((frame) => frame.type === "session-state");
+
+  const base64 = (media_type: string, bytes: Buffer) => ({ type: "base64", media_type, data: bytes.toString("base64") });
+  const content = [
+    { type: "text", text: "render media" },
+    { type: "image", source: base64("image/png", NATIVE_PNG) },
+    { type: "tool_result", tool_use_id: "tool", content: [
+      { type: "text", text: "preserve " },
+      { type: "document", title: "PDF", source: base64("application/pdf", NATIVE_PDF) },
+      { type: "image", source: base64("image/svg+xml", Buffer.from("<svg/>")) },
+      { type: "text", text: "text" },
+      { type: "audio", source: { type: "base64", data: "aGlkZGVu" } },
+    ] },
+    { type: "document", title: "Markdown", source: { type: "text", media_type: "text/markdown", data: "# 文档" } },
+    { type: "image", source: { type: "base64", media_type: "image/png", data: "!bad!" } },
+    { type: "image", source: { type: "url", url: "https://example.com/image.png" } },
+  ];
+  await appendFile(h.sessionFile, jsonlLine({ type: "user", uuid: "media-user", parentUuid: "a1", message: { role: "user", content } }));
+  const live = await sink.waitFor((item) => item.type === "message" &&
+    (item.message as { uuid?: string; blockIndex?: number }).uuid === "media-user" &&
+    (item.message as { blockIndex?: number }).blockIndex === 2);
+  const messages = `/api/sessions/${SESSION_ID}/messages`;
+  const page = await fetch(`${h.base}${messages}?limit=1`, authed());
+  assert.equal(page.status, 200);
+  const data = await page.text();
+  for (const secret of [NATIVE_PNG.toString("base64"), NATIVE_PDF.toString("base64"), "aGlkZGVu", "# 文档", "!bad!"]) {
+    assert.ok(!data.includes(secret));
+    assert.ok(!JSON.stringify(live).includes(secret));
+  }
+  const { messages: items } = JSON.parse(data) as { messages: RenderMessage[] };
+  assert.equal(items[1]?.kind, "media");
+  assert.equal(items[1]?.media?.[0]?.byteLength, NATIVE_PNG.length);
+  assert.deepEqual(items[2], live.message);
+  assert.equal(items[2]?.text, "preserve text");
+  assert.deepEqual(items[2]?.media?.map(({ partIndex, category, status }) => [partIndex, category, status]), [
+    [1, "document", "available"], [2, "image", "unsupported"], [4, "unsupported", "unsupported"],
+  ]);
+  assert.equal(items[5]?.media?.[0]?.sourceType, "url");
+  assert.equal(items[5]?.media?.[0]?.status, "missing");
+  sink.close();
+
+  const media = (seq: number | string, block: number | string, query = "") => `${messages}/${seq}/media/${block}${query}`;
+  assert.equal((await fetch(`${h.base}${media(3, 1)}`)).status, 401);
+  for (const [route, mime, bytes] of [
+    [media(3, 1), "image/png", NATIVE_PNG], [media(3, 2, "?part=1"), "application/pdf", NATIVE_PDF],
+    [media(3, 3), "text/markdown", Buffer.from("# 文档")],
+  ] as const) {
+    const res = await fetch(`${h.base}${route}`, authed());
+    assert.equal(res.status, 200, route);
+    assert.equal(res.headers.get("content-type"), mime);
+    assert.equal(res.headers.get("content-disposition"), "attachment");
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(res.headers.get("cache-control"), "private, no-store");
+    assert.deepEqual(Buffer.from(await res.arrayBuffer()), bytes);
+  }
+  for (const route of [media(0, 1), media("1e0", 1), media("9007199254740992", 1), media(3, -1), media(3, "1%0A"),
+    media(3, 2, "?part="), media(3, 2, "?part=-1"), media(3, 2, "?part=1&part=2"), media(3, 2, "?part=1.2")]) {
+    const res = await fetch(`${h.base}${route}`, authed());
+    assert.equal(res.status, 400, route);
+    assert.deepEqual(await res.json(), { error: "invalid_media_index" });
+  }
+  const unsafe = await fetch(`${h.base}/api/sessions/%2e%2e%2fother/messages/3/media/1`, authed());
+  assert.equal(unsafe.status, 400);
+  assert.deepEqual(await unsafe.json(), { error: "invalid_session_id" });
+  const absent = await fetch(`${h.base}/api/sessions/unknown/messages/3/media/1`, authed());
+  assert.equal(absent.status, 404);
+  assert.deepEqual(await absent.json(), { error: "session_not_found" });
+  for (const route of [media(99, 0), media(3, 0), media(3, 2), media(3, 2, "?part=3"), media(3, 5), media(3, 1, "?part=0")]) {
+    const res = await fetch(`${h.base}${route}`, authed());
+    assert.equal(res.status, 404, route);
+    assert.deepEqual(await res.json(), { error: "media_not_found" });
+  }
+  for (const route of [media(3, 2, "?part=2"), media(3, 2, "?part=4"), media(3, 4)]) {
+    const res = await fetch(`${h.base}${route}`, authed());
+    assert.equal(res.status, 415, route);
+    assert.deepEqual(await res.json(), { error: "unsupported_media_type" });
+  }
+  const dataTooLarge = "AAAA".repeat(Math.floor(25 * 1024 * 1024 / 3) + 1);
+  await appendFile(h.sessionFile, jsonlLine({ type: "user", uuid: "large", parentUuid: "media-user", message: { content: [
+    { type: "image", source: { type: "base64", media_type: "image/png", data: dataTooLarge } },
+  ] } }));
+  const tooLarge = await fetch(`${h.base}${media(4, 0)}`, authed());
+  assert.equal(tooLarge.status, 413);
+  assert.deepEqual(await tooLarge.json(), { error: "payload_too_large" });
 });

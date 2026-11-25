@@ -246,3 +246,37 @@ test("file controls use a non-persisted resume, no prompt, and forward native re
   await handle.closeAndWait();
   assert.equal((await first).done, true);
 });
+
+test("SDK keeps string prompts and encodes image and PDF as ordered native content blocks", async () => {
+  const uuid = "11111111-1111-4111-8111-111111111111";
+  const attachments = [
+    { mediaType: "image/png", data: "aW1hZ2U=" },
+    { mediaType: "application/pdf", data: "cGRm", title: "notes.pdf" },
+  ] as const;
+  const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "aW1hZ2U=" } };
+  const document = { type: "document", title: "notes.pdf", source: { type: "base64", media_type: "application/pdf", data: "cGRm" } };
+  for (const input of [
+    { prompt: "legacy", attachments: [], expected: "legacy" },
+    { prompt: "  compare  ", attachments, expected: [{ type: "text", text: "  compare  " }, image, document] },
+    { prompt: " \n", attachments, expected: [image, document] },
+  ]) {
+    const fake = fakeQuery();
+    const handle = startSdkQuery({
+      cwd: "/tmp/project", prompt: input.prompt, attachments: input.attachments, clientMessageId: uuid,
+      canUseTool: async () => ({ behavior: "deny", message: "test" }), signal: new AbortController().signal,
+    }, fake.factory);
+    try {
+      const prompt = fake.params()?.prompt;
+      assert.ok(prompt && typeof prompt !== "string");
+      const iterator = prompt[Symbol.asyncIterator]();
+      const first = await iterator.next();
+      assert.deepEqual(first.value, {
+        type: "user", uuid, message: { role: "user", content: input.expected }, parent_tool_use_id: null, origin: { kind: "human" },
+      });
+      await handle.steer("continue", uuid);
+      assert.deepEqual((await iterator.next()).value.message.content, "continue");
+    } finally {
+      handle.close();
+    }
+  }
+});

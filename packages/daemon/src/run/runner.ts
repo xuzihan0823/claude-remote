@@ -20,6 +20,7 @@ import {
   type SdkQueryHandle,
   type EffortLevel,
   type ExternalPermissionMode,
+  type NativeMediaInput,
   type WorkerEvent,
   type CommandDescriptor,
   type StartQueryOptions,
@@ -72,6 +73,7 @@ export interface StartTurnOptions {
   sessionId: string;
   cwd: string;
   text: string;
+  attachments?: readonly NativeMediaInput[];
   clientMessageId?: string;
   /** Per-turn override. Omit to follow the Mac-side CLI/settings default. */
   model?: string;
@@ -261,9 +263,10 @@ export class TurnRunner {
   }
 
   startTurn(options: StartTurnOptions): TurnHandle {
-    const { sessionId, cwd, text, newSession = false, permissionMode } = options;
-    if (typeof text !== "string" || text.trim() === "") {
-      throw new TypeError("text must be a non-empty string");
+    const { attachments, ...runOptions } = options;
+    const { sessionId, cwd, text, newSession = false, permissionMode } = runOptions;
+    if (typeof text !== "string" || (text.trim() === "" && !attachments?.length)) {
+      throw new TypeError("a turn requires text or attachments");
     }
     if (newSession && !isUuid(sessionId)) {
       throw new TypeError("new sessionId must be a UUID");
@@ -297,7 +300,7 @@ export class TurnRunner {
       forceStop = () => resolve(FORCE_STOPPED);
     });
     const queue = new EventQueue<RunEvent>();
-    const run: ActiveRun = { sessionId, runId, cwd, query, options, queue, initialInputId: currentInputId, currentInputId, pending: [], replays: [],
+    const run: ActiveRun = { sessionId, runId, cwd, query, options: runOptions, queue, initialInputId: currentInputId, currentInputId, pending: [], replays: [],
       controller, aborted: false, forceStop, forceTimer: undefined,
       requestedPermissionMode: permissionMode ?? "default", diagnostics: [], taskStops: new Map(),
       tasks: new RunTasks(runId, (task) => queue.push({ type: "task", sessionId, runId, task })) };
@@ -316,7 +319,7 @@ export class TurnRunner {
   #openRunQuery(
     options: StartTurnOptions, signal: AbortSignal, prompt: string | undefined, clientMessageId: string | undefined, newSession = false,
   ): RunQuery {
-    const { sessionId, cwd, model, effort, permissionMode } = options;
+    const { sessionId, cwd, model, effort, permissionMode, attachments } = options;
     const approvals = new AbortController();
     const canUseTool = createPermissionAdapter(this.#permissions, { sessionKey: sessionId, userId: this.#userId }, {
       signal: AbortSignal.any([signal, approvals.signal]),
@@ -325,6 +328,7 @@ export class TurnRunner {
     const launch: StartQueryOptions = {
       cwd, canUseTool, signal,
       ...(prompt === undefined ? {} : { prompt }),
+      ...(attachments === undefined ? {} : { attachments }),
       ...(clientMessageId === undefined ? {} : { clientMessageId }),
       ...(newSession ? { sessionId } : { resume: sessionId }),
       ...(model === undefined ? {} : { model }),

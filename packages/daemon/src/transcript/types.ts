@@ -32,7 +32,18 @@ export interface FileCheckpoint {
 }
 
 export type RenderRole = "user" | "assistant";
-export type RenderKind = "text" | "tool_use" | "tool_result" | "thinking" | "meta" | "command_output" | "compact_boundary";
+export type RenderKind = "text" | "media" | "tool_use" | "tool_result" | "thinking" | "meta" | "command_output" | "compact_boundary";
+
+export interface TranscriptMediaDescriptor {
+  category: "image" | "document" | "unsupported";
+  status: "available" | "missing" | "too_large" | "unsupported";
+  sourceType?: "base64" | "url" | "text" | "content";
+  title?: string;
+  mediaType?: string;
+  byteLength?: number;
+  partIndex?: number;
+  url?: string;
+}
 
 /** JSONL 行映射出的渲染用统一结构。一行可拆出多条（blocks），seq 相同、blockIndex 不同。 */
 export interface RenderMessage {
@@ -49,6 +60,7 @@ export interface RenderMessage {
   compactMetadata?: Pick<CompactMetadata, "trigger" | "pre_tokens" | "post_tokens" | "duration_ms">;
   role: RenderRole;
   kind: RenderKind;
+  media?: TranscriptMediaDescriptor[];
   /** text / thinking / tool_result / meta 的文本。 */
   text?: string;
   toolName?: string;

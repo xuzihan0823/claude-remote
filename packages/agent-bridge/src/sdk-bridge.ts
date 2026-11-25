@@ -1,6 +1,6 @@
 import { query, type CanUseTool, type PermissionMode, type Query, type RewindFilesResult, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import type { ContextUsage } from "./types.js";
+import type { ContextUsage, NativeMediaInput } from "./types.js";
 
 export type QueryFactory = typeof query;
 
@@ -14,6 +14,7 @@ export function configuredClaudeExecutable(): string | undefined {
 export interface StartQueryOptions {
   cwd: string;
   prompt?: string;
+  attachments?: readonly NativeMediaInput[];
   /** Metadata probes keep stdin open and send no user message. */
   persistSession?: boolean;
   readOnlySideChat?: boolean;
@@ -83,11 +84,14 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
   if (options.resume !== undefined && options.sessionId !== undefined) {
     throw new TypeError("resume and sessionId are mutually exclusive");
   }
-  if (options.rewindControl && (options.prompt !== undefined || options.resume === undefined)) {
+  if (options.rewindControl && (options.prompt !== undefined || options.attachments?.length || options.resume === undefined)) {
     throw new TypeError("rewind control requires resume and does not accept a prompt");
   }
+  const { signal } = options;
   const input = new InputStream();
-  if (options.prompt !== undefined) input.push(userMessage(options.prompt, options.clientMessageId));
+  if (options.prompt !== undefined || options.attachments?.length) {
+    input.push(userMessage(options.prompt ?? "", options.clientMessageId, options.attachments));
+  }
   const restricted = options.readOnlySideChat || options.rewindControl;
   const persistSession = restricted ? false : options.persistSession ?? true;
   const sdkOptions = {
@@ -122,18 +126,18 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
     input.close(true);
     void sdkQuery.interrupt().catch(() => undefined);
   };
-  if (options.signal.aborted) abort();
-  else options.signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  else signal.addEventListener("abort", abort, { once: true });
   const closeInput = (): void => {
     closed = true;
     input.close();
-    options.signal.removeEventListener("abort", abort);
+    signal.removeEventListener("abort", abort);
   };
   return {
     messages: sdkQuery,
     async steer(prompt: string, clientMessageId?: string): Promise<void> {
       if (options.rewindControl) throw new Error("rewind control does not accept user messages");
-      if (options.signal.aborted) throw new Error("query input is aborted");
+      if (signal.aborted) throw new Error("query input is aborted");
       input.push(userMessage(prompt, clientMessageId));
     },
     supportedCommands: () => sdkQuery.supportedCommands(),
@@ -185,11 +189,22 @@ function withoutHostAuth(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return copy;
 }
 
-function userMessage(prompt: string, uuid?: string): SDKUserMessage {
+function userMessage(prompt: string, uuid?: string, attachments?: readonly NativeMediaInput[]): SDKUserMessage {
+  let content: SDKUserMessage["message"]["content"] = prompt;
+  if (attachments?.length) {
+    content = prompt.trim() === "" ? [] : [{ type: "text", text: prompt }];
+    for (const item of attachments) {
+      if (item.mediaType === "application/pdf") {
+        content.push({ type: "document", title: item.title, source: { type: "base64", media_type: item.mediaType, data: item.data } });
+      } else {
+        content.push({ type: "image", source: { type: "base64", media_type: item.mediaType, data: item.data } });
+      }
+    }
+  }
   return {
     type: "user",
     ...(uuid === undefined ? {} : { uuid: uuid as NonNullable<SDKUserMessage["uuid"]> }),
-    message: { role: "user", content: prompt },
+    message: { role: "user", content },
     parent_tool_use_id: null,
     origin: { kind: "human" },
   };
