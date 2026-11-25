@@ -8,12 +8,17 @@
 // 因此即使调用方不 await completion 也不会产生 unhandledRejection。
 
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { safePlugins, safeServers, type ExtensionAction, type ExtensionResult, type Plugin } from "./extensions.js";
 
 import {
   adaptSdkMessage,
+  createElicitationAdapter,
   createPermissionAdapter,
   startSdkQuery,
   SdkTaskStopError,
+  SessionToggleUnsupportedError,
+  type ElicitationBroker,
   type PermissionBroker,
   type QueryFactory,
   type RewindFilesResult,
@@ -110,6 +115,7 @@ type RewindOutcome =
 export interface TurnRunnerOptions {
   gate: ActivityGate;
   permissions: PermissionBroker;
+  elicitation?: ElicitationBroker;
   /** interactions 侧的固定用户标识（本项目单用户），默认 "web"。 */
   userId?: string;
   /**
@@ -160,6 +166,8 @@ interface PendingSteer {
 type LiveReplayEvent = Extract<WorkerEvent, { type: "command_output" | "compact_boundary" }>;
 
 interface RunQuery {
+  plugins?: Plugin[] | null;
+  extensionBusy?: boolean;
   sdk: SdkQueryHandle;
   approvals: AbortController;
   interruptBoundary: AbortController;
@@ -215,7 +223,7 @@ interface RecentReceipt<T> {
   expiresAt: number;
 }
 
-function control<T>(operation: () => Promise<T>, signal: AbortSignal, timeoutMs = CONTROL_TIMEOUT_MS): Promise<T> {
+function control<T>(operation: (() => Promise<T>) | Promise<T>, signal: AbortSignal, timeoutMs = CONTROL_TIMEOUT_MS): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   let stop: () => void;
   const deadline = new Promise<never>((_, reject) => {
@@ -224,7 +232,7 @@ function control<T>(operation: () => Promise<T>, signal: AbortSignal, timeoutMs 
     signal.addEventListener("abort", stop, { once: true });
     if (signal.aborted) stop();
   });
-  const request = Promise.resolve().then(() => {
+  const request = typeof operation !== "function" ? operation : Promise.resolve().then(() => {
     signal.throwIfAborted();
     return operation();
   });
@@ -237,6 +245,7 @@ function control<T>(operation: () => Promise<T>, signal: AbortSignal, timeoutMs 
 export class TurnRunner {
   readonly #gate: ActivityGate;
   readonly #permissions: PermissionBroker;
+  readonly #elicitation: ElicitationBroker | undefined;
   readonly #userId: string;
   readonly #permissionTimeoutMs: number | undefined;
   readonly #abortGraceMs: number;
@@ -256,6 +265,7 @@ export class TurnRunner {
   constructor(options: TurnRunnerOptions) {
     this.#gate = options.gate;
     this.#permissions = options.permissions;
+    this.#elicitation = options.elicitation;
     this.#userId = options.userId ?? "web";
     this.#permissionTimeoutMs = options.permissionTimeoutMs;
     this.#abortGraceMs = options.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS;
@@ -289,8 +299,9 @@ export class TurnRunner {
     const controller = new AbortController();
     let query: RunQuery;
     try {
-      query = this.#openRunQuery(options, controller.signal, options.compact ? undefined : text, currentInputId, newSession);
+      query = this.#openRunQuery(options, runId, controller.signal, options.compact ? undefined : text, currentInputId, newSession);
     } catch (error) {
+      controller.abort();
       this.#safeEndRun(sessionId);
       throw error;
     }
@@ -317,16 +328,19 @@ export class TurnRunner {
   }
 
   #openRunQuery(
-    options: StartTurnOptions, signal: AbortSignal, prompt: string | undefined, clientMessageId: string | undefined, newSession = false,
+    options: StartTurnOptions, runId: string, signal: AbortSignal, prompt: string | undefined, clientMessageId: string | undefined, newSession = false,
   ): RunQuery {
     const { sessionId, cwd, model, effort, permissionMode, attachments } = options;
     const approvals = new AbortController();
-    const canUseTool = createPermissionAdapter(this.#permissions, { sessionKey: sessionId, userId: this.#userId }, {
+    const context = { sessionKey: sessionId, runId, userId: this.#userId };
+    const adapterOptions = {
       signal: AbortSignal.any([signal, approvals.signal]),
       ...(this.#permissionTimeoutMs === undefined ? {} : { timeoutMs: this.#permissionTimeoutMs }),
-    });
+    };
+    const canUseTool = createPermissionAdapter(this.#permissions, context, adapterOptions);
     const launch: StartQueryOptions = {
       cwd, canUseTool, signal,
+      ...(this.#elicitation === undefined ? {} : { onElicitation: createElicitationAdapter(this.#elicitation, context, adapterOptions) }),
       ...(prompt === undefined ? {} : { prompt }),
       ...(attachments === undefined ? {} : { attachments }),
       ...(clientMessageId === undefined ? {} : { clientMessageId }),
@@ -595,6 +609,74 @@ export class TurnRunner {
     }
   }
 
+  extensionTargetGuard(sessionId: string): () => boolean {
+    const query = this.#findRun(sessionId)?.query;
+    return () => this.#findRun(sessionId)?.query === query;
+  }
+
+  async extensions(sessionId: string, action: ExtensionAction, expectedRun?: string): Promise<ExtensionResult> {
+    const run = this.#findRun(sessionId);
+    if (!run) return { status: "unavailable", reason: "no_active_sdk" };
+    if (expectedRun !== undefined && expectedRun !== run.runId) return { status: "unavailable", reason: "run_mismatch" };
+    const { query, runId } = run;
+    const current = () => this.#findRun(sessionId) === run && run.query === query && !run.aborted && !run.interrupting;
+    if (!current()) return { status: "unavailable", reason: "session_changed" };
+    if (query.extensionBusy) return { status: "unavailable", reason: "extension_busy" };
+    if (action.type === "read" && !query.plugins) {
+      return { status: "unavailable", reason: query.plugins === undefined ? "initializing" : "sdk_unavailable" };
+    }
+    query.extensionBusy = true;
+    let expired = false;
+    const check = () => { if (expired || !current()) throw new Error("session_changed"); };
+    const request = Promise.resolve().then(async (): Promise<ExtensionResult> => {
+      check();
+      if (action.type === "reload") {
+        // A failed or timed-out reload can still have changed the subprocess.
+        query.plugins = null;
+        const snapshot = await query.sdk.reloadPlugins();
+        check();
+        const mcp = safeServers(snapshot.mcpServers);
+        const plugins = safePlugins(snapshot.plugins);
+        if (!Array.isArray(snapshot.commands)) throw new Error("sdk_unavailable");
+        const commands = this.#updateCommands(run, snapshot.commands);
+        query.plugins = plugins;
+        return { status: "available", runId, mcp, plugins, commands };
+      }
+      if (action.type === "reconnect") {
+        await query.sdk.reconnectMcpServer(action.name);
+        check();
+      } else if (action.type === "toggle") {
+        await query.sdk.toggleMcpServer(action.name, action.enabled);
+        check();
+      }
+      const mcp = safeServers(await query.sdk.mcpServerStatus());
+      check();
+      if (action.type === "reconnect" || action.type === "toggle") {
+        const server = mcp.find((item) => item.name === action.name);
+        return server ? { status: "available", runId, server } : { status: "unavailable", reason: "server_not_found" };
+      }
+      if (!query.plugins) return { status: "unavailable", reason: "initializing" };
+      return { status: "available", runId, mcp, plugins: query.plugins };
+    }).finally(() => { delete query.extensionBusy; });
+    try {
+      const result = await control(request, run.controller.signal);
+      return current() ? result : { status: "unavailable", reason: "session_changed" };
+    } catch (error) {
+      if (!current()) return { status: "unavailable", reason: "session_changed" };
+      return { status: "unavailable", reason: error instanceof SessionToggleUnsupportedError ? "session_toggle_unsupported" : "sdk_unavailable" };
+    } finally {
+      expired = true;
+    }
+  }
+
+  #updateCommands(run: ActiveRun, descriptors: CommandDescriptor[]): CommandCatalog {
+    const catalog = commandCatalog("sdk_update", descriptors, run.commandInit);
+    if (run.catalog && isDeepStrictEqual(run.catalog.commands, catalog.commands)) return run.catalog;
+    run.catalog = catalog;
+    run.queue.push({ type: "commands", sessionId: run.sessionId, runId: run.runId, catalog });
+    return catalog;
+  }
+
   async mcpOverview(sessionId: string): Promise<McpOverview> {
     const run = this.#findRun(sessionId);
     if (!run || run.aborted || run.interrupting) return { status: "unavailable" };
@@ -765,7 +847,12 @@ export class TurnRunner {
         let result: Extract<WorkerEvent, { type: "result" }> | undefined;
         if (next !== INTERRUPT_BOUNDARY && !next.done) {
           if ("session_id" in next.value && next.value.session_id !== sessionId) continue;
-          for (let event of adaptSdkMessage(next.value)) {
+          const message = next.value;
+          if (message.type === "system" && message.subtype === "init" && Array.isArray(message.plugins) &&
+            !("agent_id" in message && message.agent_id) && !("parent_tool_use_id" in message && message.parent_tool_use_id)) {
+            run.query.plugins = safePlugins(message.plugins);
+          }
+          for (let event of adaptSdkMessage(message)) {
             if (event.type === "session" && event.sessionId !== sessionId) continue;
             if (event.type === "permission_mode") {
               run.effectivePermissionMode = event.effectiveMode;
@@ -814,7 +901,7 @@ export class TurnRunner {
           if (!nextInput) throw new Error("interrupted");
           run.steering = nextInput;
           run.currentInputId = nextInput.receipt.clientMessageId;
-          run.query = this.#openRunQuery(run.options, run.controller.signal, nextInput.receipt.text, run.currentInputId);
+          run.query = this.#openRunQuery(run.options, runId, run.controller.signal, nextInput.receipt.text, run.currentInputId);
           iterator = run.query.sdk.messages[Symbol.asyncIterator]();
           this.#advanceSteer(run, nextInput, "delivered");
           continue;
@@ -844,6 +931,7 @@ export class TurnRunner {
       if (run.forceTimer !== undefined) clearTimeout(run.forceTimer);
       if (run.interrupting) clearTimeout(run.interrupting.timer);
       void Promise.resolve().then(() => iterator.return?.()).catch(() => undefined);
+      run.query.approvals.abort();
       try { run.query.sdk.close(); } catch { /* Cleanup must not prevent settlement. */ }
     }
     if (outcome.state === "error") {
@@ -889,8 +977,7 @@ export class TurnRunner {
         queue.push({ type: "commands", sessionId, runId, catalog: run.catalog });
       }).catch(() => undefined);
     } else if (event.type === "commands_changed") {
-      run.catalog = commandCatalog("sdk_update", event.commands, run.commandInit);
-      queue.push({ type: "commands", sessionId, runId, catalog: run.catalog });
+      this.#updateCommands(run, event.commands);
     } else if (event.type === "command_output" || event.type === "compact_boundary") {
       if (run.replays.some(({ eventId }) => eventId === event.eventId)) return false;
       run.replays.push(event);

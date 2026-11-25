@@ -2,21 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { QueryFactory } from "../src/sdk-bridge.js";
-import { configuredClaudeExecutable, startSdkQuery, type EffortLevel, type ExternalPermissionMode } from "../src/sdk-bridge.js";
+import { configuredClaudeExecutable, SessionToggleUnsupportedError, startSdkQuery, type EffortLevel, type ExternalPermissionMode } from "../src/sdk-bridge.js";
 
 type QueryParams = Parameters<QueryFactory>[0];
 type SdkQuery = ReturnType<QueryFactory>;
 
-function fakeQuery(stopTask?: SdkQuery["stopTask"], rewindFiles?: SdkQuery["rewindFiles"]): { factory: QueryFactory; params: () => QueryParams | undefined } {
+type SdkControls = Pick<SdkQuery, "stopTask" | "rewindFiles" | "reconnectMcpServer" | "reloadPlugins" | "toggleMcpServer">;
+
+function fakeQuery(controls: Partial<SdkControls> = {}): { factory: QueryFactory; params: () => QueryParams | undefined } {
   let captured: QueryParams | undefined;
   const factory = ((params: QueryParams): SdkQuery => {
     captured = params;
     const generator = (async function* () {})();
     const query = generator as unknown as Record<string, unknown>;
+    Object.assign(query, controls);
     query.interrupt = async (): Promise<void> => undefined;
     query.close = (): void => undefined;
-    if (stopTask) query.stopTask = stopTask;
-    query.rewindFiles = rewindFiles;
     return generator as unknown as SdkQuery;
   }) as unknown as QueryFactory;
   return { factory, params: () => captured };
@@ -192,7 +193,7 @@ test("only an explicit bypassPermissions turn enables the SDK bypass option", ()
 
 test("stopTask forwards task ID to the original live Query and rejects closed or unsupported control", async () => {
   const calls: string[] = [];
-  const handle = options(fakeQuery(async (id) => { calls.push(id); }).factory);
+  const handle = options(fakeQuery({ stopTask: async (id) => { calls.push(id); } }).factory);
   await handle.stopTask("agent-1");
   handle.close();
   await assert.rejects(handle.stopTask("agent-1"), { code: "task_stop_unavailable" });
@@ -202,20 +203,22 @@ test("stopTask forwards task ID to the original live Query and rejects closed or
   await assert.rejects(legacy.stopTask("agent-1"), { code: "task_stop_unavailable" });
   legacy.close();
 
-  const missing = options(fakeQuery(async (id) => { throw new Error(`No task found with ID: ${id}`); }).factory);
+  const missing = options(fakeQuery({ stopTask: async (id) => { throw new Error(`No task found with ID: ${id}`); } }).factory);
   await assert.rejects(missing.stopTask("agent-1"), { code: "task_inactive" });
   missing.close();
 
-  const unsupported = options(fakeQuery(async () => { throw new Error("Unsupported control request subtype: stop_task"); }).factory);
+  const unsupported = options(fakeQuery({ stopTask: async () => { throw new Error("Unsupported control request subtype: stop_task"); } }).factory);
   await assert.rejects(unsupported.stopTask("agent-1"), { code: "task_stop_unavailable" });
   unsupported.close();
 });
 
 test("file controls use a non-persisted resume, no prompt, and forward native rewind options", async () => {
   const calls: Array<Parameters<SdkQuery["rewindFiles"]>> = [];
-  const fake = fakeQuery(undefined, async (...args) => {
-    calls.push(args);
-    return { canRewind: true, filesChanged: ["notes.txt"], insertions: 2, deletions: 1 };
+  const fake = fakeQuery({
+    rewindFiles: async (...args) => {
+      calls.push(args);
+      return { canRewind: true, filesChanged: ["notes.txt"], insertions: 2, deletions: 1 };
+    },
   });
   const resume = "/tmp/project/session.jsonl";
   const checkpoint = "11111111-1111-4111-8111-111111111111";
@@ -279,4 +282,26 @@ test("SDK keeps string prompts and encodes image and PDF as ordered native conte
       handle.close();
     }
   }
+});
+
+test("extension controls target the same SDK query and elicitation defaults to cancel", async () => {
+  const calls: string[] = [];
+  const snapshot = { plugins: [], commands: [], agents: [], mcpServers: [], error_count: 0 };
+  const fake = fakeQuery({ reconnectMcpServer: async (name) => { calls.push(name); }, reloadPlugins: async () => snapshot });
+  const handle = options(fake.factory);
+  await handle.reconnectMcpServer("example");
+  assert.deepEqual(calls, ["example"]);
+  assert.equal(await handle.reloadPlugins(), snapshot);
+  assert.deepEqual(await fake.params()?.options?.onElicitation?.({ serverName: "example", message: "input" },
+    { signal: new AbortController().signal }), { action: "cancel" });
+  handle.close();
+});
+
+test("session-only MCP toggle never invokes the persistent SDK control", async (t) => {
+  const toggleMcpServer = t.mock.fn(async () => {});
+  const fake = fakeQuery({ toggleMcpServer });
+  const handle = options(fake.factory);
+  t.after(() => handle.close());
+  await assert.rejects(handle.toggleMcpServer("fixture", false), SessionToggleUnsupportedError);
+  assert.equal(toggleMcpServer.mock.callCount(), 0);
 });

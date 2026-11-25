@@ -20,6 +20,48 @@ function harness() {
   return { runner, queries: sdk.queries, terminal };
 }
 
+test("extension reloads serialize across timeout and discard old Query responses after send-now", { timeout: 9000 }, async () => {
+  const { runner, queries } = harness();
+  const handle = runner.startTurn({ sessionId, cwd, text: "initial" });
+  const [first] = queries;
+  assert.ok(first);
+  let release!: () => void;
+  const wait = new Promise<void>((resolve) => { release = resolve; });
+  const snapshot = { plugins: [{ name: "loaded", path: "/private" }], mcpServers: [], commands: first.commands, agents: [], error_count: 0 };
+  first.reloadPlugins = async () => { await wait; return snapshot; };
+  const reload = () => runner.extensions(sessionId, { type: "reload" }, handle.runId);
+  const pending = reload();
+  assert.deepEqual(await reload(), { status: "unavailable", reason: "extension_busy" });
+  assert.deepEqual(await pending, { status: "unavailable", reason: "sdk_unavailable" });
+  assert.deepEqual(await reload(), { status: "unavailable", reason: "extension_busy" });
+  release();
+  await setImmediate();
+  assert.equal(runner.p1State(sessionId).commands, undefined);
+  assert.deepEqual(await runner.extensions(sessionId, { type: "read" }), { status: "unavailable", reason: "sdk_unavailable" });
+  let finish!: () => void;
+  const finishing = new Promise<void>((resolve) => { finish = resolve; });
+  first.reloadPlugins = async () => { await finishing; return snapshot; };
+  const stale = reload();
+  await setImmediate();
+  const replacement = randomUUID();
+  runner.steer(sessionId, handle.runId, replacement, "replacement");
+  runner.mutateSteer(sessionId, handle.runId, replacement, { type: "send_now" });
+  await setImmediate();
+  const second = queries[1];
+  assert.ok(second);
+  finish();
+  assert.deepEqual(await stale, { status: "unavailable", reason: "session_changed" });
+  assert.deepEqual(await runner.extensions(sessionId, { type: "read" }), { status: "unavailable", reason: "initializing" });
+  second.reloadPlugins = async () => snapshot;
+  assert.deepEqual(await reload(), await reload());
+  second.send({ type: "system", subtype: "commands_changed", commands: snapshot.commands });
+  second.result(replacement);
+  await handle.completion;
+  const events: RunEvent[] = [];
+  for await (const event of handle.events) events.push(event);
+  assert.equal(events.filter((e) => e.type === "commands").length, 1);
+});
+
 test("P1 steer serializes inputs, confirms delivery, and never counts replayed result frames twice", { timeout: 4000 }, async () => {
   const { runner, queries } = harness();
   const first = randomUUID(), second = randomUUID(), third = randomUUID();

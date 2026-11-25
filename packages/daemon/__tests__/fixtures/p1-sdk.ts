@@ -13,6 +13,7 @@ export class P1Query {
   interrupts = 0;
   onInterrupt?: () => Promise<void> | void;
   onReturn?: () => Promise<void>;
+  reloadPlugins?: Query["reloadPlugins"];
   mcpStatuses: Array<Record<string, unknown>> = [];
   contextCalls = 0;
   contextFailable = false;
@@ -82,6 +83,10 @@ export class P1Query {
         this.close();
         await this.onReturn?.();
         return { value: undefined, done: true };
+      },
+      reloadPlugins: async () => {
+        if (!this.reloadPlugins) throw new Error("unsupported control");
+        return this.reloadPlugins();
       },
       mcpServerStatus: async () => this.mcpStatuses,
       supportedCommands: async () => this.commands,

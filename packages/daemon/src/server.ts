@@ -30,6 +30,7 @@ import { FileAccessError, IMAGE_FILE_LIMIT_BYTES, SESSION_FILE_LIMIT_BYTES, file
 import { sdkSessionOperations, type SessionOperations } from "./session-operations.js";
 import { isSafeSessionId, isUuid, readSessionCwd, resolveSessionFile } from "./session-files.js";
 import { StreamBuffer } from "./run/stream-buffer.js";
+import { validExtensionName, type ExtensionAction, type ExtensionRequest } from "./run/extensions.js";
 import { approvalLink, NotIdleError, sessionLink, RunRequestError, type ApprovalBridge, type ApprovalEvent, type Notifier, type TurnHandle, type TurnRunner } from "./run/index.js";
 import { listSessions, readSessionSummary } from "./transcript/indexer.js";
 import { buildProjectIndex } from "./transcript/projects.js";
@@ -191,7 +192,23 @@ export class DaemonServer {
   }
 
   /** ApprovalBridge onEvent 接线入口：广播 + 审批创建通知。 */
-  handleApprovalEvent(event: ApprovalEvent): void {
+  handleApprovalEvent(event: ApprovalEvent): boolean | void {
+    if (event.type === "elicitation") {
+      if (this.#closed) return false;
+      const { sessionId, interactionId } = event.interaction;
+      const payload = JSON.stringify(event);
+      let sent = false;
+      for (const [ws, state] of this.#clients) {
+        if (!state.subs.has(sessionId) || ws.readyState !== WebSocket.OPEN) continue;
+        ws.send(payload, (error) => { if (error) this.#options.approvals.cancelElicitation(interactionId); });
+        sent = true;
+      }
+      return sent;
+    }
+    if (event.type === "elicitation.resolved") {
+      this.#broadcastToSubscribers(event.sessionId, event);
+      return;
+    }
     this.#broadcastAll(event);
     if (event.type === "approval") {
       const card = event.interaction;
@@ -375,6 +392,21 @@ export class DaemonServer {
       return;
     }
 
+    const extension = /^\/api\/sessions\/([^/]+)\/(extensions|plugins\/reload|mcp\/([^/]*)\/(reconnect|toggle))$/.exec(rawPath);
+    if (extension && (extension[2] === "extensions" ? method === "GET" : method === "POST")) {
+      const sessionId = decodePathSegment(extension[1]).toLowerCase();
+      if (!isUuid(sessionId)) { this.#json(res, 400, { error: "invalid_session_id" }); return; }
+      const name = decodePathSegment(extension[3]);
+      const operation = extension[4];
+      if (operation === "reconnect" || operation === "toggle") {
+        if (!validExtensionName(name)) { this.#json(res, 400, { error: "invalid_server_name" }); return; }
+        await this.#handleExtensions(req, res, sessionId, { type: operation, name });
+      } else {
+        await this.#handleExtensions(req, res, sessionId, { type: method === "GET" ? "read" : "reload" });
+      }
+      return;
+    }
+
     const p1Match = /^\/api\/sessions\/([^/]+)\/(state|context|usage|steer|compact|btw|workspace)(?:\/([^/]+)(\/send-now)?)?$/.exec(path);
     if (p1Match) {
       const [, encodedId, operation, messageId, sendNow] = p1Match;
@@ -461,7 +493,7 @@ export class DaemonServer {
 
     const decisionMatch = /^\/api\/interactions\/([^/]+)\/decision$/.exec(path);
     if (decisionMatch !== null && method === "POST") {
-      await this.#handleDecision(req, res, decodeURIComponent(decisionMatch[1] ?? ""));
+      await this.#handleDecision(req, res, decodePathSegment(decisionMatch[1]));
       return;
     }
 
@@ -920,6 +952,39 @@ export class DaemonServer {
     } finally {
       res.off("close", disconnect);
     }
+  }
+
+  async #handleExtensions(req: IncomingMessage, res: ServerResponse, sessionId: string, request: ExtensionRequest): Promise<void> {
+    const { runner, tracker } = this.#options;
+    const current = runner.extensionTargetGuard(sessionId);
+    const terminal = () => tracker.getStatus(sessionId) === "terminal-driving";
+    let expectedRun: string | undefined;
+    let action: ExtensionAction | undefined = request.type === "toggle" ? undefined : request;
+    if (request.type !== "read") {
+      const body = await this.#readJsonBody(req, res, request.type !== "toggle");
+      if (body === undefined) return;
+      if (Array.isArray(body)) { this.#json(res, 400, { error: "invalid_json" }); return; }
+      const { runId, enabled } = body as Record<string, unknown>;
+      if (runId !== undefined) {
+        if (typeof runId !== "string" || !isUuid(runId)) { this.#json(res, 400, { error: "invalid_run_id" }); return; }
+        expectedRun = runId.toLowerCase();
+      }
+      if (request.type === "toggle") {
+        if (typeof enabled !== "boolean") { this.#json(res, 400, { error: "invalid_enabled" }); return; }
+        action = { ...request, enabled };
+      }
+      if (this.#rejectClosing(res)) return;
+    }
+    if (!action || res.destroyed) return;
+    const changed = () => terminal() ? "terminal_driving" as const : current() ? undefined : "session_changed" as const;
+    const before = changed();
+    const result = before ? { status: "unavailable" as const, reason: before } : await runner.extensions(sessionId, action, expectedRun);
+    const after = changed();
+    if (!after && result.status === "available") { this.#json(res, 200, result); return; }
+    const error = after ?? (result.status === "unavailable" ? result.reason : "session_changed");
+    if (action.type === "read") { this.#json(res, 200, { status: "unavailable", reason: error }); return; }
+    const status = error === "sdk_unavailable" ? 503 : error === "session_toggle_unsupported" ? 501 : error === "server_not_found" ? 404 : 409;
+    this.#json(res, status, { error });
   }
 
   async #handleWorkspace(res: ServerResponse, sessionId: string): Promise<void> {
@@ -1612,7 +1677,7 @@ export class DaemonServer {
         case "allowed":
         case "denied":
         case "answered":
-          this.#json(res, 200, { status: outcome.status });
+          this.#json(res, 200, { status: outcome.status, ...("action" in outcome ? { action: outcome.action } : {}) });
           return;
         case "not_found":
           this.#json(res, 404, { error: "not_found" });
@@ -1709,7 +1774,10 @@ export class DaemonServer {
       this.#clients.delete(ws);
       if (this.#clients.size === 0) this.#options.approvals.cancelPending();
       state.subscribing.clear();
-      for (const sessionId of state.subs) this.#releaseWatch(sessionId);
+      for (const sessionId of state.subs) {
+        this.#options.approvals.cancelElicitations(sessionId);
+        this.#releaseWatch(sessionId);
+      }
     });
     ws.on("error", () => ws.terminate());
   }
@@ -1767,8 +1835,10 @@ export class DaemonServer {
     }
     if (type === "unsubscribe") {
       state.subscribing.delete(sessionId);
-      state.subs.delete(sessionId);
-      if (sessionId !== "*") this.#releaseWatch(sessionId);
+      if (state.subs.delete(sessionId) && sessionId !== "*") {
+        this.#options.approvals.cancelElicitations(sessionId);
+        this.#releaseWatch(sessionId);
+      }
     }
   }
 

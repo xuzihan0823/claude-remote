@@ -105,6 +105,7 @@ async function main(): Promise<void> {
   const runner = new TurnRunner({
     gate,
     permissions: approvals,
+    elicitation: approvals,
     permissionTimeoutMs: config.permissionTimeoutMs,
   });
   const notifier = createNotifier({

@@ -69,6 +69,7 @@ interface FakeSdk {
   finish: () => void;
   interrupts: number;
   delayAbort: boolean;
+  controls?: Partial<Pick<SdkQuery, "mcpServerStatus" | "reconnectMcpServer" | "reloadPlugins" | "toggleMcpServer">>;
   systemMessages?: Array<Record<string, unknown>>;
   finalSystemMessages?: Array<Record<string, unknown>>;
   stopTask?: (taskId: string) => Promise<void>;
@@ -104,6 +105,7 @@ function fakeSdk(): FakeSdk {
         uuid: "sdk-result", session_id: sessionId } as never;
     })();
     const augmented = generator as unknown as Record<string, unknown>;
+    Object.assign(augmented, holder.controls);
     augmented.interrupt = async (): Promise<void> => {
       holder.interrupts += 1;
       if (!holder.delayAbort) release();
@@ -179,7 +181,7 @@ async function startHarness(
   let server: DaemonServer;
   const bridge = new ApprovalBridge({ manager, onEvent: (event) => server.handleApprovalEvent(event) });
   const sdk = fakeSdk();
-  const runner = new TurnRunner({ gate, permissions: bridge, queryFactory: sdk.factory });
+  const runner = new TurnRunner({ gate, permissions: bridge, elicitation: bridge, queryFactory: sdk.factory });
   const notifications: Array<{ title: string; body: string }> = [];
   const notifier: Notifier = async (title, body) => {
     notifications.push({ title, body });
@@ -1353,12 +1355,14 @@ test("plan approval exposes native suggestions over WS and HTTP, and applies onl
   assert.equal((await decide({ decision: "allow_once", applySuggestionIds: ["plan:0"] })).status, 409);
 });
 
-test("ordinary approvals and legacy deny and answer decisions keep their SDK behavior", async () => {
-  const canUseTool = createPermissionAdapter(harness.bridge, { sessionKey: SESSION_ID, userId: "web" });
+test("ordinary approvals and legacy deny and answer decisions keep their SDK behavior", async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  const canUseTool = createPermissionAdapter(h.bridge, { sessionKey: SESSION_ID, userId: "web" });
   const decide = async (body: unknown) => {
-    const card = harness.bridge.pending()[0];
+    const card = h.bridge.pending()[0];
     assert.ok(card);
-    const res = await fetch(`${harness.base}/api/interactions/${card.interactionId}/decision`,
+    const res = await fetch(`${h.base}/api/interactions/${card.interactionId}/decision`,
       authed({ method: "POST", body: JSON.stringify(body) }));
     assert.equal(res.status, 200);
     return res.json();
@@ -2253,4 +2257,170 @@ test("历史原生媒体：分页和 WS 只投影描述，按物理行和块索�
   const tooLarge = await fetch(`${h.base}${media(4, 0)}`, authed());
   assert.equal(tooLarge.status, 413);
   assert.deepEqual(await tooLarge.json(), { error: "payload_too_large" });
+});
+
+test("extensions HTTP contracts redact SDK fields and reject persistent or stale controls", async (t) => {
+  const h = await startHarness();
+  t.after(h.dispose);
+  const base = `${h.base}/api/sessions/${SESSION_ID}/`;
+  const request = async (path: string, body?: object) => {
+    const res = await fetch(base + path, authed(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }));
+    return { code: res.status, json: await res.json() };
+  };
+  assert.deepEqual(await request("extensions"), { code: 200, json: { status: "unavailable", reason: "no_active_sdk" } });
+  assert.equal((await request("plugins/reload", {})).code, 409);
+  assert.equal((await request("mcp/%C2%80/reconnect", {})).code, 400);
+  assert.equal((await request("mcp/%20/reconnect", {})).code, 400);
+  assert.equal((await request("plugins/reload", { runId: "bad" })).code, 400);
+  assert.equal((await request("mcp/example/toggle", { enabled: "true" })).code, 400);
+  assert.equal((await fetch(`${h.base}/api/sessions/bad/extensions`, authed())).status, 400);
+  let connected = false, failing = false, toggleCalls = 0;
+  const servers = (): Awaited<ReturnType<SdkQuery["mcpServerStatus"]>> => [{ name: "example", status: connected ? "connected" : "failed",
+    config: { type: "http", url: "https://example.com/private" }, error: "secret failure" }];
+  h.sdk.systemMessages = [{ subtype: "init", plugins: [{ name: "initial", path: "/private" }] }];
+  h.sdk.controls = {
+    reconnectMcpServer: async (name) => { assert.equal(name, "example"); connected = true; },
+    mcpServerStatus: async () => { if (failing) throw new Error("secret failure"); return servers(); },
+    toggleMcpServer: async () => { toggleCalls++; },
+    reloadPlugins: async () => ({ plugins: [{ name: "refreshed", path: "/private" }], commands: [], agents: [], mcpServers: servers(), error_count: 0 }),
+  };
+  const started = await request("messages", { text: "hello" });
+  assert.equal(started.code, 202);
+  const { runId } = started.json;
+  const available = { status: "available", runId };
+  assert.deepEqual(await request("extensions"), { code: 200, json: { ...available, mcp: [{ name: "example", status: "failed" }], plugins: [{ name: "initial" }] } });
+  assert.equal((await request("mcp/example/reconnect", { runId: SESSION_ID })).code, 409);
+  assert.equal(connected, false);
+  assert.deepEqual(await request("mcp/example/toggle", { enabled: false }), { code: 501, json: { error: "session_toggle_unsupported" } });
+  assert.equal(toggleCalls, 0);
+  const server = { name: "example", status: "connected" };
+  assert.deepEqual(await request("mcp/example/reconnect", { runId }), { code: 200, json: { ...available, server } });
+  const snapshot = { ...available, mcp: [server], plugins: [{ name: "refreshed" }] };
+  assert.deepEqual(await request("plugins/reload", {}), { code: 200, json: { ...snapshot, commands: { source: "sdk_update", commands: [] } } });
+  assert.deepEqual(await request("extensions"), { code: 200, json: snapshot });
+  failing = true;
+  assert.deepEqual(await request("extensions"), { code: 200, json: { status: "unavailable", reason: "sdk_unavailable" } });
+  h.sdk.finish();
+  await delay(0);
+  h.tracker.noteWrite(SESSION_ID, Date.now() + 5000);
+  assert.deepEqual(await request("extensions"), { code: 200, json: { status: "unavailable", reason: "terminal_driving" } });
+  assert.deepEqual(await request("plugins/reload", {}), { code: 409, json: { error: "terminal_driving" } });
+});
+
+test("SDK elicitation form and URL use the session WS and typed HTTP decisions", { timeout: 8_000 }, async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  const sink = new FrameSink(h.wsUrl());
+  const observer = new FrameSink(h.wsUrl());
+  await Promise.all([sink.open(), observer.open()]);
+  sink.send({ type: "subscribe", sessionId: SESSION_ID });
+  await sink.waitFor((frame) => frame.type === "session-state");
+  observer.send({ type: "subscribe", sessionId: "*" });
+  const started = await fetch(`${h.base}/api/sessions/${SESSION_ID}/messages`, authed({ method: "POST", body: JSON.stringify({ text: "start elicitation" }) }));
+  assert.equal(started.status, 202);
+  const { runId } = await started.json() as { runId: string };
+  const callback = h.sdk.params?.options?.onElicitation;
+  assert.ok(callback);
+  const signal = new AbortController().signal;
+  const submit = (id: unknown, body: unknown) => fetch(`${h.base}/api/interactions/${id}/decision`, authed({ method: "POST", body: JSON.stringify(body) }));
+  const interaction = async (mode: "form" | "url") => {
+    const frame = await sink.waitFor((item) => item.type === "elicitation" && (item.interaction as Record<string, unknown>).mode === mode);
+    const card = frame.interaction as Record<string, unknown>;
+    assert.equal(card.kind, "elicitation");
+    assert.equal(card.sessionId, SESSION_ID);
+    assert.equal(card.runId, runId);
+    assert.equal(card.serverName, "fixture");
+    assert.ok(typeof card.expiresAt === "number" && card.expiresAt > Date.now());
+    return card;
+  };
+
+  const requestedSchema = { type: "object", properties: { region: { type: "string" } } };
+  const form = callback({ serverName: "fixture", message: "Choose a region", requestedSchema, title: "unprojected" }, { signal });
+  const formCard = await interaction("form");
+  assert.equal(formCard.message, "Choose a region");
+  assert.deepEqual(formCard.requestedSchema, requestedSchema);
+  assert.equal(Object.hasOwn(formCard, "title"), false);
+  assert.equal((await submit(formCard.interactionId, { type: "allow_once" })).status, 400);
+  for (const input of [{ action: "approve" }, { action: "accept", content: null }, { action: "accept", content: [] },
+    { action: "accept", content: { nested: {} } }, { action: "accept", applySuggestionIds: ["other:0"] },
+    { action: "accept", type: "allow_once" }]) {
+    assert.equal((await submit(formCard.interactionId, { decision: "elicitation", ...input })).status, 400);
+  }
+  const content = { region: "fixture-selection", scopes: ["read"] };
+  const accepted = await submit(formCard.interactionId, { decision: "elicitation", action: "accept", content });
+  assert.equal(accepted.status, 200);
+  assert.deepEqual(await accepted.json(), { status: "allowed", action: "accept" });
+  assert.deepEqual(await form, { action: "accept", content });
+  const formEnd = await sink.waitFor((frame) => frame.type === "elicitation.resolved" && frame.interactionId === formCard.interactionId);
+  assert.deepEqual(formEnd, { type: "elicitation.resolved", sessionId: SESSION_ID, runId, interactionId: formCard.interactionId, status: "allowed", action: "accept" });
+  assert.equal((await submit(formCard.interactionId, { decision: "elicitation", action: "cancel" })).status, 409);
+
+  const url = "https://example.com/authorize?state=fixture%2Fstate";
+  const confirmation = callback({ mode: "url", serverName: "fixture", message: "Authorize", url, elicitationId: "fixture-id" }, { signal });
+  const urlCard = await interaction("url");
+  assert.equal(urlCard.url, url);
+  assert.equal(urlCard.elicitationId, "fixture-id");
+  assert.equal(Object.hasOwn(urlCard, "requestedSchema"), false);
+  assert.equal((await submit(urlCard.interactionId, { decision: "elicitation", action: "accept", content: {} })).status, 400);
+  const confirmed = await submit(urlCard.interactionId, { decision: "elicitation", action: "accept" });
+  assert.equal(confirmed.status, 200);
+  assert.deepEqual(await confirmation, { action: "accept" });
+  await sink.waitFor((frame) => frame.type === "elicitation.resolved" && frame.interactionId === urlCard.interactionId);
+  assert.equal(observer.frames.some((frame) => String(frame.type).startsWith("elicitation")), false);
+  assert.deepEqual(await (await fetch(`${h.base}/api/interactions/pending`, authed())).json(), { interactions: [] });
+});
+
+test("SDK elicitation cancels with no subscriber, on disconnect and on run abort", { timeout: 8_000 }, async (t) => {
+  const h = await startHarness();
+  t.after(() => h.dispose());
+  const start = await fetch(`${h.base}/api/sessions/${SESSION_ID}/messages`, authed({ method: "POST", body: JSON.stringify({ text: "start elicitation" }) }));
+  assert.equal(start.status, 202);
+  const { runId } = await start.json() as { runId: string };
+  const callback = h.sdk.params?.options?.onElicitation;
+  assert.ok(callback);
+  const elicit = (message: string) => callback({ serverName: "fixture", message, requestedSchema: { type: "object" } }, { signal: new AbortController().signal });
+  assert.deepEqual(await elicit("No client"), { action: "cancel" });
+
+  const sink = new FrameSink(h.wsUrl());
+  await sink.open();
+  sink.send({ type: "subscribe", sessionId: SESSION_ID });
+  await sink.waitFor((frame) => frame.type === "session-state");
+  const disconnected = elicit("Disconnect");
+  const card = await sink.waitFor((frame) => frame.type === "elicitation");
+  const { interactionId } = card.interaction as { interactionId: string };
+  sink.close();
+  assert.deepEqual(await disconnected, { action: "cancel" });
+  const late = await fetch(`${h.base}/api/interactions/${interactionId}/decision`, authed({ method: "POST", body: JSON.stringify({ decision: "elicitation", action: "accept" }) }));
+  assert.equal(late.status, 409);
+
+  const next = new FrameSink(h.wsUrl());
+  await next.open();
+  next.send({ type: "subscribe", sessionId: SESSION_ID });
+  await next.waitFor((frame) => frame.type === "session-state");
+  const bodyDisconnected = elicit("HTTP disconnect");
+  const bodyCard = await next.waitFor((frame) => frame.type === "elicitation");
+  const bodyId = (bodyCard.interaction as { interactionId: string }).interactionId;
+  const url = `${h.base}/api/interactions/${bodyId}/decision`;
+  const body = JSON.stringify({ decision: "elicitation", action: "accept" });
+  const partial = request(url, { method: "POST", headers: {
+    Authorization: `Bearer ${TOKEN}`, Expect: "100-continue", "Content-Length": Buffer.byteLength(body),
+  } });
+  t.after(() => { partial.destroy(); });
+  partial.on("error", () => {});
+  const continued = once(partial, "continue");
+  partial.flushHeaders();
+  await continued;
+  partial.write(body.slice(0, -1));
+  partial.destroy();
+  assert.deepEqual(await bodyDisconnected, { action: "cancel" });
+  await next.waitFor((frame) => frame.type === "elicitation.resolved" && frame.interactionId === bodyId && frame.action === "cancel");
+  assert.equal((await fetch(url, authed({ method: "POST", body }))).status, 409);
+
+  const interrupted = elicit("Abort run");
+  const runCard = await next.waitFor((frame) => frame.type === "elicitation" && (frame.interaction as { interactionId: string }).interactionId !== bodyId);
+  const runInteractionId = (runCard.interaction as { interactionId: string }).interactionId;
+  const stop = await fetch(`${h.base}/api/sessions/${SESSION_ID}/abort`, authed({ method: "POST", body: JSON.stringify({ runId }) }));
+  assert.equal(stop.status, 200);
+  assert.deepEqual(await interrupted, { action: "cancel" });
+  await next.waitFor((frame) => frame.type === "elicitation.resolved" && frame.interactionId === runInteractionId && frame.action === "cancel");
 });

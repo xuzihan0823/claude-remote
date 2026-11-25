@@ -1,6 +1,6 @@
 import type { InteractionDecision, PermissionMetadata } from "@claude-remote/agent-bridge";
 
-export type InteractionKind = "approval" | "question";
+export type InteractionKind = "approval" | "question" | "elicitation";
 export type InteractionStatus = "pending" | "allowed" | "denied" | "answered" | "expired";
 
 export interface Approval extends PermissionMetadata {
@@ -26,9 +26,28 @@ export interface Question extends PermissionMetadata {
   questions: QuestionItem[];
 }
 
-export type InteractionPayload = Approval | Question;
+interface ElicitationBase {
+  serverName: string;
+  message: string;
+  elicitationId?: string;
+}
 
-export type Decision = InteractionDecision;
+export type Elicitation = ElicitationBase & (
+  | { mode: "form"; requestedSchema: Record<string, unknown> }
+  | { mode: "url"; url: string; elicitationId: string }
+);
+
+export type ElicitationDecision =
+  | { type: "elicitation"; action: "accept"; content?: Record<string, unknown> }
+  | { type: "elicitation"; action: "decline" | "cancel" };
+
+export type InteractionPayload = Approval | Question | Elicitation;
+
+export type Decision = InteractionDecision | ElicitationDecision;
+
+export function failClosedDecision(kind: InteractionKind, message: string): Decision {
+  return kind === "elicitation" ? { type: "elicitation", action: "cancel" } : { type: "deny", message };
+}
 
 export interface InteractionRecord<T extends InteractionPayload = InteractionPayload> {
   interactionId: string;

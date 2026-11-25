@@ -1,8 +1,10 @@
-import { query, type CanUseTool, type PermissionMode, type Query, type RewindFilesResult, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type CanUseTool, type OnElicitation, type PermissionMode, type Query, type RewindFilesResult, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { ContextUsage, NativeMediaInput } from "./types.js";
 
 export type QueryFactory = typeof query;
+
+export class SessionToggleUnsupportedError extends Error {}
 
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type EffortLevel = typeof EFFORT_LEVELS[number];
@@ -21,6 +23,7 @@ export interface StartQueryOptions {
   rewindControl?: boolean;
   clientMessageId?: string;
   canUseTool: CanUseTool;
+  onElicitation?: OnElicitation;
   resume?: string;
   /** Explicit model override for this turn. Omit to use the CLI/settings default. */
   model?: string;
@@ -75,6 +78,9 @@ export interface SdkQueryHandle {
   mcpServerStatus(): ReturnType<Query["mcpServerStatus"]>;
   stopTask(taskId: string): Promise<void>;
   rewindFiles(userMessageId: string, options?: { dryRun?: boolean }): Promise<RewindFilesResult>;
+  reconnectMcpServer(name: string): Promise<void>;
+  toggleMcpServer(name: string, enabled: boolean): ReturnType<Query["toggleMcpServer"]>;
+  reloadPlugins(): ReturnType<Query["reloadPlugins"]>;
   closeAndWait(): Promise<void>;
   interrupt(): Promise<void>;
   close(): void;
@@ -97,6 +103,7 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
   const sdkOptions = {
     cwd: options.cwd,
     canUseTool: options.canUseTool,
+    onElicitation: (restricted ? undefined : options.onElicitation) ?? (async () => ({ action: "cancel" as const })),
     permissionMode: restricted ? "dontAsk" as const : options.permissionMode ?? "default",
     ...(!restricted && options.permissionMode === "bypassPermissions"
       ? { allowDangerouslySkipPermissions: true } : {}),
@@ -165,6 +172,12 @@ export function startSdkQuery(options: StartQueryOptions, queryFactory: QueryFac
       }
     },
     rewindFiles: (userMessageId, rewindOptions) => sdkQuery.rewindFiles(userMessageId, rewindOptions),
+    reconnectMcpServer: async (name) => sdkQuery.reconnectMcpServer(name),
+    async toggleMcpServer(): Promise<void> {
+      // The bundled CLI persists this control in the project's .claude.json entry.
+      throw new SessionToggleUnsupportedError("SDK does not support session-only MCP toggle");
+    },
+    reloadPlugins: async () => sdkQuery.reloadPlugins(),
     async interrupt(): Promise<void> { await sdkQuery.interrupt(); },
     close(): void {
       closeInput();

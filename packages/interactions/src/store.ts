@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 
+import { failClosedDecision } from "./types.js";
 import type {
   AuditRecord,
   Decision,
@@ -30,6 +31,18 @@ interface AuditRow {
   detail: string | null;
   created_at: number;
 }
+
+const INTERACTIONS_COLUMNS = `
+  interaction_id TEXT PRIMARY KEY,
+  session_key TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('approval', 'question', 'elicitation')),
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'allowed', 'denied', 'answered', 'expired')),
+  expires_at INTEGER NOT NULL,
+  resolved_at INTEGER,
+  decision TEXT,
+  created_at INTEGER NOT NULL`;
 
 export interface ResolveStoreInput {
   interactionId: string;
@@ -76,19 +89,9 @@ export class InteractionStore {
   constructor(path = ":memory:") {
     this.#database = new DatabaseSync(path);
     this.#database.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
+    this.#database.exec(`CREATE TABLE IF NOT EXISTS interactions (${INTERACTIONS_COLUMNS})`);
+    this.#migrateElicitation();
     this.#database.exec(`
-      CREATE TABLE IF NOT EXISTS interactions (
-        interaction_id TEXT PRIMARY KEY,
-        session_key TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('approval', 'question')),
-        payload TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('pending', 'allowed', 'denied', 'answered', 'expired')),
-        expires_at INTEGER NOT NULL,
-        resolved_at INTEGER,
-        decision TEXT,
-        created_at INTEGER NOT NULL
-      );
       CREATE INDEX IF NOT EXISTS interactions_pending_expiry
         ON interactions(status, expires_at);
       CREATE TABLE IF NOT EXISTS interaction_audit (
@@ -100,6 +103,26 @@ export class InteractionStore {
         created_at INTEGER NOT NULL
       );
     `);
+  }
+
+  #migrateElicitation(): void {
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const schema = this.#database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'interactions'").get()?.sql;
+      if (typeof schema === "string" && !schema.includes("'elicitation'")) {
+        this.#database.exec(`
+          CREATE TABLE interactions_next (${INTERACTIONS_COLUMNS});
+          INSERT INTO interactions_next (interaction_id, session_key, user_id, kind, payload, status, expires_at, resolved_at, decision, created_at)
+            SELECT interaction_id, session_key, user_id, kind, payload, status, expires_at, resolved_at, decision, created_at FROM interactions;
+          DROP TABLE interactions;
+          ALTER TABLE interactions_next RENAME TO interactions;
+        `);
+      }
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   close(): void {
@@ -152,7 +175,7 @@ export class InteractionStore {
 
       const resolvedAt = now?.() ?? input.resolvedAt;
       const timedOut = current.expiresAt <= resolvedAt;
-      const decision: Decision = timedOut ? { type: "deny", message: "Interaction timed out" } : input.decision;
+      const decision = timedOut ? failClosedDecision(current.kind, "Interaction timed out") : input.decision;
       const result = this.#database.prepare(`
         UPDATE interactions
         SET status = ?, resolved_at = ?, decision = ?
@@ -182,11 +205,11 @@ export class InteractionStore {
 
   expirePending(now: number): InteractionRecord[] {
     const candidates = this.#database.prepare(
-      "SELECT interaction_id, user_id FROM interactions WHERE status = 'pending' AND expires_at <= ?",
-    ).all(now) as unknown as Array<{ interaction_id: string; user_id: string }>;
+      "SELECT interaction_id, user_id, kind FROM interactions WHERE status = 'pending' AND expires_at <= ?",
+    ).all(now) as unknown as Pick<InteractionRow, "interaction_id" | "user_id" | "kind">[];
     const expired: InteractionRecord[] = [];
     for (const candidate of candidates) {
-      const decision: Decision = { type: "deny", message: "Interaction timed out" };
+      const decision = failClosedDecision(candidate.kind, "Interaction timed out");
       const record = this.resolve({
         interactionId: candidate.interaction_id,
         userId: candidate.user_id,
@@ -204,7 +227,7 @@ export class InteractionStore {
     const pending = this.listPending();
     const denied: InteractionRecord[] = [];
     for (const record of pending) {
-      const decision: Decision = { type: "deny", message: "Interaction denied after process restart" };
+      const decision = failClosedDecision(record.kind, "Interaction denied after process restart");
       const resolved = this.resolve({
         interactionId: record.interactionId,
         userId: record.userId,

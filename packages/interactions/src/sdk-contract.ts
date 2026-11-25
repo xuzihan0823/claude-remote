@@ -33,6 +33,8 @@ export function decisionToAgentSdkResult(
       return { behavior: "allow", updatedInput: originalInput };
     case "deny":
       return { behavior: "deny", message: decision.message ?? "User denied this action" };
+    case "elicitation":
+      return { behavior: "deny", message: "Invalid permission decision" };
     case "answer":
       return {
         behavior: "allow",

@@ -489,8 +489,68 @@ test("restarting with a registered native suggestion denies the pending approval
   assert.equal((await pending)?.behavior, "deny");
   const record = restarted.get(card.interactionId);
   assert.equal(record?.status, "denied");
-  assert.deepEqual(record?.payload.suggestions, card.suggestions);
+  assert.ok(record && "suggestions" in record.payload);
+  assert.deepEqual(record.payload.suggestions, card.suggestions);
   assert.deepEqual(bridge.decide(card.interactionId, { type: "allow_once", applySuggestionIds: ["before-restart:0"] }),
     { status: "already_resolved" });
   assert.deepEqual(bridge.pending(), []);
+});
+
+const elicitationRequest = {
+  sessionKey: "sess-1", runId: "run-1", userId: "web",
+  payload: { mode: "form" as const, serverName: "fixture", message: "Choose", requestedSchema: { type: "object" } },
+};
+
+test("elicitation timeout maps to cancel and emits a single terminal frame", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const manager = new InteractionManager(new InteractionStore(), { defaultTtlMs: 5 });
+  t.after(() => { manager.close(); manager.store.close(); });
+  const events: ApprovalEvent[] = [];
+  const bridge = new ApprovalBridge({ manager, onEvent: (event) => { events.push(event); return true; } });
+  const pending = bridge.requestElicitation(elicitationRequest, new AbortController().signal);
+  const start = events[0];
+  assert.equal(start?.type, "elicitation");
+  const interactionId = start.interaction.interactionId;
+  t.mock.timers.tick(5);
+  assert.deepEqual(await pending, { action: "cancel" });
+  assert.deepEqual(events.slice(1), [{ type: "elicitation.resolved", interactionId, sessionId: "sess-1", runId: "run-1", status: "expired", action: "cancel" }]);
+  assert.deepEqual(bridge.decide(interactionId, { decision: "elicitation", action: "accept" }), { status: "already_resolved" });
+});
+
+test("elicitation delivery and SQLite decision failures cancel instead of accepting", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const manager = new InteractionManager(new InteractionStore());
+  t.after(() => { manager.close(); manager.store.close(); });
+  const undelivered = new ApprovalBridge({ manager, onEvent: () => { throw new Error("disconnected"); } });
+  assert.deepEqual(await undelivered.requestElicitation(elicitationRequest, new AbortController().signal), { action: "cancel" });
+  assert.deepEqual(manager.store.listPending(), []);
+
+  let interactionId = "";
+  const bridge = new ApprovalBridge({ manager, onEvent(event) {
+    if (event.type === "elicitation") interactionId = event.interaction.interactionId;
+    return true;
+  } });
+  const pending = bridge.requestElicitation(elicitationRequest, new AbortController().signal);
+  const failure = t.mock.method(manager.store, "resolve", () => { throw new Error("SQLite unavailable"); });
+  assert.deepEqual(bridge.decide(interactionId, { decision: "elicitation", action: "accept" }), {
+    status: "invalid", message: "elicitation decision unavailable",
+  });
+  assert.deepEqual(await pending, { action: "cancel" });
+  failure.mock.restore();
+  assert.deepEqual(bridge.decide(interactionId, { decision: "elicitation", action: "accept" }), { status: "already_resolved" });
+});
+
+test("elicitation forwards explicit decline and cancel without returning content", async (t) => {
+  const manager = new InteractionManager(new InteractionStore());
+  t.after(() => { manager.close(); manager.store.close(); });
+  let interactionId = "";
+  const bridge = new ApprovalBridge({ manager, onEvent(event) {
+    if (event.type === "elicitation") interactionId = event.interaction.interactionId;
+    return true;
+  } });
+  for (const action of ["decline", "cancel"] as const) {
+    const pending = bridge.requestElicitation(elicitationRequest, new AbortController().signal);
+    assert.deepEqual(bridge.decide(interactionId, { decision: "elicitation", action }), { status: "denied", action });
+    assert.deepEqual(await pending, { action });
+  }
 });

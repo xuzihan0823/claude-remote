@@ -10,6 +10,7 @@ import {
   InteractionManager,
   InteractionUnauthorizedError,
   InvalidPermissionSuggestionError,
+  InteractionTypeError,
 } from "../src/manager.js";
 import { decisionToAgentSdkResult } from "../src/sdk-contract.js";
 import { InteractionStore } from "../src/store.js";
@@ -278,6 +279,44 @@ test("suggestion choices are validated against the persisted approval before set
   assert.deepEqual(await waiter, decision);
 });
 
+const elicitation = {
+  sessionKey: "session", userId: "owner",
+  payload: { mode: "form" as const, serverName: "fixture", message: "Choose", requestedSchema: { type: "object" } },
+};
+
+test("elicitation decision wakes live waiters without persisting submitted fields", async (t) => {
+  const { manager, store, close } = setup();
+  t.after(close);
+  const { interactionId } = manager.createElicitation(elicitation);
+  const waiting = manager.awaitDecision(interactionId);
+  assert.throws(() => manager.resolve(interactionId, "owner", { type: "allow_once" }), InteractionTypeError);
+  const decision = { type: "elicitation", action: "accept", content: { choice: "fixture-value" } } as const;
+  assert.equal(manager.resolve(interactionId, "owner", decision).record.status, "allowed");
+  assert.deepEqual(await waiting, decision);
+  assert.deepEqual(store.get(interactionId)?.decision, { type: "elicitation", action: "accept" });
+  assert.doesNotMatch(JSON.stringify(store.listAudit(interactionId)), /fixture-value/);
+});
+
+test("elapsed deadlines and cancellation settle elicitation as cancel", async (t) => {
+  let now = 1_000;
+  const { manager, store, close } = setup({ now: () => now });
+  t.after(close);
+  const timed = manager.createElicitation({ ...elicitation, ttlMs: 5 });
+  const waited = manager.awaitDecision(timed.interactionId);
+  now = timed.expiresAt;
+  assert.equal(manager.resolve(timed.interactionId, "owner", { type: "elicitation", action: "accept" }).record.status, "expired");
+  const cancel = { type: "elicitation", action: "cancel" };
+  assert.deepEqual(await waited, cancel);
+  assert.deepEqual(store.get(timed.interactionId)?.decision, cancel);
+
+  const aborted = manager.createElicitation(elicitation);
+  const controller = new AbortController();
+  const waiting = manager.awaitDecision(aborted.interactionId, controller.signal);
+  controller.abort();
+  assert.deepEqual(await waiting, cancel);
+  assert.deepEqual(store.get(aborted.interactionId)?.decision, cancel);
+});
+
 test("a legacy database keeps its pending payload and closes it safely on startup", (t) => {
   const root = mkdtempSync(join(tmpdir(), "interaction-v2-09-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -314,4 +353,46 @@ test("a legacy database keeps its pending payload and closes it safely on startu
   } finally {
     store.close();
   }
+});
+
+test("opening a legacy SQLite database preserves rows and audit; restart cancels pending elicitation", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "interactions-migration-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "interactions.sqlite");
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE interactions (
+      interaction_id TEXT PRIMARY KEY, session_key TEXT NOT NULL, user_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('approval', 'question')), payload TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'allowed', 'denied', 'answered', 'expired')),
+      expires_at INTEGER NOT NULL, resolved_at INTEGER, decision TEXT, created_at INTEGER NOT NULL
+    );
+    CREATE INDEX interactions_pending_expiry ON interactions(status, expires_at);
+    CREATE TABLE interaction_audit (
+      audit_id INTEGER PRIMARY KEY AUTOINCREMENT, interaction_id TEXT NOT NULL,
+      action TEXT NOT NULL, actor_user_id TEXT, detail TEXT, created_at INTEGER NOT NULL
+    );
+    INSERT INTO interactions VALUES
+      ('old-approval', 'session', 'owner', 'approval', '{"toolName":"Read","input":{},"prompt":"Read?"}', 'allowed', 1000, 501, '{"type":"allow_once"}', 500),
+      ('old-question', 'session', 'owner', 'question', '{"questions":[]}', 'answered', 1000, 502, '{"type":"answer","answers":{}}', 500);
+    INSERT INTO interaction_audit VALUES (1, 'old-approval', 'allow_once', 'owner', NULL, 501);
+  `);
+  legacy.close();
+
+  const store = new InteractionStore(path);
+  const manager = new InteractionManager(store, { now: () => 600 });
+  const { interactionId } = manager.createElicitation(elicitation);
+  const waiting = manager.awaitDecision(interactionId);
+  manager.close();
+  assert.deepEqual(await waiting, { type: "elicitation", action: "cancel" });
+  store.close();
+
+  const reopened = new InteractionStore(path);
+  const restarted = new InteractionManager(reopened, { now: () => 700 });
+  t.after(() => { restarted.close(); reopened.close(); });
+  assert.deepEqual(restarted.get("old-approval")?.decision, { type: "allow_once" });
+  assert.deepEqual(restarted.get("old-question")?.decision, { type: "answer", answers: {} });
+  assert.equal(reopened.listAudit("old-approval")[0]?.action, "allow_once");
+  assert.equal(restarted.get(interactionId)?.status, "denied");
+  assert.deepEqual(await restarted.awaitDecision(interactionId), { type: "elicitation", action: "cancel" });
 });

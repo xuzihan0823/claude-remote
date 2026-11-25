@@ -1,10 +1,13 @@
 import { randomBytes } from "node:crypto";
 
 import { InteractionStore } from "./store.js";
+import { failClosedDecision } from "./types.js";
 import type {
   Approval,
   CreateInteractionInput,
   Decision,
+  Elicitation,
+  InteractionKind,
   InteractionPayload,
   InteractionRecord,
   Question,
@@ -23,6 +26,7 @@ export class InvalidPermissionSuggestionError extends Error {}
 interface Waiter {
   resolve: (decision: Decision) => void;
   cleanup: () => void;
+  kind: InteractionKind;
 }
 
 export interface InteractionManagerOptions {
@@ -64,6 +68,8 @@ function decisionStatus(decision: Decision): "allowed" | "denied" | "answered" {
       return "denied";
     case "answer":
       return "answered";
+    case "elicitation":
+      return decision.action === "accept" ? "allowed" : "denied";
   }
 }
 
@@ -88,7 +94,10 @@ export class InteractionManager {
   close(): void {
     for (const timer of this.#timers.values()) clearTimeout(timer);
     this.#timers.clear();
-    for (const id of this.#waiters.keys()) this.#finish(id, { type: "deny", message: "Interaction manager closed" });
+    for (const [id, waiters] of this.#waiters) {
+      const waiter = waiters.values().next().value;
+      if (waiter) this.#finish(id, failClosedDecision(waiter.kind, "Interaction manager closed"));
+    }
   }
 
   createApproval(input: CreateInteractionInput<Approval>): InteractionRecord<Approval> {
@@ -98,6 +107,10 @@ export class InteractionManager {
   createQuestion(input: CreateInteractionInput<Question>): InteractionRecord<Question> {
     assertQuestion(input.payload);
     return this.#create("question", input);
+  }
+
+  createElicitation(input: CreateInteractionInput<Elicitation>): InteractionRecord<Elicitation> {
+    return this.#create("elicitation", input);
   }
 
   get(interactionId: string): InteractionRecord | undefined {
@@ -110,14 +123,14 @@ export class InteractionManager {
     if (record.decision !== null) return Promise.resolve(record.decision);
 
     return new Promise<Decision>((resolve) => {
-      const waiter: Waiter = { resolve, cleanup: () => signal?.removeEventListener("abort", abort) };
+      const waiter: Waiter = { resolve, kind: record.kind, cleanup: () => signal?.removeEventListener("abort", abort) };
       const waiters = this.#waiters.get(interactionId) ?? new Set<Waiter>();
       waiters.add(waiter);
       this.#waiters.set(interactionId, waiters);
 
       const abort = (): void => {
         signal?.removeEventListener("abort", abort);
-        const decision: Decision = { type: "deny", message: "Interaction cancelled" };
+        const decision = failClosedDecision(record.kind, "Interaction cancelled");
         try {
           this.store.resolve({ interactionId, userId: record.userId, status: "denied", decision,
             resolvedAt: this.#now(), auditAction: "auto_deny_cancelled" });
@@ -144,7 +157,7 @@ export class InteractionManager {
       interactionId,
       userId,
       status: decisionStatus(decision),
-      decision,
+      decision: decision.type === "elicitation" ? { type: "elicitation", action: decision.action } : decision,
       resolvedAt,
       auditAction: decision.type,
     }, this.#now);
@@ -152,8 +165,10 @@ export class InteractionManager {
       throw new InteractionAlreadyResolvedError("interaction was already resolved");
     }
 
-    this.#finish(interactionId, record.decision);
-    return { record, decision: record.decision };
+    // Elicitation content may be sensitive. Deliver it to live waiters only.
+    const applied = record.status !== "expired" && decision.type === "elicitation" ? decision : record.decision;
+    this.#finish(interactionId, applied);
+    return { record, decision: applied };
   }
 
   expireDue(now = this.#now()): InteractionRecord[] {
@@ -165,7 +180,7 @@ export class InteractionManager {
   }
 
   #create<T extends InteractionPayload>(
-    kind: "approval" | "question",
+    kind: InteractionKind,
     input: CreateInteractionInput<T>,
   ): InteractionRecord<T> {
     const ttlMs = input.ttlMs ?? this.#defaultTtlMs;
@@ -196,7 +211,7 @@ export class InteractionManager {
         this.#scheduleExpiry(record);
         return;
       }
-      const decision: Decision = { type: "deny", message: "Interaction timed out" };
+      const decision = failClosedDecision(record.kind, "Interaction timed out");
       try {
         this.store.resolve({
           interactionId: record.interactionId, userId: record.userId, status: "expired",
@@ -226,6 +241,12 @@ export class InteractionManager {
   }
 
   #assertDecisionMatches(record: InteractionRecord, decision: Decision): void {
+    if ((record.kind === "elicitation") !== (decision.type === "elicitation")) {
+      throw new InteractionTypeError("elicitation requires an elicitation decision");
+    }
+    if (record.kind === "elicitation" && decision.type === "elicitation" && decision.action === "accept" && decision.content !== undefined && (record.payload as Elicitation).mode !== "form") {
+      throw new InteractionTypeError("URL elicitation does not accept form content");
+    }
     if (record.kind === "approval" && decision.type === "answer") {
       throw new InteractionTypeError("approval cannot be resolved with an answer");
     }

@@ -28,7 +28,7 @@ cr 命令行 (packages/cli)：控制台、启停、配对、relay 配置
 ## 安全边界
 
 - 应用层只有一个 Bearer token（`BRIDGE_TOKEN`），不自建加密协议。网络边界是 Tailscale 或 relay，Mac 不开公网端口。
-- 审批 fail-closed：超时、断线、daemon 重启、异常一律拒绝，不做自动批准。
+- 审批和问答遇到超时、断线、daemon 重启或异常时一律拒绝。MCP elicitation 在这些情况下返回 `cancel`。
 - 配对端点 `/api/pair-info`、`/api/pair-qr.svg` 会返回 token，只允许本机访问，并且有两层保护：
   1. daemon 判断来源是否 loopback，同时用 `looksProxied()` 检查代理特征头（`x-forwarded-*`、`forwarded`、`cf-*` 等），有就 403。原因是 cloudflared、nginx、relay connector 这类本机代理转发过来的请求，来源也是 127.0.0.1。
   2. relay connector 对配对路径做 WHATWG 路径规范化后直接 403，不转给 daemon；其余请求一律加 `X-Forwarded-*`，即使路径判断被绕过，第 1 层也会拦住。
@@ -316,7 +316,7 @@ WS `approval` 帧的 `interaction` 与 `GET /api/interactions/pending` 的 `inte
 
 这组决策可改变当前运行中的实际权限，具体作用范围由选中的 SDK 建议决定。会话新建和续聊的 `permissionMode` 仍是下一次发起运行时的选择。当前审批的结果只由本次决策交给 SDK，客户端保留下一轮选择。
 
-### 命令、补充指令、上下文、用量与任务
+### 会话运行控制、用量与任务
 
 本节 HTTP 接口沿用 Bearer token，WS 帧沿用指定会话订阅。以下写入接口接受 JSON 请求体，运行依旧经过 CLI/Agent SDK。daemon 只读取 JSONL。客户端使用 `GET /api/sessions/:id/state` 或重新订阅取得相同格式的 `session-state`，并按 `sessionId` 和 `runId` 对账。
 
@@ -379,6 +379,37 @@ Runner 在生成或工具执行期间接收请求，常规发送在 SDK Query �
 - 非 Git 工作区返回 `git: { isGitRepo: false }`。Git 工作区返回 `{ isGitRepo: true, branch, dirty, files, diff, truncated }`。branch 是分支名，游离 HEAD 使用提交短 SHA。files 项为 `{ path, status, additions?, deletions? }`，path 相对仓库根目录，status 为 Git porcelain 两位状态，如 `" M"`、`"MM"` 或 `"??"`。重命名按增删记录。行数来自 Git numstat。
 - diff 为统一补丁，比较 HEAD 和最终工作树，纳入已跟踪文件的暂存和未暂存变化。未跟踪路径出现在 files。现有敏感路径规则同时作用于列表和补丁。Git 查询无 shell，禁用外部 diff、textconv 和仓库内容过滤器，查询预算为 3 秒。补丁输出最多 128 KiB，输出或路径预算导致截断时 `truncated: true`。
 - mcp 为 `{ status: "available", servers: [{ name, status }] }` 或 `{ status: "unavailable" }`。从活跃 SDK 查询，只投影服务器名和连接状态 `connected | failed | needs-auth | pending | disabled`。控制失败、超时、查询切换或无活跃 SDK 时返回 unavailable。配置、URL、环境变量、请求头和错误正文均留在 daemon 内部。
+
+#### MCP 与插件状态和控制（V2-08）
+
+| HTTP | 请求与成功响应 |
+| --- | --- |
+| `GET /api/sessions/:id/extensions` | `200 { status: "available", runId, mcp, plugins }` |
+| `POST /api/sessions/:id/mcp/:name/reconnect` | 可传 `{ runId? }`。重连后返回 `200 { status: "available", runId, server }`，`server` 是该服务的最新状态 |
+| `POST /api/sessions/:id/mcp/:name/toggle` | 请求 `{ enabled: boolean, runId? }`。仅允许会话级启停。当前 CLI 的限制见下文 |
+| `POST /api/sessions/:id/plugins/reload` | 可传 `{ runId? }`。重载后返回 `200 { status: "available", runId, mcp, plugins, commands }` |
+
+`mcp` 为只含 `name`、`status` 的数组，状态取值沿用工作区接口。`plugins` 为已加载插件的 `[{ name }]`，来自当前 SDK 初始化或最近一次成功重载。响应省略原始 SDK 错误、配置、插件路径与来源、服务 URL、请求头、环境变量以及 MCP 启动命令与参数。重载按 SDK 返回值刷新命令目录，只有命令目录变化时才向该会话的订阅者发送现有 `commands` 帧。`/workspace` 的 `mcp` 响应形状保持原契约。
+
+GET 无法读取当前 Query 时返回 `200 { status: "unavailable", reason }`。reason 为 `no_active_sdk`、`terminal_driving`、`initializing`、`session_changed`、`extension_busy` 或 `sdk_unavailable`。POST 的非法 UUID、空白 MCP 名称或含控制字符的名称，以及非布尔 `enabled` 返回 400。无活跃 Query、终端占用、运行身份不匹配、Query 切换或扩展控制正在进行时返回 409 和对应的 `error`，身份不匹配为 `run_mismatch`。SDK 控制失败或超时返回 503 `sdk_unavailable`。重连完成后取不到目标状态时返回 404 `server_not_found`。
+
+控制目标是请求受理时的活跃 SDK Query。可传 `runId` 限定轮次，Query 被替换时旧请求不会交给新 Query。重连和重载使用当前运行态。SDK 0.3.212 随附 Claude Code 的 `toggleMcpServer()` 会更新 `.claude.json` 中的项目级 MCP 启停设置，因此当前 `toggle` 路由通过校验后返回 501 `session_toggle_unsupported`，保护持久设置。
+
+#### MCP 用户交互（V2-08）
+
+活跃 SDK Query 收到 `onElicitation` 后，daemon 向该会话的已鉴权 WS 订阅者发送 `elicitation` 帧。`interactionId` 为 daemon 生成的决策 ID，`elicitationId` 为 MCP 服务提供的关联 ID，URL 模式要求该字段。省略 SDK `mode` 时按 `form` 处理。以下分别为 form、url 和结束帧。
+
+```json
+{ "type": "elicitation", "interaction": { "kind": "elicitation", "interactionId": "<id>", "sessionId": "<uuid>", "runId": "<uuid>", "expiresAt": 1795417709308, "mode": "form", "serverName": "example", "message": "选择区域", "requestedSchema": { "type": "object", "properties": { "region": { "type": "string" } } } } }
+{ "type": "elicitation", "interaction": { "kind": "elicitation", "interactionId": "<id>", "sessionId": "<uuid>", "runId": "<uuid>", "expiresAt": 1795417709308, "mode": "url", "serverName": "example", "message": "确认授权", "url": "https://example.com/authorize", "elicitationId": "<mcp-id>" } }
+{ "type": "elicitation.resolved", "sessionId": "<uuid>", "runId": "<uuid>", "interactionId": "<id>", "status": "denied", "action": "cancel" }
+```
+
+`POST /api/interactions/:id/decision` 接受 `{ "decision": "elicitation", "action": "accept" | "decline" | "cancel", "content"?: { ... } }`，也接受使用 `type: "elicitation"` 的请求。`content` 只允许用于 form 的 `accept`，必须为对象，字段值可为字符串、有限数字、布尔值或字符串数组。格式不合法或决策与交互类型不匹配返回 400 `invalid`。显式接受返回 `200 { status: "allowed", action: "accept" }`，拒绝或取消返回 `200 { status: "denied", action }`。未知 ID 返回 404 `not_found`，已解决或过期返回 409 `already_resolved`。结束帧用相同的 `status` 和 `action`，过期时为 `expired` 和 `cancel`。
+
+请求只透传协议字段，大小上限为 64 KiB。URL 要求绝对 HTTPS 地址和合法主机，禁止 userinfo、空白、控制字符和反斜杠。授权 URL 的查询参数保留给接收方使用，daemon 不访问该 URL 或从表单 schema 加载外部资源。表单提交值仅传给等待中的 SDK，SQLite 决策、审计、HTTP 回执和 WS 结束帧均不包含表单值。
+
+交互仅在当前 Query 生效。没有可接收的会话订阅者、订阅者断线或退订、决策 HTTP 请求受理前断开、交互超时、SDK 或 run 中止、daemon 关闭以及处理异常时，一律返回 `{ action: "cancel" }`。启动时迁移旧 SQLite 表并保留已有交互和审计记录，尚未决议的旧 elicitation 标记为取消，旧 ID 无法继续接受。已有审批、问答的 WS 帧及 `GET /api/interactions/pending` 保留原契约。
 
 #### 上下文与压缩（V2-03）
 
