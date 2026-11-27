@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { devNull } from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import { isSensitivePath } from "./session-file-access.js";
 
@@ -35,7 +36,7 @@ function git(cwd: string, args: string[], signal: AbortSignal, maxBuffer = MAX_S
     GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_TERMINAL_PROMPT: "0",
   });
   return new Promise((resolve) => {
-    const child = execFile("git", ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", ...args], {
+    const child = execFile("git", ["-c", "core.fsmonitor=false", "-c", `core.hooksPath=${devNull}`, ...args], {
       cwd, env, signal, killSignal: "SIGKILL", encoding: "buffer", maxBuffer,
     }, (error, stdout, stderr) => {
       if (!error) resolve({ output: stdout, state: "ok" });

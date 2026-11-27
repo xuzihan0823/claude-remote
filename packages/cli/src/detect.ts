@@ -7,11 +7,15 @@
 //   1. 当前进程 PATH（在终端里运行 cr setup 时通常就能找到）
 //   2. 登录 + 交互 shell 的 PATH（加载 .zprofile / .zshrc，nvm / fnm / volta 都在这里配置）
 //   3. 常见安装位置：官方安装器 ~/.claude/local、~/.local/bin、Homebrew、npm 全局、bun、volta、nvm、fnm
+//
+// Windows：没有登录 shell，PATH 里找 claude.exe；常见位置是 ~/.local/bin（官方安装器）与 npm 全局目录。
+// 只收 .exe：npm 的 claude.cmd 只是个垫片，Agent SDK 与 Node 的 spawn 都不能直接执行它，
+// 这种情况改取垫片旁 node_modules/@anthropic-ai/claude-code/bin/claude.exe。
 
 import { execFileSync } from "node:child_process";
 import { accessSync, constants, existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, win32 } from "node:path";
 
 export interface ClaudeCandidate {
   path: string;
@@ -32,11 +36,18 @@ export interface DetectDeps {
   isExecutable?: (path: string) => boolean;
   listDir?: (dir: string) => string[];
   version?: (path: string) => string | undefined;
+  /** 测试用：覆盖 process.platform。 */
+  platform?: NodeJS.Platform;
+  /** Windows：`where claude` 的 stdout。 */
+  whereClaude?: () => string | undefined;
+  /** 测试用：覆盖 existsSync（判断 npm 垫片是否存在）。 */
+  fileExists?: (path: string) => boolean;
 }
 
 function defaultIsExecutable(path: string): boolean {
   try {
     if (!statSync(path).isFile()) return false;
+    // Windows 没有 X 位，accessSync(X_OK) 等同于存在性检查
     accessSync(path, constants.X_OK);
     return true;
   } catch {
@@ -82,10 +93,47 @@ function compareVersionsDesc(a: string, b: string): number {
   return 0;
 }
 
+function windowsClaudeCandidates(deps: DetectDeps, env: NodeJS.ProcessEnv, home: string): ClaudeCandidate[] {
+  const out: ClaudeCandidate[] = [];
+  const add = (path: string | undefined, source: string): void => {
+    if (path === undefined || path === "" || !win32.isAbsolute(path)) return;
+    if (!out.some((c) => c.path.toLowerCase() === path.toLowerCase())) out.push({ path, source });
+  };
+  // npm 垫片 → 包内的原生 claude.exe
+  const addShim = (shim: string, source: string): void => {
+    const lower = shim.toLowerCase();
+    if (lower.endsWith(".exe")) return add(shim, source);
+    if (!/\.(cmd|bat|ps1)$/.test(lower) && !lower.endsWith("claude")) return;
+    if (!(deps.fileExists ?? existsSync)(shim)) return; // 垫片真的存在才展开，避免给每个 PATH 目录都猜一个
+    add(win32.join(win32.dirname(shim), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"), `${source}（npm 全局）`);
+  };
+
+  for (const dir of (env.PATH ?? env.Path ?? "").split(";")) {
+    if (dir === "") continue;
+    add(win32.join(dir, "claude.exe"), "当前 PATH");
+    addShim(win32.join(dir, "claude.cmd"), "当前 PATH");
+  }
+  const where = (deps.whereClaude ?? (() => run("where", ["claude"], env)))();
+  for (const line of where?.split(/\r?\n/) ?? []) {
+    const path = line.trim();
+    if (path !== "") addShim(path, "where claude");
+  }
+
+  add(win32.join(home, ".local", "bin", "claude.exe"), "官方安装器（~/.local/bin）");
+  add(win32.join(home, ".claude", "local", "claude.exe"), "~/.claude/local");
+  const appData = env.APPDATA?.trim() || win32.join(home, "AppData", "Roaming");
+  addShim(win32.join(appData, "npm", "claude.cmd"), "%APPDATA%/npm");
+  const prefix = (deps.npmPrefix ?? (() => run("npm", ["prefix", "-g"], env)?.trim()))();
+  if (prefix) addShim(win32.join(prefix, "claude.cmd"), "npm 全局");
+  add(win32.join(home, ".bun", "bin", "claude.exe"), "bun");
+  return out;
+}
+
 /** 按优先级列出所有候选（去重，未验证可执行）。 */
 export function claudeCandidates(deps: DetectDeps = {}): ClaudeCandidate[] {
   const env = deps.env ?? process.env;
   const home = deps.home ?? homedir();
+  if ((deps.platform ?? process.platform) === "win32") return windowsClaudeCandidates(deps, env, home);
   const listDir = deps.listDir ?? defaultListDir;
   const out: ClaudeCandidate[] = [];
   const add = (path: string | undefined, source: string): void => {

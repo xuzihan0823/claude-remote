@@ -8,7 +8,7 @@ import { parseEtime } from "../src/daemon-control.js";
 import { DAEMON_LABEL, Launchd, packageProgram, parseLaunchctlPrint, renderPlist, repoProgram, type Exec } from "../src/launchd.js";
 
 test("renderPlist：转义路径、KeepAlive、日志路径", () => {
-  const xml = renderPlist({ program: repoProgram("/r<1>&b"), logFile: "/l/daemon.log" });
+  const xml = renderPlist({ program: repoProgram("/r<1>&b", "darwin"), logFile: "/l/daemon.log" });
   assert.match(xml, /<string>\/r&lt;1&gt;&amp;b\/scripts\/launchd\/run-daemon\.sh<\/string>/);
   assert.match(xml, /<key>CLAUDE_REMOTE_REPO<\/key>\s*<string>\/r&lt;1&gt;&amp;b<\/string>/);
   assert.match(xml, new RegExp(`<string>${DAEMON_LABEL}</string>`));
@@ -29,6 +29,7 @@ test("packageProgram：node 直接跑 dist/daemon.js，PATH 带上 claude 与 no
     envFile: "/Users/u/.claude-remote/config.env",
     claudeBin: "/Users/u/.claude/local/claude",
     home: "/Users/u",
+    platform: "darwin",
   });
   assert.deepEqual(p.args, ["/Users/u/.nvm/versions/node/v22.12.0/bin/node", "/usr/local/lib/node_modules/x/dist/daemon.js"]);
   assert.equal(p.workingDir, "/Users/u/.claude-remote");
@@ -77,7 +78,7 @@ function fakeLaunchctl(): { exec: Exec; calls: string[]; loaded: { v: boolean } 
 test("Launchd：up 写 plist 并 bootstrap；重复 up 不重载；down 卸载并 disable；uninstall 删 plist", async () => {
   const home = mkdtempSync(join(tmpdir(), "cr-home-"));
   const fake = fakeLaunchctl();
-  const l = new Launchd({ program: () => repoProgram("/repo"), logFile: join(home, "logs/daemon.log"), exec: fake.exec, home, uid: 501, sleep: async () => {} });
+  const l = new Launchd({ program: () => repoProgram("/repo", "darwin"), logFile: join(home, "logs/daemon.log"), exec: fake.exec, home, uid: 501, sleep: async () => {} });
 
   const first = await l.up();
   assert.deepEqual(first, { changed: true, alreadyRunning: false });
@@ -105,4 +106,26 @@ test("Launchd：up 写 plist 并 bootstrap；重复 up 不重载；down 卸载�
   await l.uninstall();
   assert.equal(existsSync(l.plistPath), false);
   assert.equal(fake.loaded.v, false);
+});
+
+test("repoProgram：Windows 用 node --import tsx 单进程运行入口（不经 sh / tsx CLI 子进程）", () => {
+  const p = repoProgram("C:\\repo", "win32");
+  assert.deepEqual(p.args.slice(1), ["--import", "tsx", "C:\\repo\\packages\\daemon\\src\\index.ts"]);
+  assert.equal(p.workingDir, "C:\\repo");
+  assert.equal(p.env.CLAUDE_REMOTE_REPO, "C:\\repo");
+});
+
+test("packageProgram：Windows 不覆盖 PATH（继承 cr 的环境）", () => {
+  const p = packageProgram({
+    nodePath: "C:\\node\\node.exe",
+    daemonEntry: "C:\\pkg\\dist\\daemon.js",
+    dataDir: "C:\\Users\\u\\.claude-remote",
+    envFile: "C:\\Users\\u\\.claude-remote\\config.env",
+    claudeBin: "C:\\Users\\u\\.local\\bin\\claude.exe",
+    home: "C:\\Users\\u",
+    platform: "win32",
+  });
+  assert.deepEqual(p.args, ["C:\\node\\node.exe", "C:\\pkg\\dist\\daemon.js"]);
+  assert.equal(p.env.PATH, undefined);
+  assert.equal(p.env.CLAUDE_REMOTE_ENV_FILE, "C:\\Users\\u\\.claude-remote\\config.env");
 });

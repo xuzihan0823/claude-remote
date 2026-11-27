@@ -12,7 +12,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 
 export const DAEMON_LABEL = "com.claude-remote.daemon";
 
@@ -81,6 +81,15 @@ ${env}
  * 其他平台没有 launchd，daemon 随 cr 启动并继承 cr 的 PATH；很多 Linux 发行版不带 zsh，用 /bin/sh。
  */
 export function repoProgram(repoDir: string, platform: NodeJS.Platform = process.platform): LaunchProgram {
+  if (platform === "win32") {
+    // Windows 没有 sh：用当前 node 加载 tsx 直接跑入口。不走 tsx CLI——它会再起一个子进程，
+    // Windows 上 kill 父进程不会带走子进程，端口会被孤儿 daemon 占着。
+    return {
+      args: [process.execPath, "--import", "tsx", win32.join(repoDir, "packages", "daemon", "src", "index.ts")],
+      workingDir: repoDir,
+      env: { CLAUDE_REMOTE_REPO: repoDir },
+    };
+  }
   const script = join(repoDir, "scripts", "launchd", "run-daemon.sh");
   return {
     args: platform === "darwin" ? ["/bin/zsh", "-l", script] : ["/bin/sh", script],
@@ -100,7 +109,12 @@ export function packageProgram(opts: {
   envFile: string;
   claudeBin?: string | undefined;
   home: string;
+  platform?: NodeJS.Platform;
 }): LaunchProgram {
+  if ((opts.platform ?? process.platform) === "win32") {
+    // 没有 launchd 的精简 PATH 问题：daemon 继承 cr 的环境；claude 用 CLAUDE_BIN 里的绝对路径
+    return { args: [opts.nodePath, opts.daemonEntry], workingDir: opts.dataDir, env: { CLAUDE_REMOTE_ENV_FILE: opts.envFile } };
+  }
   const dirs = [
     ...(opts.claudeBin !== undefined && opts.claudeBin.includes("/") ? [dirname(opts.claudeBin)] : []),
     dirname(opts.nodePath),

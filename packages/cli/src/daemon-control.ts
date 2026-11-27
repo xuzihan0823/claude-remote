@@ -3,7 +3,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import { loadRelaySettings, relayBase } from "@claude-remote/daemon/config";
 import { isLoopbackAddress, pairBases, pairPayload, readTailscaleServeUrl, type PairInfo } from "@claude-remote/daemon/pair";
@@ -111,7 +111,30 @@ export function parseEtime(text: string): number | undefined {
   return (((Number(d) * 24 + Number(h)) * 60 + Number(m)) * 60 + Number(s)) * 1000;
 }
 
+const windowsStartTimes = new Map<number, number>();
+
+/** Windows 没有 ps：用 PowerShell 取一次进程启动时间并缓存（每个 pid 只启动一次 PowerShell）。 */
+function windowsProcessUptime(pid: number): number | undefined {
+  let started = windowsStartTimes.get(pid);
+  if (started === undefined) {
+    try {
+      const out = execFileSync(
+        "powershell",
+        ["-NoProfile", "-NonInteractive", "-Command", `[DateTimeOffset]::new((Get-Process -Id ${pid}).StartTime).ToUnixTimeMilliseconds()`],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5_000, windowsHide: true },
+      );
+      started = Number(out.trim());
+    } catch {
+      return undefined;
+    }
+    if (!Number.isFinite(started) || started <= 0) return undefined;
+    windowsStartTimes.set(pid, started);
+  }
+  return Math.max(0, Date.now() - started);
+}
+
 function processUptime(pid: number): number | undefined {
+  if (process.platform === "win32") return windowsProcessUptime(pid);
   try {
     return parseEtime(execFileSync("ps", ["-o", "etime=", "-p", String(pid)], { encoding: "utf8" }));
   } catch {
@@ -284,7 +307,14 @@ export function resumeInTerminal(session: Pick<SessionSummary, "sessionId" | "cw
   const cwd = session.cwd !== "" && existsSync(session.cwd) ? session.cwd : process.cwd();
   AttachedDaemon.foregroundChild = true;
   return new Promise<number>((resolvePromise) => {
-    const child = spawn(claudeBin(envFile), ["--resume", session.sessionId], { cwd, stdio: "inherit" });
+    const bin = claudeBin(envFile);
+    // Windows：裸命令 claude 可能是 npm 的 claude.cmd 垫片，Node 不能直接 spawn，交给 cmd 解析
+    const viaShell = process.platform === "win32" && (!isAbsolute(bin) || /\.(cmd|bat)$/i.test(bin));
+    const child = spawn(viaShell && bin.includes(" ") ? `"${bin}"` : bin, ["--resume", session.sessionId], {
+      cwd,
+      stdio: "inherit",
+      ...(viaShell ? { shell: true } : {}),
+    });
     child.on("error", (error) => {
       console.error(`无法启动 claude：${error.message}（可用 CLAUDE_BIN 指定路径）`);
       resolvePromise(127);
