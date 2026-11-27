@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 import { normalizeTailscaleServeUrl, TAILSCALE_SERVE_URL } from "@claude-remote/daemon/pair";
 
@@ -58,7 +59,9 @@ export async function configureTailscaleServe(ctx: Context): Promise<void> {
     throw new Error("Serve 连不到本机 daemon。请保持 cr 运行。如果此前绑定了 Tailscale IP，请用 cr config set host 127.0.0.1，生效后再试。");
   }
 
-  const appBin = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+  const appBin = process.platform === "win32"
+    ? join(process.env.ProgramFiles?.trim() || "C:\\Program Files", "Tailscale", "tailscale.exe")
+    : "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
   const env = { ...process.env, TAILSCALE_BE_CLI: "1" };
   let bin = "tailscale";
   let status = spawnSync(bin, ["status", "--json", "--peers=false"], { env, encoding: "utf8", timeout: 5_000 });

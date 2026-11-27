@@ -9,6 +9,7 @@ import { readConfig } from "../src/config.js";
 import { claudeCandidates, countProjects, detectClaude, type DetectDeps } from "../src/detect.js";
 
 const base: DetectDeps = {
+  platform: "darwin",
   env: { PATH: "/usr/bin:/bin" },
   home: "/Users/u",
   loginShellWhich: () => undefined,
@@ -65,4 +66,26 @@ test("countProjects：只数目录；不存在返回 undefined", () => {
   writeFileSync(join(dir, "stray.txt"), "");
   assert.equal(countProjects(dir), 2);
   assert.equal(countProjects(join(dir, "missing")), undefined);
+});
+
+test("Windows 候选：PATH 里的 claude.exe、where、官方安装器目录；npm 垫片改取包内原生 exe", () => {
+  const npm = "C:\\Users\\u\\AppData\\Roaming\\npm";
+  const win: DetectDeps = {
+    platform: "win32",
+    env: { PATH: `C:\\Windows;${npm}`, APPDATA: "C:\\Users\\u\\AppData\\Roaming" },
+    home: "C:\\Users\\u",
+    whereClaude: () => `${npm}\\claude\r\n${npm}\\claude.cmd\r\n`,
+    npmPrefix: () => undefined,
+    // 只有 npm 目录下有垫片
+    fileExists: (p) => p.startsWith(`${npm}\\claude`),
+  };
+  const paths = claudeCandidates(win).map((c) => c.path);
+  assert.deepEqual(paths.slice(0, 3), [
+    "C:\\Windows\\claude.exe",
+    `${npm}\\claude.exe`,
+    `${npm}\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe`,
+  ]);
+  assert.ok(paths.includes("C:\\Users\\u\\.local\\bin\\claude.exe"));
+  assert.ok(paths.every((p) => p.toLowerCase().endsWith(".exe")), "不收 .cmd 垫片：SDK 与 Node 都不能直接执行");
+  assert.equal(paths.filter((p) => p.includes("node_modules")).length, 1, "同一个包内 exe 去重");
 });

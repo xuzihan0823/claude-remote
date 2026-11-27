@@ -231,7 +231,9 @@ export async function cmdLogs(ctx: Context): Promise<void> {
   mkdirSync(ctx.env.logDir, { recursive: true });
   touch(ctx.env.logFile);
   await new Promise<void>((resolvePromise) => {
-    const child = spawn("tail", ["-n", "80", "-F", ctx.env.logFile], { stdio: "inherit" });
+    const child = process.platform === "win32"
+      ? spawn("powershell", ["-NoProfile", "-Command", `Get-Content -LiteralPath '${ctx.env.logFile.replace(/'/g, "''")}' -Tail 80 -Wait`], { stdio: "inherit" })
+      : spawn("tail", ["-n", "80", "-F", ctx.env.logFile], { stdio: "inherit" });
     child.on("exit", () => resolvePromise());
     process.once("SIGINT", () => child.kill("SIGINT"));
   });
@@ -338,8 +340,10 @@ export async function cmdSetup(ctx: Context, binPath: string): Promise<void> {
   if (projects === undefined) console.log("  ~/.claude/projects 还不存在：先在终端用 claude 聊几句，会话就会出现在 cr 里");
   else console.log(`✓ 发现 ${projects} 个项目的 Claude Code 会话记录`);
 
-  if (ctx.env.mode === "repo") {
-    // npm 全局安装自带 cr 命令；源码运行时才需要软链
+  if (ctx.env.mode === "repo" && process.platform === "win32") {
+    // 创建符号链接需要管理员或开发者模式；源码运行直接用 pnpm cr 或 node packages/cli/bin/cr.mjs
+    console.log("  Windows 源码运行：跳过 ~/.local/bin/cr 链接，用 pnpm cr 或 node packages/cli/bin/cr.mjs 启动（npm 全局安装自带 cr）");
+  } else if (ctx.env.mode === "repo") {
     const binDir = join(homedir(), ".local", "bin");
     const link = join(binDir, "cr");
     mkdirSync(binDir, { recursive: true });

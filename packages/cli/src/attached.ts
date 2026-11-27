@@ -102,6 +102,7 @@ export class AttachedDaemon {
         env: { ...process.env, ...program.env },
         stdio: ["ignore", fd, fd],
         detached: true,
+        windowsHide: true, // Windows 上 detached 会新开控制台窗口
       });
       this.#child = child;
       if (child.pid === undefined) throw new Error(`无法启动 daemon：${program.args.join(" ")}`);

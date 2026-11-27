@@ -153,7 +153,10 @@ export function loadCliEnv(deps: LoadEnvDeps = {}): CliEnv {
   const reachable = host === "0.0.0.0" || host === "::" || host === "" ? "127.0.0.1" : host;
   const hostPart = reachable.includes(":") ? `[${reachable}]` : reachable;
 
-  const logDir = join(home, "Library", "Logs", "claude-remote");
+  // Windows 没有 ~/Library，日志放进 %LOCALAPPDATA%；其他平台保持原路径
+  const logDir = process.platform === "win32"
+    ? join(env.LOCALAPPDATA?.trim() || join(home, "AppData", "Local"), "claude-remote", "logs")
+    : join(home, "Library", "Logs", "claude-remote");
   return {
     mode,
     repoDir,
